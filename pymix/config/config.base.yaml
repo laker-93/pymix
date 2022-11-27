@@ -1,0 +1,6 @@
+---
+application_settings:
+  logging_level: INFO
+  app_name: pymix
+  app_host: 0.0.0.0
+  app_port: 8002

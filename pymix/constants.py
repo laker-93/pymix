@@ -1,0 +1,16 @@
+title = "pymix"
+version = "1.0"
+description = (
+    "Python API for consuming prices from Kafka topics"
+)
+kafka_settings = "kafka_settings"
+test_kafka_settings = "test_kafka_settings"
+kafka_check_timeout = "kafka_check_timeout"
+kafka_topic = "kafka_topic"
+kafka_bootstrap_server = "kafka_bootstrap_server"
+kafka_group_id = "kafka_group_id"
+db_settings = "db_settings"
+metadata_max_age_ms = "metadata_max_age_ms"
+max_n_rows_to_store = "max_n_rows_to_store"
+consume_ticker_quotes = "consume_ticker_quotes"
+cert_isins = "cert_isins"

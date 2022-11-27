@@ -1,0 +1,12 @@
+---
+app_env: dev
+db_settings:
+  conn_string: postgresql+asyncpg://postgres:Quack101@localhost:5432
+  sync_conn_string: postgresql://postgres:Quack101@localhost:5432
+  sql_alchemy_logging: 'False'
+  db_engine_echo: false
+navidrome:
+  host: http://localhost:4533
+  username: lajp
+  version: 1.16.1
+logs_directory: logs
