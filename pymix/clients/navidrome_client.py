@@ -1,7 +1,8 @@
 import logging
 import hashlib
 import random
-from typing import Tuple
+from typing import Tuple, List
+from pymix.model.playlist import Playlist
 
 from toredocore.providers.base_api_client import BaseAPIClient
 
@@ -50,11 +51,21 @@ class NavidromeClient(BaseAPIClient):
         })
         return url
 
-    def _parse_response(self, response: dict):
-        pass
+    def _get_playlists(self, response: dict) -> List[Playlist]:
+        resp_playlists = response['subsonic-response']['playlists']['playlist']
+        return [
+            Playlist(
+                name=playlist['name'],
+                n_of_songs=playlist['songCount'],
+                comment=playlist.get('comment', ''),
+                last_updated=playlist['changed'],
+                duration_s=playlist['duration']
+            ) for playlist in resp_playlists
+        ]
 
-    async def get_playlists(self) -> dict:
+    async def get_playlists(self) -> List[Playlist]:
         url = self._subsonic_format_url(f"{self._host}/rest/getPlaylists")
-
-        result = await self.get(url)
+        response = await self.get(url)
+        assert response
+        result = self._get_playlists(response)
         return result
