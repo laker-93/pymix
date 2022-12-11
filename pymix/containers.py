@@ -6,7 +6,7 @@ from dependency_injector import containers, providers
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from pymix.clients.navidrome_client import NavidromeClient
+from pymix.clients.subsonic_client import SubsonicClient
 from pymix.controllers.db_store_controller import DbStoreController
 from pymix.db_model.job_database_gateway import JobDatabaseGateway
 from pymix.factories.db_session_factory import DbSession
@@ -21,7 +21,7 @@ class Container(containers.DeclarativeContainer):
     aiohttp_session = providers.Resource(init_aiohttp_session)
 
     navidrome_client = providers.Factory(
-        NavidromeClient,
+        SubsonicClient,
         host=config.navidrome.host,
         session=aiohttp_session,
         username=config.navidrome.username,

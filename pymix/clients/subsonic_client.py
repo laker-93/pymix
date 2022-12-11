@@ -1,17 +1,19 @@
 import logging
 import hashlib
 import random
-from typing import Tuple, List
+from pathlib import Path
+from typing import Tuple, List, Optional
 from pymix.model.playlist import Playlist
 
 from toredocore.providers.base_api_client import BaseAPIClient
 
+from pymix.model.track import Track
 from pymix.utils.utility import add_url_params
 
 logger = logging.getLogger(__name__)
 
 
-class NavidromeClient(BaseAPIClient):
+class SubsonicClient(BaseAPIClient):
     def __init__(self, host, session, username, version):
         super().__init__(host, session)
         self._username = username
@@ -32,7 +34,7 @@ class NavidromeClient(BaseAPIClient):
         ).hexdigest(), salt
 
 
-    def _subsonic_format_url(self, url: str) -> str:
+    def _subsonic_format_url(self, url: str, params: Optional[dict] = None) -> str:
         """
         example:
         http://localhost:4533/rest/getStarred.view?u=lajp&p=konichiwalajp!&v=1.16.1&c=myapp
@@ -41,17 +43,22 @@ class NavidromeClient(BaseAPIClient):
         :return:
         """
         token, salt = self._calculate_token()
-        url = add_url_params(url + ".view?", {
+        required_params = {
             "u": self._username,
             "t": token,
             "s": salt,
             "v": self._version,
             "c": "myapp",
             "f": "json"
-        })
+        }
+        if params:
+            required_params.update(params)
+
+        url = add_url_params(url + ".view?", required_params)
         return url
 
-    def _get_playlists(self, response: dict) -> List[Playlist]:
+    @staticmethod
+    def _parse_playlists(response: dict) -> List[Playlist]:
         resp_playlists = response['subsonic-response']['playlists']['playlist']
         return [
             Playlist(
@@ -59,13 +66,41 @@ class NavidromeClient(BaseAPIClient):
                 n_of_songs=playlist['songCount'],
                 comment=playlist.get('comment', ''),
                 last_updated=playlist['changed'],
-                duration_s=playlist['duration']
+                duration_s=playlist['duration'],
+                subsonic_id=playlist['id']
             ) for playlist in resp_playlists
+        ]
+
+    @staticmethod
+    def _parse_tracks(response: dict) -> List[Track]:
+        resp_playlist = response['subsonic-response']['playlists']['playlist']['entry']
+        return [
+            Track(
+                name=entry['title'],
+                path=Path(entry['path'])
+            ) for entry in resp_playlist
         ]
 
     async def get_playlists(self) -> List[Playlist]:
         url = self._subsonic_format_url(f"{self._host}/rest/getPlaylists")
         response = await self.get(url)
         assert response
-        result = self._get_playlists(response)
+        result = self._parse_playlists(response)
         return result
+
+    async def get_playlist_tracks(self, playlist_id: str) -> List[Track]:
+        url = self._subsonic_format_url(f"{self._host}/rest/getPlaylist", params={"id": playlist_id})
+        response = await self.get(url)
+        assert response
+        tracks = self._parse_tracks(response)
+        return tracks
+
+    async def get_track(self, track_id: str):
+        url = self._subsonic_format_url(f"{self._host}/rest/getSong", params={"id": track_id})
+        response = await self.get(url)
+        return response
+
+    async def query(self):
+        url = self._subsonic_format_url(f"{self._host}/rest/search2", params={"query": "Burial"})
+        response = await self.get(url)
+        return response

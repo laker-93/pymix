@@ -1,11 +1,11 @@
 import datetime
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock
 import pytest
 
-from pymix.clients.navidrome_client import NavidromeClient
+from pymix.clients.subsonic_client import SubsonicClient
 from pymix.model.playlist import Playlist
 
-mock_navidrome_response = {'subsonic-response': {'status': 'ok', 'version': '1.16.1', 'type': 'navidrome',
+mock_subsonic_response = {'subsonic-response': {'status': 'ok', 'version': '1.16.1', 'type': 'navidrome',
                            'serverVersion': '0.48.0 (af5c2b5a)', 'playlists': {'playlist': [
             {'id': 'e824f4a8-2815-4f9d-87aa-0b8a84d02845', 'name': 'ambient-light', 'songCount': 1, 'duration': 229,
              'public': False, 'owner': 'lajp', 'created': '2022-11-29T18:22:08.1811484Z',
@@ -16,12 +16,12 @@ mock_navidrome_response = {'subsonic-response': {'status': 'ok', 'version': '1.1
             {'id': '99015bb5-cc58-4492-a5ee-6108f3acba41', 'name': 'techno-dark', 'songCount': 0, 'duration': 0,
              'public': True, 'owner': 'lajp', 'created': '2022-11-29T18:23:08.7731483Z',
              'changed': '2022-11-29T18:23:08.7732488Z'}]}}
-}
+                          }
 
 @pytest.mark.asyncio
 async def test_get_playlist():
-    navidrome_client = NavidromeClient(MagicMock(), MagicMock(), "mock_username", "mock_version")
-    navidrome_client.get = AsyncMock(return_value=mock_navidrome_response)
+    subsonic_client = SubsonicClient(MagicMock(), MagicMock(), "mock_username", "mock_version")
+    subsonic_client.get = AsyncMock(return_value=mock_subsonic_response)
     expected_playlists = [
         Playlist(name='ambient-light', n_of_songs=1, comment='',
                  last_updated=datetime.datetime(2022, 11, 29, 18, 23, 43, 311255, tzinfo=datetime.timezone.utc),
@@ -33,6 +33,6 @@ async def test_get_playlist():
                  last_updated=datetime.datetime(2022, 11, 29, 18, 23, 8, 773248, tzinfo=datetime.timezone.utc),
                  duration_s=0)
     ]
-    playlists = await navidrome_client.get_playlists()
+    playlists = await subsonic_client.get_playlists()
     assert expected_playlists == playlists
 

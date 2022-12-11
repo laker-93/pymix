@@ -13,18 +13,18 @@ class RekordboxClient:
         self._rekordbox_xml = RekordboxXml(str(self._xml_path))
 
     @staticmethod
-    def _get_folders_from_name(playlist_name: str) -> List[str]:
-        return playlist_name.split('-')[:-1]
+    def _get_folders_playlist_from_name(playlist_name: str) -> (List[str], str):
+        folders_playlist = playlist_name.split('-')
+        return folders_playlist[:-1], folders_playlist[-1]
 
     def _update_playlist(self, playlist: Playlist):
-        folders = self._get_folders_from_name(playlist.name)
-        for folder in folders:
-            pass
-            # go through folders calling
-            # folder = xml.add_playlist_folder("folder")
-            # folder = folder.add_playlist_folder("folder")
-            # until get to the child. Then
-        # folder.add_playlist(playlist_name)
+        folder_names, playlist_name = self._get_folders_playlist_from_name(playlist.name)
+        folder_name = folder_names.pop(0)
+        folder = self._rekordbox_xml.add_playlist_folder(folder_name)
+        # go through the folders, creating if they don't exist until reach the child folder. Then add playlist
+        for folder_name in folder_names:
+            folder = folder.add_playlist_folder(folder_name)
+        folder.add_playlist(playlist_name)
 
 
     def _create_folders(self, folders: List[str]) -> Node:
