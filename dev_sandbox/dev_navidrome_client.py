@@ -9,7 +9,7 @@ from pymix.registration import register_app
 
 @inject
 async def navidrome_api(
-        navidrome_client: SubsonicClient = Provide[Container.navidrome_client],
+        navidrome_client: SubsonicClient = Provide[Container.subsonic_client],
 ):
     await get_playlists(navidrome_client)
     await get_playlist_api(navidrome_client)

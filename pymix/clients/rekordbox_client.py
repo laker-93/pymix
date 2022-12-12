@@ -10,7 +10,13 @@ from pymix.model.playlist import Playlist
 class RekordboxClient:
     def __init__(self, xml_path: Path):
         self._xml_path = xml_path
-        self._rekordbox_xml = RekordboxXml(str(self._xml_path))
+        self._rekordbox_xml = None
+
+    def create_rekordbox_xml(self):
+        if not self._xml_path.is_file():
+            open(str(self._xml_path))
+        rekordbox_xml = RekordboxXml(str(self._xml_path))
+        self._rekordbox_xml = rekordbox_xml
 
     @staticmethod
     def _get_folders_playlist_from_name(playlist_name: str) -> (List[str], str):

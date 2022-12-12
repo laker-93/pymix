@@ -10,6 +10,9 @@ class PlaylistController:
         self._navidrome_client = navidrome_client
         self._rekordbox_client = rekordbox_client
 
+    def setup(self):
+        self._rekordbox_client.create_rekordbox_xml()
+
     def get_playlists(self) -> List[Playlist]:
         """
         Syncs the playlists from Navidrome to Rekordbox
@@ -24,3 +27,6 @@ class PlaylistController:
 
     def make_rekordbox_playlists(self, playlists: List[Playlist]):
         self._rekordbox_client.update_playlists(playlists)
+
+    async def get_healthcheck(self):
+        return True
