@@ -10,9 +10,6 @@ from fastapi import FastAPI
 from pymix import constants
 from pymix.containers import Container
 from pymix.routers import maintenance
-from pymix.utils import scheduled_jobs, scheduled_tasks
-from pymix.utils.utility import get_project_root
-
 
 def register_app(environment=None):
     if not environment:
@@ -36,7 +33,7 @@ def register_app(environment=None):
     container = Container()
     container.config.from_dict(app_config)
     container.init_resources()
-    container.wire(modules=[maintenance, scheduled_jobs, scheduled_tasks, sys.modules[__name__]])
+    container.wire(modules=[maintenance, sys.modules[__name__]])
 
     app.container = container
     return app, app_config
