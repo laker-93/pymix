@@ -1,14 +1,11 @@
 from pathlib import Path
 
-from toredocore.database.database_session_manager import DatabaseSessionManager
-from toredocore.database.generic_database_gateway import GenericDatabaseGateway
 from toredocore.providers.healthcheck.async_healthcheck_provider import AsyncHealthcheckProvider
 from toredocore.providers.healthcheck.healthcheck_dependency import HealthcheckDependency
 from dependency_injector import containers, providers
 
-from pymix.clients.rekordbox_client import RekordboxClient
 from pymix.clients.subsonic_client import SubsonicClient
-from pymix.controllers.playlist_controller import PlaylistController
+from pymix.controllers.rekordbox_xml_controller import RekordboxXMLFactory, RekordboxXMLController
 from pymix.factories.aiohttp_session_resource import init_aiohttp_session
 
 
@@ -25,18 +22,19 @@ class Container(containers.DeclarativeContainer):
         version=config.subsonic.version,
     )
 
-    rekordbox_client = providers.Factory(
-        RekordboxClient,
+
+    rekordbox_xml_factory = providers.Factory(
+        RekordboxXMLFactory,
         providers.Factory(
             Path,
             config.rekordbox.xml_path
         )
     )
 
-    playlist_controller = providers.Factory(
-        PlaylistController,
+    rekordbox_xml_controller = providers.Factory(
+        RekordboxXMLController,
         subsonic_client,
-        rekordbox_client
+        rekordbox_xml_factory
     )
 
     healthcheck_provider = providers.Resource(
@@ -47,7 +45,7 @@ class Container(containers.DeclarativeContainer):
             providers.Factory(
                 HealthcheckDependency,
                 name='db controller',
-                healthcheck_fn=playlist_controller.provided.get_healthcheck,
+                healthcheck_fn=rekordbox_controller.provided.get_healthcheck,
                 expected_return=True,
                 key_to_check='is_healthy',
                 capture_full_response=True
