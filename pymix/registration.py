@@ -9,14 +9,20 @@ from fastapi import FastAPI
 
 from pymix import constants
 from pymix.containers import Container
-from pymix.routers import maintenance
+from pymix.routers import maintenance, create_xml
 
-def register_app(environment=None):
-    if not environment:
-        parser = argparse.ArgumentParser()
-        parser.add_argument("-e", "--environment", default="dev")
-        args = parser.parse_args()
-        environment = args.environment
+
+def create_app():
+    app = FastAPI(
+        title=constants.title, version=constants.version, description=constants.description
+    )
+
+    app.include_router(maintenance.router)
+    app.include_router(create_xml.router)
+    return app
+
+
+def create_container(environment="dev"):
     app_config = get_config(environment)
 
     initialise_logger(
@@ -25,18 +31,11 @@ def register_app(environment=None):
         disable_file_handler=True
     )
 
-    app = FastAPI(
-        title=constants.title, version=constants.version, description=constants.description
-    )
-
-    app.include_router(maintenance.router)
     container = Container()
     container.config.from_dict(app_config)
     container.init_resources()
-    container.wire(modules=[maintenance, sys.modules[__name__]])
-
-    app.container = container
-    return app, app_config
+    container.wire(modules=[maintenance, create_xml, sys.modules[__name__]])
+    return container
 
 
 def get_config(environment: str) -> dict:

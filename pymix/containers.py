@@ -1,4 +1,5 @@
 from pathlib import Path
+import aiohttp
 
 from toredocore.providers.healthcheck.async_healthcheck_provider import AsyncHealthcheckProvider
 from toredocore.providers.healthcheck.healthcheck_dependency import HealthcheckDependency
@@ -12,9 +13,14 @@ from pymix.factories.aiohttp_session_resource import init_aiohttp_session
 class Container(containers.DeclarativeContainer):
     config = providers.Configuration()
 
-    aiohttp_session = providers.Resource(init_aiohttp_session)
+    aiohttp_session = providers.Resource(
+        init_aiohttp_session,
+        connector=providers.Factory(
+            aiohttp.TCPConnector, verify_ssl=False
+        )
+    )
 
-    subsonic_client = providers.Factory(
+    subsonic_client = providers.Singleton(
         SubsonicClient,
         host=config.subsonic.host,
         session=aiohttp_session,
@@ -44,8 +50,8 @@ class Container(containers.DeclarativeContainer):
         providers.List(
             providers.Factory(
                 HealthcheckDependency,
-                name='db controller',
-                healthcheck_fn=rekordbox_controller.provided.get_healthcheck,
+                name='rekordbox xml controller',
+                healthcheck_fn=rekordbox_xml_controller.provided.get_healthcheck,
                 expected_return=True,
                 key_to_check='is_healthy',
                 capture_full_response=True

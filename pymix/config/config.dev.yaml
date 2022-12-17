@@ -1,7 +1,7 @@
 ---
 app_env: dev
 subsonic:
-  host: http://localhost:4533
+  host: https://localhost/navidrome
   username: lajp
   version: 1.16.1
 rekordbox:

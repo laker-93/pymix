@@ -15,8 +15,9 @@ class RekordboxXMLController:
         self._rekordbox_xml_factory = rekordbox_xml_factory
         self._rekordbox_xml: Optional[RekordboxXml] = None
 
-    def setup(self, xml_path: Optional[Path] = None):
-        self._rekordbox_xml = self._rekordbox_xml_factory.create_rekordbox_xml(xml_path)
+    def create_xml(self, xml_path: Optional[Path] = None):
+        if self._rekordbox_xml is None:
+            self._rekordbox_xml = self._rekordbox_xml_factory.create_rekordbox_xml(xml_path)
 
     @staticmethod
     def _get_folders_playlist_from_name(playlist_name: str) -> (List[str], str):
@@ -54,9 +55,9 @@ class RekordboxXMLController:
             playlist.tracks = await self._subsonic_client.get_playlist_tracks(playlist.subsonic_id)
         return playlists
 
-    async def create_rekordbox_xml_from_subsonic_playlists(self, xml_path: Optional[Path], xml_output_path: Optional[Path]):
+    async def create_rekordbox_xml_from_subsonic_playlists(self, xml_path: Path, xml_output_path: Path):
         # todo this could be made a context manager to create, update then save the xml
-        self.setup(xml_path)
+        self.create_xml(xml_path)
         playlists = await self.get_playlists()
         # Given the Playlist data from Subsonic create the playlist directory structure in Rekordbox.
         for playlist in playlists:
@@ -64,5 +65,7 @@ class RekordboxXMLController:
 
         self._rekordbox_xml.save(str(xml_output_path))
 
-    async def get_healthcheck(self):
-        return True
+    async def get_healthcheck(self) -> dict:
+        return {
+            'is_healthy': True
+        }

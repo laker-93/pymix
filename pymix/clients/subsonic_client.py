@@ -1,4 +1,5 @@
 import logging
+import string
 import hashlib
 import random
 from pathlib import Path
@@ -22,13 +23,11 @@ class SubsonicClient(BaseAPIClient):
     @staticmethod
     def _calculate_token() -> Tuple[str, str]:
         """
-        generate salt of at least 6 chars
-        using hex, must have an int with at least
-        ceil(log_10(15**6)) = 8 significant figures
+        generate random salt of 6 chars
         :return: tuple(token, salt)
         """
-        salt = str(hex(int(random.random()*10**8)))[2:]
-        assert len(salt) >= 6
+        letters = string.ascii_lowercase
+        salt = ''.join(random.choice(letters) for _ in range(6))
         return hashlib.md5(
             f"konichiwalajp!{salt}".encode("utf-8")
         ).hexdigest(), salt
@@ -73,7 +72,7 @@ class SubsonicClient(BaseAPIClient):
 
     @staticmethod
     def _parse_tracks(response: dict) -> List[Track]:
-        resp_playlist = response['subsonic-response']['playlists']['playlist']['entry']
+        resp_playlist = response['subsonic-response']['playlist']['entry']
         return [
             Track(
                 name=entry['title'],
