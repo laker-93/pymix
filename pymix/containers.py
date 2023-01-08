@@ -8,6 +8,7 @@ from dependency_injector import containers, providers
 from pymix.clients.subsonic_client import SubsonicClient
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLFactory, RekordboxXMLController
 from pymix.factories.aiohttp_session_resource import init_aiohttp_session
+from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
 
 
 class Container(containers.DeclarativeContainer):
@@ -39,9 +40,14 @@ class Container(containers.DeclarativeContainer):
         )
     )
 
+    subsonic_orchestrator = providers.Factory(
+        SubsonicOrchestrator,
+        subsonic_client
+    )
+
     rekordbox_xml_controller = providers.Factory(
         RekordboxXMLController,
-        subsonic_client,
+        subsonic_orchestrator,
         rekordbox_xml_factory
     )
 

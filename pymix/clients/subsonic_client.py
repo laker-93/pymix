@@ -4,6 +4,9 @@ import hashlib
 import random
 from pathlib import Path
 from typing import Tuple, List, Optional
+
+import aiohttp
+
 from pymix.model.playlist import Playlist
 
 from toredocore.providers.base_api_client import BaseAPIClient
@@ -15,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class SubsonicClient(BaseAPIClient):
-    def __init__(self, host, session, username: str, version: str, music_path_base_to_add: str, music_path_base_to_remove: str):
+    def __init__(self, host: str, session: aiohttp.ClientSession, username: str, version: str, music_path_base_to_add: str, music_path_base_to_remove: str):
         super().__init__(host, session)
         self._username = username
         self._version = version

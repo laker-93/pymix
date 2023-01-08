@@ -9,13 +9,14 @@ from pymix.clients.subsonic_client import SubsonicClient
 from pymix.factories.rekordbox_xml_factory import RekordboxXMLFactory
 from pymix.model.playlist import Playlist
 from pymix.model.track import Track
+from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
 
 logger = logging.getLogger(__name__)
 
 
 class RekordboxXMLController:
-    def __init__(self, subsonic_client: SubsonicClient, rekordbox_xml_factory: RekordboxXMLFactory):
-        self._subsonic_client = subsonic_client
+    def __init__(self, subsonic_orchestrator: SubsonicOrchestrator, rekordbox_xml_factory: RekordboxXMLFactory):
+        self._subsonic_orchestrator = subsonic_orchestrator
         self._rekordbox_xml_factory = rekordbox_xml_factory
         self._rekordbox_xml: Optional[RekordboxXml] = None
 
@@ -28,11 +29,12 @@ class RekordboxXMLController:
         folders_playlist = playlist_name.split('-')
         return folders_playlist[:-1], folders_playlist[-1]
 
-    def _get_rekordbox_xml_playlists(self, root_playlists, rekordbox_playlists: List[Playlist]) -> None:
-        for playlist in root_playlists:
+    def _get_rekordbox_xml_playlists(self, xml_playlists: List[Node], rekordbox_playlists: List[Playlist]) -> None:
+        for playlist in xml_playlists:
             name = playlist.name
             track_ids = playlist.get_tracks()
             if not playlist.is_playlist:
+                # recurse through the folder structure until reach the playlist leaves
                 playlists = playlist.get_playlists()
                 self._get_rekordbox_xml_playlists(playlists, rekordbox_playlists)
                 continue
@@ -77,53 +79,46 @@ class RekordboxXMLController:
                     Album=track.album,
                     Genre=track.genre
                 )
-                logger.info(f"added track {str(track.path)}")
+                logger.debug(f"added track {str(track.path)}")
             except ValueError:
                 track_id = track.track_id
                 # must have the track_id set since the subsonic track must've necessarily been found in the rekordbox
                 # collection for this exception to have occurred.
                 assert track_id, f"track id none for {track}"
                 rekordbox_track = self._rekordbox_xml.get_track(TrackID=track_id)
-                logger.info(f"track already present, found at {str(rekordbox_track)}")
-            logger.info(f"track {rekordbox_track} added to {new_playlist}")
+                logger.debug(f"track already present, found at {str(rekordbox_track)}")
+            logger.debug(f"track {rekordbox_track} added to {new_playlist}")
             new_playlist.add_track(rekordbox_track.TrackID)
 
-    def _create_playlist_folders(self, folder_names):
+    def _get_playlist_folder(self, playlist_folder_name: str) -> Optional[Node]:
+        playlists = self._rekordbox_xml._root_node.get_playlists()
+        playlist_folder = None
+        for playlist in playlists:
+            if playlist.name == playlist_folder_name and playlist.is_folder:
+                playlist_folder = playlist
+        return playlist_folder
+
+    def _create_playlist_folders(self, folder_names: List[str]) -> Node:
         folder_name = folder_names.pop(0)
-        folder = self._rekordbox_xml.add_playlist_folder(folder_name)
+        # todo extend pyrekordbox to provide a get_playlist_folder api that uses the below code
+        playlist_folder = self._get_playlist_folder(folder_name)
+        if not playlist_folder:
+            playlist_folder = self._rekordbox_xml.add_playlist_folder(folder_name)
         # go through the folders, creating if they don't exist until reach the child folder. Then add playlist
         for folder_name in folder_names:
-            folder = folder.add_playlist_folder(folder_name)
-        return folder
-
-    async def get_subsonic_playlists(self) -> List[Playlist]:
-        """
-        Creates the Playlists from Subsonic queries
-        :return:
-        """
-        playlists = await self._subsonic_client.get_playlists()
-        # get all playlists to find their ids.
-        # for each playlist, get the playlist and iterate through to find the tracks
-        for playlist in playlists:
-            playlist.tracks = await self._subsonic_client.get_playlist_tracks(playlist.subsonic_id)
-        return playlists
+            playlist_folder = playlist_folder.add_playlist_folder(folder_name)
+        return playlist_folder
 
     async def create_rekordbox_xml_from_subsonic_playlists(self, xml_path: Path, xml_output_path: Path):
         # todo this could be made a context manager to create, update then save the xml
         self.create_xml(xml_path)
 
+        subsonic_playlists = await self._subsonic_orchestrator.get_subsonic_playlists()
+        subsonic_tracks = await self._subsonic_orchestrator.get_subsonic_tracks()
 
-        subsonic_playlists = await self.get_subsonic_playlists()
-        subsonic_tracks = []
-        for subsonic_playlist in subsonic_playlists:
-            subsonic_tracks.extend(
-                subsonic_playlist.tracks
-            )
-
-
-        root_playlists = self._rekordbox_xml.root_playlist_folder.get_playlists()
+        all_playlists: List[Node] = self._rekordbox_xml.root_playlist_folder.get_playlists()
         rekordbox_playlists = []
-        self._get_rekordbox_xml_playlists(root_playlists, rekordbox_playlists)
+        self._get_rekordbox_xml_playlists(all_playlists, rekordbox_playlists)
         rekordbox_tracks_unparsed = self._rekordbox_xml.get_tracks()
         rekordbox_tracks = []
         for rekordbox_track in rekordbox_tracks_unparsed:
@@ -137,7 +132,6 @@ class RekordboxXMLController:
                     track_id=rekordbox_track.TrackID
                 )
             )
-
 
         # If a track in the subsonic set is already present in rekordbox then must remove it before its playlist can be
         # updated. Need the rekordbox TrackID to do this. Therefore, for those subsonic tracks that are already in
