@@ -4,15 +4,15 @@ from dependency_injector.wiring import inject, Provide
 
 from pymix.containers import Container
 from pymix.clients.subsonic_client import SubsonicClient
-from pymix.registration import create_app
+from pymix.registration import create_app, create_container
 
 
 @inject
 async def navidrome_api(
         navidrome_client: SubsonicClient = Provide[Container.subsonic_client],
 ):
-    await get_playlists(navidrome_client)
-    await get_playlist_api(navidrome_client)
+    #await get_playlists(navidrome_client)
+    #await get_playlist_api(navidrome_client)
     _id = "b616a435ee5ef00a3a927913961902f3"
     print("get track")
     resp = await navidrome_client.get_track(track_id=_id)
@@ -30,7 +30,8 @@ async def get_playlists(navidrome_client):
     print(resp)
 
 if __name__ == "__main__":
-    app, app_config = create_app('dev')
-    app.container.wire(modules=[__name__])
+    app = create_app()
+    container = create_container()
+    container.wire(modules=[__name__])
     loop = asyncio.get_event_loop()
     loop.run_until_complete(navidrome_api())

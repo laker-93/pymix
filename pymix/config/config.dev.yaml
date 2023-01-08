@@ -4,6 +4,8 @@ subsonic:
   host: https://localhost/navidrome
   username: lajp
   version: 1.16.1
+  music_path_base_to_remove: music
+  music_path_base_to_add: /Users/lajp/Music
 rekordbox:
   xml_path: /Users/lajp/rekordbox/rekordbox.xml
 logs_directory: logs

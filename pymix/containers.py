@@ -26,6 +26,8 @@ class Container(containers.DeclarativeContainer):
         session=aiohttp_session,
         username=config.subsonic.username,
         version=config.subsonic.version,
+        music_path_base_to_add=config.subsonic.music_path_base_to_add,
+        music_path_base_to_remove=config.subsonic.music_path_base_to_remove
     )
 
 

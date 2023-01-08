@@ -9,7 +9,7 @@ from pymix.model.playlist import Playlist
 from pymix.model.track import Track
 
 
-def mock_get_playlist_tracks(subsonic_id) -> List[Track]:
+async def mock_get_playlist_tracks(subsonic_id) -> List[Track]:
     if subsonic_id == '4b421baf-21b7-4238-966e-c8f03e5dd5c2':
         tracks = [Track(name='Volya', path=PosixPath('Szare/Volya _ Action Five/Volya.mp3'))]
     elif subsonic_id == '43fdb143-4b87-4224-a50c-fef2e2ce9763':
@@ -28,34 +28,34 @@ def mock_get_playlist_tracks(subsonic_id) -> List[Track]:
     return tracks
 
 
-@pytest.mark.anyio
-async def test_create_rekordbox_xml_from_subsonic_playlists(container):
-    # todo break this out into a test for get_playlists()
-    mock_subsonic_client = mock.AsyncMock()
-    mock_subsonic_client.get_playlists = mock.AsyncMock(
-        return_value=[
-            Playlist(name='UK-Funky', n_of_songs=1, comment='',
-                     last_updated=datetime.datetime(2022, 12, 15, 12, 56, 39, tzinfo=datetime.timezone.utc),
-                     duration_s=371, subsonic_id='4b421baf-21b7-4238-966e-c8f03e5dd5c2',
-                     ),
-            Playlist(name='hardcore', n_of_songs=1, comment='lofi',
-                     last_updated=datetime.datetime(2022, 12, 4, 8, 40, 30, tzinfo=datetime.timezone.utc),
-                     duration_s=377, subsonic_id='43fdb143-4b87-4224-a50c-fef2e2ce9763',
-                     ),
-            Playlist(name='techno-dark', n_of_songs=4, comment='',
-                     last_updated=datetime.datetime(2022, 12, 15, 14, 24, 42, tzinfo=datetime.timezone.utc),
-                     duration_s=1373, subsonic_id='99015bb5-cc58-4492-a5ee-6108f3acba41',
-                     )
+@pytest.fixture
+def mock_playlists() -> List[Playlist]:
+    return [
+        Playlist(name='UK-Funky', n_of_songs=1, comment='',
+                 last_updated=datetime.datetime(2022, 12, 15, 12, 56, 39, tzinfo=datetime.timezone.utc),
+                 duration_s=371, subsonic_id='4b421baf-21b7-4238-966e-c8f03e5dd5c2',
+                 ),
+        Playlist(name='hardcore', n_of_songs=1, comment='lofi',
+                 last_updated=datetime.datetime(2022, 12, 4, 8, 40, 30, tzinfo=datetime.timezone.utc),
+                 duration_s=377, subsonic_id='43fdb143-4b87-4224-a50c-fef2e2ce9763',
+                 ),
+        Playlist(name='techno-dark', n_of_songs=4, comment='',
+                 last_updated=datetime.datetime(2022, 12, 15, 14, 24, 42, tzinfo=datetime.timezone.utc),
+                 duration_s=1373, subsonic_id='99015bb5-cc58-4492-a5ee-6108f3acba41',
+                 )
+    ]
 
-        ]
-    )
+
+@pytest.mark.anyio
+async def test_create_rekordbox_xml_from_subsonic_playlists(container, mock_playlists):
+    mock_subsonic_client = mock.AsyncMock()
+    mock_subsonic_client.get_playlists = mock.AsyncMock(return_value=mock_playlists)
     mock_subsonic_client.get_playlist_tracks = mock_get_playlist_tracks
 
     mock_rekordbox_xml_factory = mock.MagicMock()
 
     mock_xml_path = 'foo'
     mock_xml_output_path = 'foo'
-
     with container.subsonic_client.override(
             mock_subsonic_client
     ) as _, container.rekordbox_xml_factory.override(

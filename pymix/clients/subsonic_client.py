@@ -15,10 +15,13 @@ logger = logging.getLogger(__name__)
 
 
 class SubsonicClient(BaseAPIClient):
-    def __init__(self, host, session, username, version):
+    def __init__(self, host, session, username: str, version: str, music_path_base_to_add: str, music_path_base_to_remove: str):
         super().__init__(host, session)
         self._username = username
         self._version = version
+        self._music_path_base_to_add = music_path_base_to_add.rstrip('/')
+        cleaned_music_path_base_to_remove = '/' + music_path_base_to_remove.rstrip('/').lstrip('/')
+        self._music_path_base_to_remove = cleaned_music_path_base_to_remove
 
     @staticmethod
     def _calculate_token() -> Tuple[str, str]:
@@ -70,13 +73,15 @@ class SubsonicClient(BaseAPIClient):
             ) for playlist in resp_playlists
         ]
 
-    @staticmethod
-    def _parse_tracks(response: dict) -> List[Track]:
+    def _parse_tracks(self, response: dict) -> List[Track]:
         resp_playlist = response['subsonic-response']['playlist']['entry']
         return [
             Track(
                 name=entry['title'],
-                path=Path(entry['path'])
+                artist=entry['artist'],
+                path=Path(f"{self._music_path_base_to_add}/{entry['path'].lstrip(self._music_path_base_to_remove)}"),
+                album=entry['album'],
+                genre=entry.get('genre')
             ) for entry in resp_playlist
         ]
 
