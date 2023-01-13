@@ -7,11 +7,11 @@ from typing import Tuple, List, Optional
 
 import aiohttp
 
-from pymix.model.playlist import Playlist
+from pymix.model.subboxplaylist import SubBoxPlaylist
 
 from toredocore.providers.base_api_client import BaseAPIClient
 
-from pymix.model.track import Track
+from pymix.model.subboxtrack import SubBoxTrack
 from pymix.utils.utility import add_url_params
 
 logger = logging.getLogger(__name__)
@@ -63,10 +63,10 @@ class SubsonicClient(BaseAPIClient):
         return url
 
     @staticmethod
-    def _parse_playlists(response: dict) -> List[Playlist]:
+    def _parse_playlists(response: dict) -> List[SubBoxPlaylist]:
         resp_playlists = response['subsonic-response']['playlists']['playlist']
         return [
-            Playlist(
+            SubBoxPlaylist(
                 name=playlist['name'],
                 n_of_songs=playlist['songCount'],
                 comment=playlist.get('comment', ''),
@@ -76,10 +76,10 @@ class SubsonicClient(BaseAPIClient):
             ) for playlist in resp_playlists
         ]
 
-    def _parse_tracks(self, response: dict) -> List[Track]:
+    def _parse_tracks(self, response: dict) -> List[SubBoxTrack]:
         resp_playlist = response['subsonic-response']['playlist']['entry']
         return [
-            Track(
+            SubBoxTrack(
                 name=entry['title'],
                 artist=entry['artist'],
                 path=Path(f"{self._music_path_base_to_add}/{entry['path'].lstrip(self._music_path_base_to_remove)}"),
@@ -88,14 +88,19 @@ class SubsonicClient(BaseAPIClient):
             ) for entry in resp_playlist
         ]
 
-    async def get_playlists(self) -> List[Playlist]:
+    async def get_playlists(self) -> List[SubBoxPlaylist]:
         url = self._subsonic_format_url(f"{self._host}/rest/getPlaylists")
         response = await self.get(url)
         assert response
         result = self._parse_playlists(response)
         return result
 
-    async def get_playlist_tracks(self, playlist_id: str) -> List[Track]:
+    async def create_playlists(self, subbox_playlists: List[SubBoxPlaylist]):
+        for playlist in subbox_playlists:
+            _id = None
+            self._subsonic_format_url(f"{self._host}/rest/createPlaylist", params={"name": playlist.name, "songId": _id})
+
+    async def get_playlist_tracks(self, playlist_id: str) -> List[SubBoxTrack]:
         url = self._subsonic_format_url(f"{self._host}/rest/getPlaylist", params={"id": playlist_id})
         response = await self.get(url)
         assert response

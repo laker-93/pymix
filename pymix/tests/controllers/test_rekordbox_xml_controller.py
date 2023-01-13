@@ -5,23 +5,23 @@ from unittest import mock
 import pytest
 
 from pymix.tests.fixtures.container import container  # noqa
-from pymix.model.playlist import Playlist
-from pymix.model.track import Track
+from pymix.model.subboxplaylist import SubBoxPlaylist
+from pymix.model.subboxtrack import SubBoxTrack
 
 
-async def mock_get_playlist_tracks(subsonic_id) -> List[Track]:
+async def mock_get_playlist_tracks(subsonic_id) -> List[SubBoxTrack]:
     if subsonic_id == '4b421baf-21b7-4238-966e-c8f03e5dd5c2':
-        tracks = [Track(name='Volya', path=PosixPath('Szare/Volya _ Action Five/Volya.mp3'))]
+        tracks = [SubBoxTrack(name='Volya', path=PosixPath('Szare/Volya _ Action Five/Volya.mp3'))]
     elif subsonic_id == '43fdb143-4b87-4224-a50c-fef2e2ce9763':
-        tracks = [Track(name='Flagship', path=PosixPath('Blu Peter/[Unknown Album]/Flagship.mp3'))]
+        tracks = [SubBoxTrack(name='Flagship', path=PosixPath('Blu Peter/[Unknown Album]/Flagship.mp3'))]
     elif subsonic_id == '99015bb5-cc58-4492-a5ee-6108f3acba41':
-        tracks = [Track(name='Hush Now', path=PosixPath('Nene H/Beast EP/Hush Now.mp3')),
-                  Track(name='Hush Now (VTSS Remix)',
-                        path=PosixPath('Nene H/Beast EP/Hush Now (VTSS Remix).mp3')),
-                  Track(name='So Cute!! (Schiere Remix)',
-                        path=PosixPath('Ayako Mori/So Cute!!/So Cute!! (Schiere Remix).mp3')),
-                  Track(name='Apnea (Original mix)',
-                        path=PosixPath('Oisel/Entroterra EP/Apnea (Original mix).mp3'))
+        tracks = [SubBoxTrack(name='Hush Now', path=PosixPath('Nene H/Beast EP/Hush Now.mp3')),
+                  SubBoxTrack(name='Hush Now (VTSS Remix)',
+                              path=PosixPath('Nene H/Beast EP/Hush Now (VTSS Remix).mp3')),
+                  SubBoxTrack(name='So Cute!! (Schiere Remix)',
+                              path=PosixPath('Ayako Mori/So Cute!!/So Cute!! (Schiere Remix).mp3')),
+                  SubBoxTrack(name='Apnea (Original mix)',
+                              path=PosixPath('Oisel/Entroterra EP/Apnea (Original mix).mp3'))
                   ]
     else:
         raise Exception(f'subsonic id {subsonic_id} has no tracks hardcoded in mock function')
@@ -29,20 +29,20 @@ async def mock_get_playlist_tracks(subsonic_id) -> List[Track]:
 
 
 @pytest.fixture
-def mock_playlists() -> List[Playlist]:
+def mock_playlists() -> List[SubBoxPlaylist]:
     return [
-        Playlist(name='UK-Funky', n_of_songs=1, comment='',
-                 last_updated=datetime.datetime(2022, 12, 15, 12, 56, 39, tzinfo=datetime.timezone.utc),
-                 duration_s=371, subsonic_id='4b421baf-21b7-4238-966e-c8f03e5dd5c2',
-                 ),
-        Playlist(name='hardcore', n_of_songs=1, comment='lofi',
-                 last_updated=datetime.datetime(2022, 12, 4, 8, 40, 30, tzinfo=datetime.timezone.utc),
-                 duration_s=377, subsonic_id='43fdb143-4b87-4224-a50c-fef2e2ce9763',
-                 ),
-        Playlist(name='techno-dark', n_of_songs=4, comment='',
-                 last_updated=datetime.datetime(2022, 12, 15, 14, 24, 42, tzinfo=datetime.timezone.utc),
-                 duration_s=1373, subsonic_id='99015bb5-cc58-4492-a5ee-6108f3acba41',
-                 )
+        SubBoxPlaylist(name='UK-Funky', n_of_songs=1, comment='',
+                       last_updated=datetime.datetime(2022, 12, 15, 12, 56, 39, tzinfo=datetime.timezone.utc),
+                       duration_s=371, subsonic_id='4b421baf-21b7-4238-966e-c8f03e5dd5c2',
+                       ),
+        SubBoxPlaylist(name='hardcore', n_of_songs=1, comment='lofi',
+                       last_updated=datetime.datetime(2022, 12, 4, 8, 40, 30, tzinfo=datetime.timezone.utc),
+                       duration_s=377, subsonic_id='43fdb143-4b87-4224-a50c-fef2e2ce9763',
+                       ),
+        SubBoxPlaylist(name='techno-dark', n_of_songs=4, comment='',
+                       last_updated=datetime.datetime(2022, 12, 15, 14, 24, 42, tzinfo=datetime.timezone.utc),
+                       duration_s=1373, subsonic_id='99015bb5-cc58-4492-a5ee-6108f3acba41',
+                       )
     ]
 
 

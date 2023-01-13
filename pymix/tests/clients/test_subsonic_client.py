@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from pymix.clients.subsonic_client import SubsonicClient
-from pymix.model.playlist import Playlist
+from pymix.model.subboxplaylist import SubBoxPlaylist
 
 mock_subsonic_response = {'subsonic-response': {'status': 'ok', 'version': '1.16.1', 'type': 'navidrome',
                            'serverVersion': '0.48.0 (af5c2b5a)', 'playlists': {'playlist': [
@@ -23,15 +23,15 @@ async def test_get_playlist():
     subsonic_client = SubsonicClient(MagicMock(), MagicMock(), "mock_username", "mock_version", "foo", "bar")
     subsonic_client.get = AsyncMock(return_value=mock_subsonic_response)
     expected_playlists = [
-        Playlist(name='ambient-light', n_of_songs=1, comment='',
-                 last_updated=datetime.datetime(2022, 11, 29, 18, 23, 43, 311255, tzinfo=datetime.timezone.utc),
-                 duration_s=229, subsonic_id='e824f4a8-2815-4f9d-87aa-0b8a84d02845'),
-        Playlist(name='grime', n_of_songs=1, comment='dark',
-                 last_updated=datetime.datetime(2022, 11, 29, 18, 24, 3, 149269, tzinfo=datetime.timezone.utc),
-                 duration_s=210, subsonic_id='fc052e84-1ee7-4e26-8180-911cc928c759'),
-        Playlist(name='techno-dark', n_of_songs=0, comment='',
-                 last_updated=datetime.datetime(2022, 11, 29, 18, 23, 8, 773248, tzinfo=datetime.timezone.utc),
-                 duration_s=0, subsonic_id='99015bb5-cc58-4492-a5ee-6108f3acba41')
+        SubBoxPlaylist(name='ambient-light', n_of_songs=1, comment='',
+                       last_updated=datetime.datetime(2022, 11, 29, 18, 23, 43, 311255, tzinfo=datetime.timezone.utc),
+                       duration_s=229, subsonic_id='e824f4a8-2815-4f9d-87aa-0b8a84d02845'),
+        SubBoxPlaylist(name='grime', n_of_songs=1, comment='dark',
+                       last_updated=datetime.datetime(2022, 11, 29, 18, 24, 3, 149269, tzinfo=datetime.timezone.utc),
+                       duration_s=210, subsonic_id='fc052e84-1ee7-4e26-8180-911cc928c759'),
+        SubBoxPlaylist(name='techno-dark', n_of_songs=0, comment='',
+                       last_updated=datetime.datetime(2022, 11, 29, 18, 23, 8, 773248, tzinfo=datetime.timezone.utc),
+                       duration_s=0, subsonic_id='99015bb5-cc58-4492-a5ee-6108f3acba41')
     ]
     playlists = await subsonic_client.get_playlists()
     assert expected_playlists == playlists

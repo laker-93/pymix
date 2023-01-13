@@ -5,7 +5,7 @@ from pydantic import dataclasses
 
 
 @dataclasses.dataclass
-class Track:
+class SubBoxTrack:
     name: str
     artist: str
     path: Path
