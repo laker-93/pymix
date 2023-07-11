@@ -1,13 +1,8 @@
-import datetime
-from pathlib import PosixPath
-from typing import List
 from unittest import mock
 import pytest
 
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
 from pymix.tests.fixtures.container import container  # noqa
-from pymix.model.subboxplaylist import SubBoxPlaylist
-from pymix.model.subboxtrack import SubBoxTrack
 
 
 @pytest.mark.anyio
@@ -45,6 +40,6 @@ async def test_create_rekordbox_xml_from_subsonic_playlists(container, mock_play
         # todo not sure why this resource needs awaiting?
         rekordbox_xml_controller = await container.rekordbox_xml_controller()
         await rekordbox_xml_controller.create_rekordbox_xml_from_subsonic_playlists(mock_xml_path, mock_xml_output_path)
-    calls = mock_rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist
-    # todo add to this test
-    assert mock_rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist.call_count == 6
+    assert mock_rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist.call_count == len(
+        playlist_a_tracks + playlist_b_tracks + playlist_c_tracks
+    )

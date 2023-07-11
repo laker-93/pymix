@@ -92,7 +92,10 @@ class SubsonicClient(BaseAPIClient):
         url = self._subsonic_format_url(f"{self._host}/rest/getPlaylists")
         response = await self.get(url)
         assert response
-        result = self._parse_playlists(response)
+        try:
+            result = self._parse_playlists(response)
+        except KeyError:
+            logger.error("no playlists found in navidrome")
         return result
 
     async def create_playlists(self, subbox_playlists: List[SubBoxPlaylist]):

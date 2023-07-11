@@ -31,7 +31,7 @@ class RekordboxXMLController:
         for track in subsonic_playlist.tracks:
             self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(track, playlist)
 
-    async def create_rekordbox_xml_from_subsonic_playlists(self, xml_path: Path, xml_output_path: Path):
+    async def create_rekordbox_xml_from_subsonic_playlists(self, xml_path: Optional[Path], xml_output_path: Path):
         # todo this could be made a context manager to create, update then save the xml
         self._rekordbox_xml_orchestrator.create_xml(xml_path)
 
@@ -60,6 +60,9 @@ class RekordboxXMLController:
         self._rekordbox_xml_orchestrator.create_xml(xml_path)
         rekordbox_xml_playlists = self._rekordbox_xml_orchestrator.get_all_xml_playlists()
         subbox_playlists = self._rekordbox_xml_orchestrator.get_subbox_playlists_from_rekordbox_xml_playlists(rekordbox_xml_playlists)
+        print(subbox_playlists)
+        # could consider copying the locations of the tracks from the rekordbox_xml_playlist to the navidrome folder?
+        
         # the next bit of uploading these to navidrome is non trivial. Navidrome does not support file upload.
         # have to look into syncing navidrome from a cloud drive and uploading songs to the cloud drive then triggering
         # a navidrome refresh.

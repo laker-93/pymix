@@ -1,6 +1,7 @@
 aiohttp
 aiokafka
 fastapi
+uvicorn[standard]
 argparse
 dependency-injector
 asynctest

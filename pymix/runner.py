@@ -25,7 +25,7 @@ async def main(loop, app_config: Dict = Provide[Container.config]):
 
 
 if __name__ == '__main__':
-    container = create_container()
+    container = create_container('dev')
     container.wire(modules=[__name__])
     loop = asyncio.get_event_loop()
     try:

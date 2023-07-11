@@ -4,6 +4,6 @@ from pymix.registration import create_container
 
 
 @pytest.fixture
-def container():
+async def container():
     container = create_container()
     yield container

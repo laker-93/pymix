@@ -14,8 +14,10 @@ class RekordboxXMLFactory:
     ) -> RekordboxXml:
         xml_path = xml_path if xml_path else self._xml_path
         if not xml_path.is_file():
-            open(str(xml_path), 'w')
-        rekordbox_xml = RekordboxXml(str(xml_path))
+            xml_path_str = ""
+        else:
+            xml_path_str = str(xml_path)
+        rekordbox_xml = RekordboxXml(xml_path_str)
         # TODO submit PR for this work around bug
         track_ids = rekordbox_xml.get_track_ids()
         if track_ids:

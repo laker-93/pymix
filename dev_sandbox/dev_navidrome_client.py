@@ -29,9 +29,20 @@ async def get_playlists(navidrome_client):
     resp = await navidrome_client.get_playlists()
     print(resp)
 
-if __name__ == "__main__":
+async def get_playlist_tracks(navidrome_client, playlist_id):
+
+    print("get playlists")
+    resp = await navidrome_client.get_playlists()
+    print(resp)
+
+async def main():
     app = create_app()
     container = create_container()
     container.wire(modules=[__name__])
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(navidrome_api())
+    subsonic_client = await container.subsonic_client()
+    playlists = await get_playlists(subsonic_client)
+    print(playlists)
+
+if __name__ == "__main__":
+    asyncio.run(main())
