@@ -1,83 +1,24 @@
-# Fundamental bot
+# pymix
 
-Fundamental bot swagger home page:
+depends on navidrome
+must enable 'report real path' option in navidrome
+settings -> players -> click on name of player -> toggle on option for 'report real path'
+this is so that pymix can get the real path of a track from what's in the navidrome app and map it to the track's full path on disk so that it can be properly loaded in to the rekordbox xml
 
-todo
+## create navidrome structure from rekordbox
+create the navidrome collection and playlist structure from a rekordbox collection
+1. backup rekordbox collection
+   2. file -> Library -> Backup Library -> when asked if you want to backup music files as well, click yes.
+   3. this creates a 'rekordbox_bak' directory with your music files in
+4. create rekordbox xml with the meta data of your playlist structure in rekordbox
+   5. file -> export collection in xml format
+6. Now need to provide both of these to subbox.
+7. subbox will take the folder containing the music files and tag it and import it to the data directory navidrome uses
+   8. This uses beets for the import
+9. The tracks now appear in navidrome UI.
+10. subbox then takes the rekordbox xml and creates playlists in navidrome. I
+11. It matches the tracks from the XML against the library imported by beets and moves and tracks in to the matched playlists
 
-## install
-
-Install postgres
-
-brew install postgresql
-
-check binaries are in path with:
-
-"which pg_config"
-
-if not in path, find postgres  and run commands
-
-export PG_HOME=/Library/PostgreSQL/12
-export PATH=$PATH:$PG_HOME/bin
-
-First install psycopg-binary:
-
-pip install psycopg2-binary --force-reinstall --no-cache-dir
-
-Then install psycopg2:
-
-pip install psycopg2 --force-reinstall --no-cache-dir
-
-Now try running app.
-
-If have error:
-
-ImportError: dlopen(/Users/lajp/workspace/python/FundamentalBot/venv/lib/python3.9/site-packages/psycopg2/_psycopg.cpython-39-darwin.so, 2): Library not loaded: libssl.1.1.dylib
-  Referenced from: /Users/lajp/workspace/python/FundamentalBot/venv/lib/python3.9/site-packages/psycopg2/_psycopg.cpython-39-darwin.so
-  Reason: image not found
-
-May need to install openssl
-
-brew install openssl@1.1
-
-Find where the library is then add to path with:
-
-export DYD_LIBRARY_PATH=$DYD_LIBRARY_PATH:/usr/local/opt/openssl\@1.1/lib/
-
-
-## application logic
-
-1. download portfolio (IB, HL, VGRD, COINBASE etc)
-   1. portfolio = list of tickers and their weights
-2. return portfolio
-3. run portfolio through analyzer (fundamentals, sharpe ratio, etc)
-   1. stock calculator
-      1. get_sector()
-      2. get_region()
-      3. get_covar()
-   2. port calculator
-      1. get_sharpe_ratio()
-      2. get_frontier()
-4. display results
-5. Have scheduled job that does the above nightly
-6. can trigger emails on certain events (cross threshold, release of earnings reports etc)
-
-## Healthcheck
-
-The healthcheck GET API can be run via the app's swagger page:
-
-`http://<app_host>:<app_port>/docs#`
-
-Or via the following API:
-
-`http://ecs-fargate-services-1022434680.eu-west-2.elb.amazonaws.com:81/healthcheck`
-
-The service is healthy if it can connect to the prices db, its kafka consumer has not encountered an error and it can produce and consume a test message to kafka.
-If these conditions are satisfied, the returned json from the healthcheck will contain:
-
-`"is_healthy": true`
-
-The healthcheck json also contains the timestamp of the earliest and latest ticker that has been consumed from kafka and
-saved to the db. If the system is operating correctly then these timestamps should be no more than 2 minutes apart from
-each other and within the last two minutes of the current UTC time during market open hours. Outside of marker open hours,
-the kafka consumer will continue to consume prices however the db controller will not store a price in the db if it is the
-same as the last stored price for that ticker. This avoids storing duplicate prices in the db outside of market hours.
+## todo
+1. during beets import stage, user needs to provide input to resolve imports
+2. what to do if subbox cannot find a song in navidrome that matches a track in the rekordbox xml? Need a way for user to manually specify

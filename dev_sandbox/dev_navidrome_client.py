@@ -29,6 +29,11 @@ async def get_playlists(navidrome_client):
     resp = await navidrome_client.get_playlists()
     print(resp)
 
+async def create_playlist(navidrome_client):
+    print("get playlists")
+    resp = await navidrome_client.get_playlists()
+    print(resp)
+
 async def get_playlist_tracks(navidrome_client, playlist_id):
 
     print("get playlists")

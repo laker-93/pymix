@@ -56,17 +56,20 @@ class RekordboxXMLController:
         # todo remove any playlists that have no tracks
         self._rekordbox_xml_orchestrator.save_xml(xml_output_path)
 
-    async def create_subsonic_playlists_from_xml(self, xml_path: Path):
+    async def create_subsonic_playlists_from_xml(self, xml_path: Path, audio_files_to_import: Path):
+        # 1. invoke beets import on the audio files to import
+        # 2. resolve import issues
+        # 3. beets should import in to the directory navidrome is working off. Once above is complete, check tracks are
+        # in navidromes view by using the 'query'/'getSong' apis for each track.
+        # 4. create internal subbox playlist and tracks as below
         self._rekordbox_xml_orchestrator.create_xml(xml_path)
         rekordbox_xml_playlists = self._rekordbox_xml_orchestrator.get_all_xml_playlists()
         subbox_playlists = self._rekordbox_xml_orchestrator.get_subbox_playlists_from_rekordbox_xml_playlists(rekordbox_xml_playlists)
         print(subbox_playlists)
-        # could consider copying the locations of the tracks from the rekordbox_xml_playlist to the navidrome folder?
-        
-        # the next bit of uploading these to navidrome is non trivial. Navidrome does not support file upload.
-        # have to look into syncing navidrome from a cloud drive and uploading songs to the cloud drive then triggering
-        # a navidrome refresh.
-        # see github hurlenko/filebrowser
+        # 5. given the subbox info, create the playlists in navidrome using subsonic api
+        # 6. match the tracks in the subbox info against the tracks found from the query in 3. move the matched tracks
+        # into the appropriate playlists.
+
 
     async def get_healthcheck(self) -> dict:
         return {

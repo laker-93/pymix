@@ -66,7 +66,7 @@ class RekordboxXMLOrchestrator:
 
     def create_rekordbox_xml_playlist(self, playlist_name: str) -> Node:
         """
-        :param playlist_name: Of the custom navidrom format <genre-subgenre-playlist>
+        :param playlist_name: Of the custom navidrome format <genre-subgenre-playlist>
         :return:
         """
         folders, playlist_name = self._get_folders_playlist_from_name(playlist_name)
