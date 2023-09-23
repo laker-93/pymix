@@ -1,5 +1,5 @@
 import logging
-from typing import List
+from typing import List, Set
 
 from pymix.clients.subsonic_client import SubsonicClient
 from pymix.model.subboxplaylist import SubBoxPlaylist
@@ -14,7 +14,7 @@ class SubsonicOrchestrator:
 
     async def _get_subsonic_playlists(self) -> List[SubBoxPlaylist]:
         """
-        Creates the Playlists from Subsonic queries
+        Creates internal view of the playlists and their tracks found in navirdome.
         :return:
         """
         playlists = await self._subsonic_client.get_playlists()
@@ -29,6 +29,9 @@ class SubsonicOrchestrator:
         return subsonic_playlists
 
     async def get_subsonic_tracks(self) -> List[SubBoxTrack]:
+        """
+        Gets all tracks in navidrome
+        """
         subsonic_playlists = await self.get_subsonic_playlists()
         subsonic_tracks = []
         for subsonic_playlist in subsonic_playlists:
@@ -36,5 +39,44 @@ class SubsonicOrchestrator:
                 subsonic_playlist.tracks
             )
         return subsonic_tracks
+
+
+    async def create_playlists(self, subbox_playlists: List[SubBoxPlaylist]) -> Set[SubBoxTrack]:
+        """
+        Given list of subbox playlists (e.g. formed from parsing XML), create the playlist structure in navidrome.
+        """
+        for playlist in subbox_playlists:
+            track_ids = []
+            for track in playlist.tracks:
+                track_ids.append(track.sub_track_id)
+            await self._subsonic_client.create_playlist(playlist.name, track_ids)
+
+
+
+    async def update_tracks_with_subid(self, subbox_playlists: List[SubBoxPlaylist]) -> None:
+        """
+        Given list of subbox playlists (e.g. formed from parsing XML), update the playlist
+        track with the id of the subsonic track.
+        """
+        subsonic_tracks = set()
+        for playlist in subbox_playlists:
+            for track in playlist.tracks:
+                name = track.name
+                name = self._format_name(name)
+                try:
+                    _subsonic_track = await self._subsonic_client.query_track(name)
+                except KeyError:
+                    logger.warning(f'unable to find track in navidrome {track}. This track will not be imported properly. Please ensure name of track in rekordbox is correct.')
+                track.sub_track_id = _subsonic_track.sub_track_id
+        return subsonic_tracks
+
+
+    @staticmethod
+    def _format_name(name: str) -> str:
+        """
+        Strip off any white space
+        """
+        return ""
+
 
 

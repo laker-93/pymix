@@ -3,7 +3,7 @@ import string
 import hashlib
 import random
 from pathlib import Path
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Set
 
 import aiohttp
 
@@ -76,6 +76,19 @@ class SubsonicClient(BaseAPIClient):
             ) for playlist in resp_playlists
         ]
 
+    def _parse_query(self, response: dict) -> List[SubBoxTrack]:
+        resp = response['subsonic-response']['searchResult2']['song']
+        return [
+            SubBoxTrack(
+                name=entry['title'],
+                artist=entry['artist'],
+                path=Path(f"{self._music_path_base_to_add}/{entry['path'].lstrip(self._music_path_base_to_remove)}"),
+                album=entry['album'],
+                genre=entry.get('genre'),
+                sub_track_id=entry.get('id')
+            ) for entry in resp
+        ]
+
     def _parse_tracks(self, response: dict) -> List[SubBoxTrack]:
         resp_playlist = response['subsonic-response']['playlist']['entry']
         return [
@@ -115,7 +128,17 @@ class SubsonicClient(BaseAPIClient):
         response = await self.get(url)
         return response
 
-    async def query(self):
-        url = self._subsonic_format_url(f"{self._host}/rest/search2", params={"query": "Burial"})
+    async def query_track(self, query: str) -> SubBoxTrack:
+        url = self._subsonic_format_url(f"{self._host}/rest/search2", params={"query": query})
         response = await self.get(url)
-        return response
+        tracks = self._parse_query(response)
+        assert len(tracks) == 1, f'found more than 1 track matching query {query}: {tracks}'
+        track = tracks.pop()
+        return track
+
+    async def create_playlist(self, name: str, song_ids: List[str]) -> bool:
+        url = self._subsonic_format_url(
+            f"{self._host}/rest/createPlaylist", params={"name": name, "songId": song_ids[0]}
+        )
+        response = await self.get(url)
+        return response['subsonic-response']['status'] == 'ok'

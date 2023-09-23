@@ -21,26 +21,28 @@ class RekordboxXMLOrchestrator:
         if self._rekordbox_xml is None:
             self._rekordbox_xml = self._rekordbox_xml_factory.create_rekordbox_xml(xml_path)
 
+    def get_track_by_id(self, track_id: int) -> Track:
+        return self._rekordbox_xml.get_track(TrackID=track_id)
+
     @staticmethod
     def _get_folders_playlist_from_name(playlist_name: str) -> (List[str], str):
         folders_playlist = playlist_name.split('-')
         return folders_playlist[:-1], folders_playlist[-1]
 
-    def get_subbox_playlists_from_rekordbox_xml_playlists(self, xml_playlists: List[Node]) -> List[SubBoxPlaylist]:
+    def get_subbox_playlists_from_rekordbox_xml_playlists(self, xml_playlists: List[Node], parent: str, subbox_playlists) -> List[SubBoxPlaylist]:
         """
         From the rekordbox XML playlists, create the internal Playlist datastructure
         :param xml_playlists:
         :param rekordbox_playlists:
         :return:
         """
-        rekordbox_playlists: List[SubBoxPlaylist] = []
         for playlist in xml_playlists:
-            name = playlist.name
+            name = playlist.name if not parent else parent + '-' + playlist.name
             track_ids = playlist.get_tracks()
             if not playlist.is_playlist:
                 # recurse through the folder structure until reach the playlist leaves
                 playlists = playlist.get_playlists()
-                self.get_subbox_playlists_from_rekordbox_xml_playlists(playlists, rekordbox_playlists)
+                self.get_subbox_playlists_from_rekordbox_xml_playlists(playlists, name, subbox_playlists)
                 continue
             assert playlist.key_type == 'TrackID', f"playlist key type {playlist.key_type}"
             tracks = []
@@ -56,13 +58,12 @@ class RekordboxXMLOrchestrator:
                         track_id=track_id
                     )
                 )
-            rekordbox_playlists.append(
+            subbox_playlists.append(
                 SubBoxPlaylist(
                     name=name,
                     tracks=tracks
                 )
             )
-        return rekordbox_playlists
 
     def create_rekordbox_xml_playlist(self, playlist_name: str) -> Node:
         """

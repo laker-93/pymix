@@ -7,15 +7,13 @@ from pymix.clients.subsonic_client import SubsonicClient
 from pymix.registration import create_app, create_container
 
 
-@inject
-async def navidrome_api(
-        navidrome_client: SubsonicClient = Provide[Container.subsonic_client],
+async def get_track_by_id(
+        navidrome_client: SubsonicClient,
+        track_id: str
 ):
     #await get_playlists(navidrome_client)
     #await get_playlist_api(navidrome_client)
-    _id = "b616a435ee5ef00a3a927913961902f3"
-    print("get track")
-    resp = await navidrome_client.get_track(track_id=_id)
+    resp = await navidrome_client.get_track(track_id=track_id)
     print(resp)
 
 async def get_playlist_api(navidrome_client):
@@ -40,14 +38,22 @@ async def get_playlist_tracks(navidrome_client, playlist_id):
     resp = await navidrome_client.get_playlists()
     print(resp)
 
+async def query(navidrome_client, query):
+    print(f"query {query}")
+    resp = await navidrome_client.query_tracks(query)
+    print(resp)
+
 async def main():
     app = create_app()
     container = create_container()
     container.wire(modules=[__name__])
     loop = asyncio.get_event_loop()
     subsonic_client = await container.subsonic_client()
-    playlists = await get_playlists(subsonic_client)
-    print(playlists)
+    await subsonic_client.create_playlist('foo2', ['9b81476f6ebf382c933276f97e1ca407'])
+    result = await query(subsonic_client, 'Gnosis')
+    print(result)
+    result = await get_track_by_id(subsonic_client, '9b81476f6ebf382c933276f97e1ca407')
+    print(result)
 
 if __name__ == "__main__":
     asyncio.run(main())

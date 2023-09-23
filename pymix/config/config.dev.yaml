@@ -8,4 +8,5 @@ subsonic:
   music_path_base_to_add: /Users/lukepurnell/nav_music
 rekordbox:
   xml_path: /Users/lajp/rekordbox/rekordbox.xml
+  restored_rb_output_root: /Users/lukepurnell/workspace/beets/download
 logs_directory: logs

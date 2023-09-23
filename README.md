@@ -5,6 +5,13 @@ must enable 'report real path' option in navidrome
 settings -> players -> click on name of player -> toggle on option for 'report real path'
 this is so that pymix can get the real path of a track from what's in the navidrome app and map it to the track's full path on disk so that it can be properly loaded in to the rekordbox xml
 
+at its core, this is an ETL application that transforms between subsonic (as supported by navidrome) and rekordbox.
+
+Phase 1:
+
+each user made their own beets and navidrome instance in a user directory. This way do not have to deal with handling
+tracks across users.
+
 ## create navidrome structure from rekordbox
 create the navidrome collection and playlist structure from a rekordbox collection
 1. backup rekordbox collection
@@ -20,5 +27,5 @@ create the navidrome collection and playlist structure from a rekordbox collecti
 11. It matches the tracks from the XML against the library imported by beets and moves and tracks in to the matched playlists
 
 ## todo
-1. during beets import stage, user needs to provide input to resolve imports
+1. first beets import is done in quiet mode with 'asis' fallback. New API needs to be introduced to allow users to subsequently edit
 2. what to do if subbox cannot find a song in navidrome that matches a track in the rekordbox xml? Need a way for user to manually specify
