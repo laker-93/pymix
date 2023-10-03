@@ -15,11 +15,16 @@ async def create_nav_from_xml(rekordbox_xml_controller: RekordboxXMLController, 
 async def create_xml_from_nav(rekordbox_xml_controller: RekordboxXMLController, xml_path: Path, xml_output_path: Path):
     await rekordbox_xml_controller.create_rekordbox_xml_from_subsonic_playlists(xml_path, xml_output_path)
 
+async def consume_from_filebrowser(rekordbox_xml_controller: RekordboxXMLController):
+    await rekordbox_xml_controller.consume_from_filebrowser()
+
 async def main():
     container = create_container('dev')
     container.wire(modules=[__name__])
     controller = await container.rekordbox_xml_controller()
-    result = await create_nav_from_xml(controller, Path('rekordbox_import/rekordbox-input.xml'), Path('rekordbox_import/rekordbox_bak'))
+    #result = await create_nav_from_xml(controller, Path('rekordbox_import/rekordbox-input.xml'), Path('rekordbox_import/rekordbox_bak'))
+    #result = await create_nav_from_xml(controller, Path('rekordbox_import/rekordbox-input.xml'), Path('rekordbox_import/rekordbox_bak'))
+    await consume_from_filebrowser(controller)
 
 if __name__ == "__main__":
     asyncio.run(main())

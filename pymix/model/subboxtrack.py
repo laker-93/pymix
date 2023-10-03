@@ -1,7 +1,8 @@
 from pathlib import Path
 from typing import Optional
 
-from pydantic import dataclasses
+#from pydantic import dataclasses
+import dataclasses
 
 
 @dataclasses.dataclass()

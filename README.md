@@ -27,5 +27,10 @@ create the navidrome collection and playlist structure from a rekordbox collecti
 11. It matches the tracks from the XML against the library imported by beets and moves and tracks in to the matched playlists
 
 ## todo
+0. add filebrowser for editing music library:
+   1. allow users to delete from beets library via filebrowser. Filebrowser shows them the files and then can delete
+   with a hook. OR modify navidrome to delete.
 1. first beets import is done in quiet mode with 'asis' fallback. New API needs to be introduced to allow users to subsequently edit
 2. what to do if subbox cannot find a song in navidrome that matches a track in the rekordbox xml? Need a way for user to manually specify
+3. add mbsync to keep library up to date (can be configured to run as a job) https://beets.readthedocs.io/en/stable/plugins/mbsync.html
+4. single entry point for uploading/downloading music files/rekordbox xml through the filebrowser docker

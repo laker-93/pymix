@@ -39,7 +39,7 @@ class SubsonicClient(BaseAPIClient):
         ).hexdigest(), salt
 
 
-    def _subsonic_format_url(self, url: str, params: Optional[dict] = None) -> str:
+    def _subsonic_format_url(self, url: str, params: Optional[list[tuple[str, str]]] = None) -> str:
         """
         example:
         http://localhost:4533/rest/getStarred.view?u=lajp&p=konichiwalajp!&v=1.16.1&c=myapp
@@ -48,16 +48,16 @@ class SubsonicClient(BaseAPIClient):
         :return:
         """
         token, salt = self._calculate_token()
-        required_params = {
-            "u": self._username,
-            "t": token,
-            "s": salt,
-            "v": self._version,
-            "c": "myapp",
-            "f": "json"
-        }
+        required_params = [
+            ("u", self._username),
+            ("t", token),
+            ("s", salt),
+            ("v", self._version),
+            ("c", "myapp"),
+            ("f", "json")
+        ]
         if params:
-            required_params.update(params)
+            required_params.extend(params)
 
         url = add_url_params(url + ".view?", required_params)
         return url
@@ -114,31 +114,50 @@ class SubsonicClient(BaseAPIClient):
     async def create_playlists(self, subbox_playlists: List[SubBoxPlaylist]):
         for playlist in subbox_playlists:
             _id = None
-            self._subsonic_format_url(f"{self._host}/rest/createPlaylist", params={"name": playlist.name, "songId": _id})
+            self._subsonic_format_url(
+                f"{self._host}/rest/createPlaylist", params=[("name", playlist.name), ("songId", _id)]
+            )
 
     async def get_playlist_tracks(self, playlist_id: str) -> List[SubBoxTrack]:
-        url = self._subsonic_format_url(f"{self._host}/rest/getPlaylist", params={"id": playlist_id})
+        url = self._subsonic_format_url(
+            f"{self._host}/rest/getPlaylist", params=[("id", playlist_id)]
+        )
         response = await self.get(url)
         assert response
         tracks = self._parse_tracks(response)
         return tracks
 
     async def get_track(self, track_id: str):
-        url = self._subsonic_format_url(f"{self._host}/rest/getSong", params={"id": track_id})
+        url = self._subsonic_format_url(
+            f"{self._host}/rest/getSong", params=[("id", track_id)]
+        )
         response = await self.get(url)
         return response
 
-    async def query_track(self, query: str) -> SubBoxTrack:
-        url = self._subsonic_format_url(f"{self._host}/rest/search2", params={"query": query})
+    async def query_track_by_name(self, name: str) -> SubBoxTrack:
+        """
+        Given a name of a track, query subsonic and return a unique match. Throws an error if no match is found.
+        """
+        url = self._subsonic_format_url(
+            f"{self._host}/rest/search2", params=[("query", name)]
+        )
         response = await self.get(url)
         tracks = self._parse_query(response)
-        assert len(tracks) == 1, f'found more than 1 track matching query {query}: {tracks}'
-        track = tracks.pop()
-        return track
+        result = None
+        for track in tracks:
+            if name in track.name:
+                assert result is None, f'found more than 1 track matching query {name}: {tracks}'
+                result = track
+        assert result, f'failed to find {name} in {tracks}'
+        return result
 
     async def create_playlist(self, name: str, song_ids: List[str]) -> bool:
+        params = [('name', name)]
+        song_id_params = [("songId", song_id) for song_id in song_ids]
+        params.extend(song_id_params)
         url = self._subsonic_format_url(
-            f"{self._host}/rest/createPlaylist", params={"name": name, "songId": song_ids[0]}
+            f"{self._host}/rest/createPlaylist",
+            params=params
         )
         response = await self.get(url)
         return response['subsonic-response']['status'] == 'ok'

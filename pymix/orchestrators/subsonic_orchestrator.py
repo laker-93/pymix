@@ -41,7 +41,7 @@ class SubsonicOrchestrator:
         return subsonic_tracks
 
 
-    async def create_playlists(self, subbox_playlists: List[SubBoxPlaylist]) -> Set[SubBoxTrack]:
+    async def create_playlists(self, subbox_playlists: List[SubBoxPlaylist]):
         """
         Given list of subbox playlists (e.g. formed from parsing XML), create the playlist structure in navidrome.
         """
@@ -52,31 +52,22 @@ class SubsonicOrchestrator:
             await self._subsonic_client.create_playlist(playlist.name, track_ids)
 
 
-
     async def update_tracks_with_subid(self, subbox_playlists: List[SubBoxPlaylist]) -> None:
         """
         Given list of subbox playlists (e.g. formed from parsing XML), update the playlist
         track with the id of the subsonic track.
         """
-        subsonic_tracks = set()
         for playlist in subbox_playlists:
             for track in playlist.tracks:
                 name = track.name
-                name = self._format_name(name)
                 try:
-                    _subsonic_track = await self._subsonic_client.query_track(name)
+                    subsonic_track = await self._subsonic_client.query_track_by_name(name)
                 except KeyError:
                     logger.warning(f'unable to find track in navidrome {track}. This track will not be imported properly. Please ensure name of track in rekordbox is correct.')
-                track.sub_track_id = _subsonic_track.sub_track_id
-        return subsonic_tracks
+                else:
+                    track.sub_track_id = subsonic_track.sub_track_id
+        return 'foo'
 
-
-    @staticmethod
-    def _format_name(name: str) -> str:
-        """
-        Strip off any white space
-        """
-        return ""
 
 
 

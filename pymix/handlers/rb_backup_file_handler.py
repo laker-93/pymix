@@ -1,4 +1,7 @@
 import logging
+from contextlib import contextmanager
+
+import music_tag
 import os
 import shutil
 from pathlib import Path
@@ -14,10 +17,10 @@ class RBBackupFileHandler:
     def __init__(
             self,
             rekordbox_xml_orchestrator: RekordboxXMLOrchestrator,
-            restored_db_output_root: str
+            beets_data_path: str
     ):
         self._rekordbox_xml_orchestrator = rekordbox_xml_orchestrator
-        self._restored_db_output_root = restored_db_output_root
+        self._beets_data_path = beets_data_path
 
     @staticmethod
     def _get_track_id(audio_file: Path) -> int:
@@ -38,9 +41,14 @@ class RBBackupFileHandler:
         """
         return f'{track.Artist} - {track.Name}'
 
-    def restore_track_names(self, audio_files_to_import: Path):
+    @contextmanager
+    def restore_track_meta_and_stage_for_import(self, audio_files_to_import: Path):
         """
-        rekordbox mangles the names of the tracks when creating the backup. Must restore the track names.
+        rekordbox mangles the names of the tracks when creating the backup. It also nukes all the meta data in the
+        audio files. This must be restored in to the audio file's meta data to allow beets import work.
+        Finally, the audio file is moved in to the beets docket shared directory that is used for import in to beets.
+        If the context manager completes successfully, then the import has succeeded so the contents of the import dir
+        can be removed.
         """
 
         for audio_file in audio_files_to_import.glob('**/*'):
@@ -50,11 +58,29 @@ class RBBackupFileHandler:
                 except ValueError:
                     logger.info(f'unable to convert track id to int for {audio_file}')
                     continue
+
                 track = self._rekordbox_xml_orchestrator.get_track_by_id(track_id)
+                self._restore_tags(audio_file, track)
                 track_name = self._format_track_name(track)
                 output_parts = list(audio_file.parts)
                 output_parts[-1] = track_name
-                restored_track = Path(self._restored_db_output_root) / Path('/'.join(output_parts[1:]))
+                restored_track = Path(self._beets_data_path) / Path('/'.join(output_parts[1:]))
                 restored_track = restored_track.with_suffix(audio_file.suffix)
                 restored_track.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy(audio_file, restored_track)
+        yield
+
+        for filepath in Path(self._beets_data_path).iterdir():
+            if filepath.is_dir():
+                shutil.rmtree(filepath)
+            else:
+                filepath.unlink()
+
+    @staticmethod
+    def _restore_tags(audio_file: Path, track: Track):
+        f = music_tag.load_file(str(audio_file))
+        f['album'] = track.Album
+        f['artist'] = track.Artist
+        f['tracktitle'] = track.Name
+        f['tracknumber'] = track.TrackNumber
+        f.save()

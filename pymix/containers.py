@@ -8,6 +8,7 @@ from dependency_injector import containers, providers
 from pymix.clients.subsonic_client import SubsonicClient
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLFactory, RekordboxXMLController
 from pymix.factories.aiohttp_session_resource import init_aiohttp_session
+from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.handlers.rb_backup_file_handler import RBBackupFileHandler
 from pymix.orchestrators.rekordbox_xml_orchestrator import RekordboxXMLOrchestrator
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
@@ -54,7 +55,12 @@ class Container(containers.DeclarativeContainer):
     rb_backup_file_handler = providers.Singleton(
         RBBackupFileHandler,
         rekordbox_xml_orchestrator,
-        config.rekordbox.restored_rb_output_root
+        config.beets.data
+    )
+    file_browser_file_handler = providers.Singleton(
+        FileBrowserFileHandler,
+        config.filebrowser.data,
+        config.beets.data
     )
 
     rekordbox_xml_controller = providers.Singleton(
@@ -62,6 +68,7 @@ class Container(containers.DeclarativeContainer):
         subsonic_orchestrator,
         rekordbox_xml_orchestrator,
         rb_backup_file_handler,
+        file_browser_file_handler,
         config.rekordbox.restored_rb_output_root
     )
 
