@@ -1,15 +1,16 @@
 ---
 app_env: dev
 subsonic:
-  host: http://localhost:4533/navidrome
+  host: http://localhost:4533
+  #host: http://localhost:4533/navidrome
   username: lajp
   version: 1.16.1
   music_path_base_to_remove: music
-  music_path_base_to_add: /Users/lukepurnell/nav_music
+  music_path_base_to_add: /Users/lajp/Music
 rekordbox:
   xml_path: /Users/lajp/rekordbox/rekordbox.xml
 filebrowser:
-  data: /Users/lukepurnell/workspace/filebrowser/data
+  data: /Users/lajp/traefik/filebrowser/data
 beets:
-  data: /Users/lukepurnell/workspace/beets/download
+  data: /Users/lajp/traefik/beets/download
 logs_directory: logs

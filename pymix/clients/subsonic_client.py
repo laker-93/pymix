@@ -90,7 +90,7 @@ class SubsonicClient(BaseAPIClient):
         ]
 
     def _parse_tracks(self, response: dict) -> List[SubBoxTrack]:
-        resp_playlist = response['subsonic-response']['playlist']['entry']
+        resp_playlist = response['subsonic-response']['playlist'].get('entry', [])
         return [
             SubBoxTrack(
                 name=entry['title'],

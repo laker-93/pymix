@@ -1,4 +1,5 @@
 import logging
+import os
 from pathlib import Path
 from typing import List, Optional
 
@@ -87,10 +88,17 @@ class RekordboxXMLOrchestrator:
             logger.debug(f"added track {str(track.path)}")
         except ValueError:
             track_id = track.track_id
-            # must have the track_id set since the subsonic track must've necessarily been found in the rekordbox
-            # collection for this exception to have occurred.
-            assert track_id, f"track id none for {track}"
-            rekordbox_track = self._rekordbox_xml.get_track(TrackID=track_id)
+            # if the track_id is set then the subsonic track is already present in the rekordbox xml,
+            # otherwise the track has yet to be added to rekordbox xml and appears in multiple playlists.
+            if track_id:
+                rekordbox_track = self._rekordbox_xml.get_track(TrackID=track_id)
+            else:
+                # the rekord box get_track api is stupid so do some very inefficient work around
+                #rekordbox_track = self._rekordbox_xml.get_track(index=1, Location=os.path.normpath(str(track.path)))
+                for other in self._rekordbox_xml.get_tracks():
+                    if os.path.normpath(os.path.normpath(str(track.path))) == other.Location:
+                        rekordbox_track = other
+                        break
             logger.debug(f"track already present, found at {str(rekordbox_track)}")
         logger.debug(f"track {rekordbox_track} added to {playlist}")
         playlist.add_track(rekordbox_track.TrackID)
