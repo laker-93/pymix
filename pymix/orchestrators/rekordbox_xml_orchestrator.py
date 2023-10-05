@@ -76,6 +76,28 @@ class RekordboxXMLOrchestrator:
         new_playlist = playlist_root.add_playlist(playlist_name)
         return new_playlist
 
+    def add_track(self, track: SubBoxTrack, suppress_error: bool=False) -> None:
+        """
+        Adds the track to the XML. Optionally suppress the error if the track is already present.
+        :param track:
+        :param suppress_error:
+        :return:
+        """
+        try:
+            self._rekordbox_xml.add_track(
+                str(track.path),
+                Name=track.name,
+                Artist=track.artist,
+                Album=track.album,
+                Genre=track.genre
+            )
+        except ValueError:
+            if not suppress_error:
+                raise
+        else:
+            logger.info(f"added track {str(track.path)}")
+
+
     def add_track_to_rekordbox_playlist(self, track: SubBoxTrack, playlist: Node):
         try:
             rekordbox_track = self._rekordbox_xml.add_track(

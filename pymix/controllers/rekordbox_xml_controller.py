@@ -83,6 +83,13 @@ class RekordboxXMLController:
         # Given the Playlist data from Subsonic create the playlist directory structure in Rekordbox.
         for subsonic_playlist in subsonic_playlists:
             self._create_rekordbox_xml_playlist(subsonic_playlist)
+        # add subsonic tracks that do not belong to a playlist.
+        # suppress the exception that would be raised due to attempting to add a track that is already present.
+        import asyncio
+        await asyncio.sleep(1)
+        async for tracks in self._subsonic_orchestrator._subsonic_client.get_all_tracks():
+            for track in tracks:
+                self._rekordbox_xml_orchestrator.add_track(track, suppress_error=True)
 
         # todo remove any playlists that have no tracks
         self._rekordbox_xml_orchestrator.save_xml(xml_output_path)

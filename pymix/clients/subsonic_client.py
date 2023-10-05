@@ -3,7 +3,7 @@ import string
 import hashlib
 import random
 from pathlib import Path
-from typing import Tuple, List, Optional, Set
+from typing import Tuple, List, Optional, Set, AsyncIterator, AsyncGenerator
 
 import aiohttp
 
@@ -76,8 +76,8 @@ class SubsonicClient(BaseAPIClient):
             ) for playlist in resp_playlists
         ]
 
-    def _parse_query(self, response: dict) -> List[SubBoxTrack]:
-        resp = response['subsonic-response']['searchResult2']['song']
+    def _parse_query(self, response: dict, search_result: str = 'searchResult2') -> List[SubBoxTrack]:
+        resp = response['subsonic-response'][search_result]['song']
         return [
             SubBoxTrack(
                 name=entry['title'],
@@ -133,6 +133,30 @@ class SubsonicClient(BaseAPIClient):
         )
         response = await self.get(url)
         return response
+
+    async def get_all_tracks(self) -> AsyncIterator[List[SubBoxTrack]]:
+        """
+        Iterate over all tracks
+        """
+        offset = 0
+        size = 500
+        while True:
+            url = self._subsonic_format_url(
+                f"{self._host}/rest/search3", params=[
+                    ("query", "''"),
+                    ("artistCount", 0),
+                    ("albumCount", 0),
+                    ("songCount", size),
+                    ("songOffset", offset),
+                ]
+            )
+            response = await self.get(url)
+            tracks = self._parse_query(response, search_result='searchResult3')
+            print('got tracks')
+            yield tracks
+            if len(tracks) < size:
+                break
+            offset += size
 
     async def query_track_by_name(self, name: str) -> SubBoxTrack:
         """

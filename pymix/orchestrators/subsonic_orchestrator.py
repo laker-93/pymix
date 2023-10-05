@@ -1,5 +1,5 @@
 import logging
-from typing import List, Set
+from typing import List, Set, AsyncIterator
 
 from pymix.clients.subsonic_client import SubsonicClient
 from pymix.model.subboxplaylist import SubBoxPlaylist
@@ -51,7 +51,6 @@ class SubsonicOrchestrator:
                 track_ids.append(track.sub_track_id)
             await self._subsonic_client.create_playlist(playlist.name, track_ids)
 
-
     async def update_tracks_with_subid(self, subbox_playlists: List[SubBoxPlaylist]) -> None:
         """
         Given list of subbox playlists (e.g. formed from parsing XML), update the playlist
@@ -68,6 +67,8 @@ class SubsonicOrchestrator:
                     track.sub_track_id = subsonic_track.sub_track_id
         return 'foo'
 
+    async def get_all_tracks(self) -> AsyncIterator[List[SubBoxTrack]]:
+        return self._subsonic_client.get_all_tracks()
 
 
 
