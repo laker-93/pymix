@@ -84,18 +84,18 @@ class RekordboxXMLOrchestrator:
         :return:
         """
         try:
-            self._rekordbox_xml.add_track(
+            rekord_track = self._rekordbox_xml.add_track(
                 str(track.path),
                 Name=track.name,
                 Artist=track.artist,
                 Album=track.album,
                 Genre=track.genre
             )
-        except ValueError:
+        except ValueError as ex:
             if not suppress_error:
-                raise
+                raise ValueError(f'unable to add track {track}') from ex
         else:
-            logger.info(f"added track {str(track.path)}")
+            logger.debug(f"added track {str(track.path)} {rekord_track}")
 
 
     def add_track_to_rekordbox_playlist(self, track: SubBoxTrack, playlist: Node):

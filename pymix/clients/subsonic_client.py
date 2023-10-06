@@ -84,7 +84,7 @@ class SubsonicClient(BaseAPIClient):
                 artist=entry['artist'],
                 path=Path(f"{self._music_path_base_to_add}/{entry['path'].lstrip(self._music_path_base_to_remove)}"),
                 album=entry['album'],
-                genre=entry.get('genre'),
+                genre=None if entry.get('genre') == '\x1a' else entry.get('genre'),
                 sub_track_id=entry.get('id')
             ) for entry in resp
         ]
@@ -134,29 +134,27 @@ class SubsonicClient(BaseAPIClient):
         response = await self.get(url)
         return response
 
-    async def get_all_tracks(self) -> AsyncIterator[List[SubBoxTrack]]:
+    async def get_all_tracks(self, batch_size: int) -> AsyncIterator[List[SubBoxTrack]]:
         """
-        Iterate over all tracks
+        Iterate over all tracks yielding in batches
         """
         offset = 0
-        size = 500
         while True:
             url = self._subsonic_format_url(
                 f"{self._host}/rest/search3", params=[
                     ("query", "''"),
                     ("artistCount", 0),
                     ("albumCount", 0),
-                    ("songCount", size),
+                    ("songCount", batch_size),
                     ("songOffset", offset),
                 ]
             )
             response = await self.get(url)
             tracks = self._parse_query(response, search_result='searchResult3')
-            print('got tracks')
             yield tracks
-            if len(tracks) < size:
+            if len(tracks) < batch_size:
                 break
-            offset += size
+            offset += batch_size
 
     async def query_track_by_name(self, name: str) -> SubBoxTrack:
         """

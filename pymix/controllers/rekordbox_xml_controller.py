@@ -86,10 +86,12 @@ class RekordboxXMLController:
         # add subsonic tracks that do not belong to a playlist.
         # suppress the exception that would be raised due to attempting to add a track that is already present.
         import asyncio
-        await asyncio.sleep(1)
-        async for tracks in self._subsonic_orchestrator._subsonic_client.get_all_tracks():
+        # todo figure this out - seem to need to pause to avoid getting disconnected from server
+        await asyncio.sleep(2)
+        async for tracks in self._subsonic_orchestrator._subsonic_client.get_all_tracks(400):
             for track in tracks:
                 self._rekordbox_xml_orchestrator.add_track(track, suppress_error=True)
+            await asyncio.sleep(2)
 
         # todo remove any playlists that have no tracks
         self._rekordbox_xml_orchestrator.save_xml(xml_output_path)
