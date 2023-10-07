@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from pyrekordbox import RekordboxXml
-from pyrekordbox.xml import Node, Track
+from pyrekordbox.xml import Node, Track, RATING_MAPPING
 
 from pymix.factories.rekordbox_xml_factory import RekordboxXMLFactory
 from pymix.model.subboxplaylist import SubBoxPlaylist
@@ -56,7 +56,7 @@ class RekordboxXMLOrchestrator:
                         path=Path(track.Location),
                         album=track.Album,
                         genre=track.Genre,
-                        rating=track.Rating,
+                        rating=RATING_MAPPING[track.Rating],
                         track_id=track_id
                     )
                 )
@@ -90,7 +90,7 @@ class RekordboxXMLOrchestrator:
                 Name=track.name,
                 Artist=track.artist,
                 Album=track.album,
-                Rating=track.rating,
+                Rating=RATING_MAPPING.inverse[track.rating],
                 Genre=track.genre
             )
         except ValueError as ex:
@@ -107,7 +107,7 @@ class RekordboxXMLOrchestrator:
                 Name=track.name,
                 Artist=track.artist,
                 Album=track.album,
-                Rating=track.rating,
+                Rating=RATING_MAPPING.inverse[track.rating],
                 Genre=track.genre
             )
             logger.debug(f"added track {str(track.path)}")

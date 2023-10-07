@@ -84,7 +84,7 @@ class SubsonicClient(BaseAPIClient):
                 artist=entry['artist'],
                 path=Path(f"{self._music_path_base_to_add}/{entry['path'].lstrip(self._music_path_base_to_remove)}"),
                 album=entry['album'],
-                rating=entry.get('userRating'),
+                rating=entry.get('userRating', 0),
                 genre=None if entry.get('genre') == '\x1a' else entry.get('genre'),
                 sub_track_id=entry.get('id')
             ) for entry in resp
@@ -98,7 +98,7 @@ class SubsonicClient(BaseAPIClient):
                 artist=entry['artist'],
                 path=Path(f"{self._music_path_base_to_add}/{entry['path'].lstrip(self._music_path_base_to_remove)}"),
                 album=entry['album'],
-                rating=entry.get('userRating'),
+                rating=entry.get('userRating', 0),
                 genre=entry.get('genre')
             ) for entry in resp_playlist
         ]
