@@ -26,6 +26,12 @@ create the navidrome collection and playlist structure from a rekordbox collecti
 10. subbox then takes the rekordbox xml and creates playlists in navidrome. I
 11. It matches the tracks from the XML against the library imported by beets and moves and tracks in to the matched playlists
 
+## When importing sub box produced xml in to rb
+
+set the xml path in rb to the xml output file produced by sub box
+then follow the steps in this video
+
+https://www.youtube.com/watch?v=xzW0jHWSNPk
 ## todo
 0. add filebrowser for editing music library:
    1. allow users to delete from beets library via filebrowser. Filebrowser shows them the files and then can delete

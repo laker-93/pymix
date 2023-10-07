@@ -11,6 +11,7 @@ class SubBoxTrack:
     artist: str
     path: Path
     album: str
+    rating: Optional[int] = None
     genre: Optional[str] = None
     # the Rekordbox XML TrackID.
     track_id: Optional[int] = None

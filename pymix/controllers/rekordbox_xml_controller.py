@@ -80,6 +80,8 @@ class RekordboxXMLController:
                     logger.info(f"found subsonic track {subsonic_track} in rekordbox. Setting track id to {rekordbox_track.track_id}")
                     subsonic_track.track_id = rekordbox_track.track_id
 
+        # sort the playlists by name so duplicate folders of the same name are not created
+        subsonic_playlists.sort(key=lambda playlist: playlist.name)
         # Given the Playlist data from Subsonic create the playlist directory structure in Rekordbox.
         for subsonic_playlist in subsonic_playlists:
             self._create_rekordbox_xml_playlist(subsonic_playlist)
@@ -119,14 +121,13 @@ class RekordboxXMLController:
             rekordbox_xml_playlists = self._rekordbox_xml_orchestrator.get_all_xml_playlists()
             subbox_playlists: List[SubBoxPlaylist] = []
             self._rekordbox_xml_orchestrator.get_subbox_playlists_from_rekordbox_xml_playlists(rekordbox_xml_playlists, '', subbox_playlists)
-            print(subbox_playlists)
             # 5. given the subbox info, create the playlists in navidrome using subsonic api
             # 6. get the tracks from navidrome by using the 'query' api for each track.
             # this sets the subsonic id found from querying navidrome. This can then be used to create the playlist and place
             # the track in the playlist
             res = await self._subsonic_orchestrator.update_tracks_with_subid(subbox_playlists)
-            # 8. create the playlists
-            await self._subsonic_orchestrator.create_playlists(subbox_playlists)
+            # 8. create the playlists and set the rating of the track in navidrome from the rating taken from xml
+            await self._subsonic_orchestrator.create_playlists_and_set_rating(subbox_playlists)
             # 9. on success, remove the directory of the beets import - this makes the operation atomic.
 
 

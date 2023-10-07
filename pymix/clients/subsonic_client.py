@@ -3,7 +3,7 @@ import string
 import hashlib
 import random
 from pathlib import Path
-from typing import Tuple, List, Optional, Set, AsyncIterator, AsyncGenerator
+from typing import Tuple, List, Optional, Set, AsyncIterator, AsyncGenerator, Union
 
 import aiohttp
 
@@ -39,7 +39,7 @@ class SubsonicClient(BaseAPIClient):
         ).hexdigest(), salt
 
 
-    def _subsonic_format_url(self, url: str, params: Optional[list[tuple[str, str]]] = None) -> str:
+    def _subsonic_format_url(self, url: str, params: Optional[list[tuple[str, Union[str, int]]]] = None) -> str:
         """
         example:
         http://localhost:4533/rest/getStarred.view?u=lajp&p=konichiwalajp!&v=1.16.1&c=myapp
@@ -84,6 +84,7 @@ class SubsonicClient(BaseAPIClient):
                 artist=entry['artist'],
                 path=Path(f"{self._music_path_base_to_add}/{entry['path'].lstrip(self._music_path_base_to_remove)}"),
                 album=entry['album'],
+                rating=entry.get('userRating'),
                 genre=None if entry.get('genre') == '\x1a' else entry.get('genre'),
                 sub_track_id=entry.get('id')
             ) for entry in resp
@@ -97,6 +98,7 @@ class SubsonicClient(BaseAPIClient):
                 artist=entry['artist'],
                 path=Path(f"{self._music_path_base_to_add}/{entry['path'].lstrip(self._music_path_base_to_remove)}"),
                 album=entry['album'],
+                rating=entry.get('userRating'),
                 genre=entry.get('genre')
             ) for entry in resp_playlist
         ]
@@ -173,9 +175,9 @@ class SubsonicClient(BaseAPIClient):
         assert result, f'failed to find {name} in {tracks}'
         return result
 
-    async def create_playlist(self, name: str, song_ids: List[str]) -> bool:
+    async def create_playlist(self, name: str, tracks: List[SubBoxTrack]) -> bool:
         params = [('name', name)]
-        song_id_params = [("songId", song_id) for song_id in song_ids]
+        song_id_params = [("songId", song_id) for song_id in map(lambda t:t.sub_track_id, tracks)]
         params.extend(song_id_params)
         url = self._subsonic_format_url(
             f"{self._host}/rest/createPlaylist",
@@ -183,3 +185,20 @@ class SubsonicClient(BaseAPIClient):
         )
         response = await self.get(url)
         return response['subsonic-response']['status'] == 'ok'
+
+    async def set_rating(self, tracks: List[SubBoxTrack]):
+        song_ids_ratings: List[Tuple[int, int]] = []
+        for track in tracks:
+            if track.rating > 0:
+                song_ids_ratings.append(
+                    (track.sub_track_id, track.rating)
+                )
+        for song_id_rating in song_ids_ratings:
+            song_id = song_id_rating[0]
+            rating = song_id_rating[1]
+            url = self._subsonic_format_url(
+                f"{self._host}/rest/setRating",
+                params=[('id', song_id), ('rating', rating)]
+            )
+            response = await self.get(url)
+            assert response['subsonic-response']['status'] == 'ok'

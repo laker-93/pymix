@@ -41,15 +41,13 @@ class SubsonicOrchestrator:
         return subsonic_tracks
 
 
-    async def create_playlists(self, subbox_playlists: List[SubBoxPlaylist]):
+    async def create_playlists_and_set_rating(self, subbox_playlists: List[SubBoxPlaylist]):
         """
         Given list of subbox playlists (e.g. formed from parsing XML), create the playlist structure in navidrome.
         """
         for playlist in subbox_playlists:
-            track_ids = []
-            for track in playlist.tracks:
-                track_ids.append(track.sub_track_id)
-            await self._subsonic_client.create_playlist(playlist.name, track_ids)
+            await self._subsonic_client.create_playlist(playlist.name, playlist.tracks)
+            await self._subsonic_client.set_rating(playlist.tracks)
 
     async def update_tracks_with_subid(self, subbox_playlists: List[SubBoxPlaylist]) -> None:
         """

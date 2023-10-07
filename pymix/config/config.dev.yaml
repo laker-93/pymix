@@ -8,7 +8,7 @@ subsonic:
   music_path_base_to_remove: music
   music_path_base_to_add: /Users/lajp/Music
 rekordbox:
-  xml_path: /Users/lajp/rekordbox/rekordbox.xml
+  xml_path: /Users/lajp/rekordbox/rekordbox_empty.xml
 filebrowser:
   data: /Users/lajp/traefik/filebrowser/data
 beets:

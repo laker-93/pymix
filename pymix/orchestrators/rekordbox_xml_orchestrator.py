@@ -56,6 +56,7 @@ class RekordboxXMLOrchestrator:
                         path=Path(track.Location),
                         album=track.Album,
                         genre=track.Genre,
+                        rating=track.Rating,
                         track_id=track_id
                     )
                 )
@@ -89,6 +90,7 @@ class RekordboxXMLOrchestrator:
                 Name=track.name,
                 Artist=track.artist,
                 Album=track.album,
+                Rating=track.rating,
                 Genre=track.genre
             )
         except ValueError as ex:
@@ -105,6 +107,7 @@ class RekordboxXMLOrchestrator:
                 Name=track.name,
                 Artist=track.artist,
                 Album=track.album,
+                Rating=track.rating,
                 Genre=track.genre
             )
             logger.debug(f"added track {str(track.path)}")
