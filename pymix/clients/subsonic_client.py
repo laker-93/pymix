@@ -169,7 +169,7 @@ class SubsonicClient(BaseAPIClient):
         tracks = self._parse_query(response)
         result = None
         for track in tracks:
-            if name in track.name:
+            if name.lower() in track.name.lower():
                 assert result is None, f'found more than 1 track matching query {name}: {tracks}'
                 result = track
         assert result, f'failed to find {name} in {tracks}'

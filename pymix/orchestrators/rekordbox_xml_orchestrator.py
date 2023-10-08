@@ -56,7 +56,7 @@ class RekordboxXMLOrchestrator:
                         path=Path(track.Location),
                         album=track.Album,
                         genre=track.Genre,
-                        rating=RATING_MAPPING[track.Rating],
+                        rating=track.Rating,
                         track_id=track_id
                     )
                 )

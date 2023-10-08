@@ -46,7 +46,7 @@ class RBBackupFileHandler:
         """
         rekordbox mangles the names of the tracks when creating the backup. It also nukes all the meta data in the
         audio files. This must be restored in to the audio file's meta data to allow beets import work.
-        Finally, the audio file is moved in to the beets docket shared directory that is used for import in to beets.
+        Finally, the audio file is moved in to the beets docker shared directory that is used for import in to beets.
         If the context manager completes successfully, then the import has succeeded so the contents of the import dir
         can be removed.
         """
