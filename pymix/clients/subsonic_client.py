@@ -1,7 +1,9 @@
 import logging
+import re
 import string
 import hashlib
 import random
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Tuple, List, Optional, Set, AsyncIterator, AsyncGenerator, Union
 
@@ -160,19 +162,36 @@ class SubsonicClient(BaseAPIClient):
 
     async def query_track_by_name(self, name: str) -> SubBoxTrack:
         """
-        Given a name of a track, query subsonic and return a unique match. Throws an error if no match is found.
+        Given a name of a track, query subsonic and return matches. Throws an error if no match is found.
         """
         url = self._subsonic_format_url(
             f"{self._host}/rest/search2", params=[("query", name)]
         )
         response = await self.get(url)
-        tracks = self._parse_query(response)
-        result = None
+        try:
+            tracks = self._parse_query(response)
+        except Exception:
+            raise
+        results = {}
         for track in tracks:
-            if name.lower() in track.name.lower():
-                assert result is None, f'found more than 1 track matching query {name}: {tracks}'
-                result = track
-        assert result, f'failed to find {name} in {tracks}'
+            name_clean = re.sub(r'\W+', '', name.lower())
+            track_name_clean = re.sub(r'\W+', '', track.name.lower())
+            seq_matcher = SequenceMatcher(None, name_clean, track_name_clean)
+            similarity = seq_matcher.ratio()
+            if similarity > 0.8:
+                # TODO this overwrites existing matches of the same similarity
+                results[similarity] = track
+        if len(results) != 1:
+            # todo would like to make the following assertion assert result is None,
+            # however can have genuine duplicates here since beets is conifugred to merge duplicates (for example same
+            # track appears on multiple compilations). I think the right thing to do here is to keep all of them and
+            # then let user delete later if they want.
+            logger.error(f'found more than 1 track matching query {name}: {results}')
+        assert len(results), f'failed to find {name} in {tracks}'
+        max_similarity = max(results.keys())
+        result = results[max_similarity]
+        if int(max_similarity) != 1:
+            logger.warning(f'matched query of {name} to {result} with similarity {max_similarity}')
         return result
 
     async def create_playlist(self, name: str, tracks: List[SubBoxTrack]) -> bool:
