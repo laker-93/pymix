@@ -181,6 +181,17 @@ class SubsonicClient(BaseAPIClient):
             if similarity > 0.8:
                 # TODO this overwrites existing matches of the same similarity
                 results[similarity] = track
+            else:
+                # if still don't have a good similarity, try removing any text inside the brackes
+                name_brackets_removed = re.sub(r"[\(\[].*?[\)\]]", "", name.lower())
+                track_name_brackets_removed = re.sub(r"[\(\[].*?[\)\]]", "", track.name.lower())
+                seq_matcher = SequenceMatcher(None, name_brackets_removed, track_name_brackets_removed)
+                similarity = seq_matcher.ratio()
+                if similarity > 0.8:
+                    # TODO this overwrites existing matches of the same similarity
+                    results[similarity] = track
+                else:
+                    logger.warning(f'cannot find a good similarity for {name} and {track}')
         if len(results) != 1:
             # todo would like to make the following assertion assert result is None,
             # however can have genuine duplicates here since beets is conifugred to merge duplicates (for example same
