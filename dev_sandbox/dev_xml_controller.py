@@ -23,7 +23,7 @@ async def main():
     container.wire(modules=[__name__])
     controller = await container.rekordbox_xml_controller()
     #result = await create_xml_from_nav(controller, None, Path('neo_rekordbox.xml'))
-    result = await create_nav_from_xml(controller, Path('/Users/lajp/rekordbox/rekordbox_071023.xml'), Path('/Users/lajp/rekordbox/rekordbox_bak'))
+    result = await create_nav_from_xml(controller, Path('/Users/lajp/rekordbox/rekordbox_081023.xml'), Path('/Users/lajp/rekordbox/rekordbox_bak'))
     #await consume_from_filebrowser(controller)
 
 if __name__ == "__main__":

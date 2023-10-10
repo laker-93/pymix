@@ -1,4 +1,5 @@
 import logging
+import asyncio
 import re
 import string
 import hashlib
@@ -170,8 +171,8 @@ class SubsonicClient(BaseAPIClient):
         response = await self.get(url)
         try:
             tracks = self._parse_query(response)
-        except Exception:
-            raise
+        except Exception as ex:
+            raise KeyError(f'unable to parse tracks from url query {url}') from ex
         results = {}
         for track in tracks:
             name_clean = re.sub(r'\W+', '', name.lower())
@@ -231,4 +232,5 @@ class SubsonicClient(BaseAPIClient):
                 params=[('id', song_id), ('rating', rating)]
             )
             response = await self.get(url)
-            assert response['subsonic-response']['status'] == 'ok'
+            assert response['subsonic-response']['status'] == 'ok', response
+            await asyncio.sleep(1)
