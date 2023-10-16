@@ -6,8 +6,10 @@ from toredocore.providers.healthcheck.healthcheck_dependency import HealthcheckD
 from dependency_injector import containers, providers
 
 from pymix.clients.subsonic_client import SubsonicClient
+from pymix.controllers.db_controller import DbController
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLFactory, RekordboxXMLController
 from pymix.factories.aiohttp_session_resource import init_aiohttp_session
+from pymix.factories.create_db_session import create_db_session
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.handlers.rb_backup_file_handler import RBBackupFileHandler
 from pymix.orchestrators.rekordbox_xml_orchestrator import RekordboxXMLOrchestrator
@@ -41,6 +43,19 @@ class Container(containers.DeclarativeContainer):
             Path,
             config.rekordbox.xml_path
         )
+    )
+
+    db = providers.Factory(
+        create_db_session,
+        providers.Factory(
+            Path,
+            config.db.path
+        )
+    )
+
+    db_controller = providers.Singleton(
+        DbController,
+        db
     )
 
     subsonic_orchestrator = providers.Singleton(

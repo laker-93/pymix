@@ -10,3 +10,4 @@ pyyaml
 pytest-asyncio
 pyrekordbox
 music-tag
+tinydb

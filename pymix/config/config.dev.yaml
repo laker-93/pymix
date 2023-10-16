@@ -14,3 +14,5 @@ filebrowser:
 beets:
   data: /Users/lajp/traefik/beets/download
 logs_directory: logs
+db:
+  path: user_db.json
