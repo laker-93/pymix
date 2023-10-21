@@ -32,7 +32,6 @@ class RekordboxXMLController:
         self._file_browser_file_handler = file_browser_file_handler
         self._restored_db_output_root = restored_db_output_root
 
-
     def _create_rekordbox_xml_playlist(self, subsonic_playlist: SubBoxPlaylist):
         """
         From the playlist given, create the rekordbox folders and playlists.
@@ -58,7 +57,7 @@ class RekordboxXMLController:
             # can set to interactive with tty to pipe docker stdin input/output to terminal for user feedback.
             # beets config set to quiet mode and fallback of 'asis'. If user needs to correct later, they will have to
             # specify a musicbrainz id and re import with a specific query. This will need a separate API to be implemented.
-            result = docker.execute(my_container, ['beet',  'import', '-q', '/downloads'])
+            result = docker.execute(my_container, ['beet', 'import', '-q', '/downloads'])
             print(result)
 
     async def create_rekordbox_xml_from_subsonic_playlists(self, xml_path: Optional[Path], xml_output_path: Path):
@@ -77,7 +76,8 @@ class RekordboxXMLController:
         for subsonic_track in subsonic_tracks:
             for rekordbox_track in rekordbox_tracks:
                 if subsonic_track == rekordbox_track:
-                    logger.info(f"found subsonic track {subsonic_track} in rekordbox. Setting track id to {rekordbox_track.track_id}")
+                    logger.info(
+                        f"found subsonic track {subsonic_track} in rekordbox. Setting track id to {rekordbox_track.track_id}")
                     subsonic_track.track_id = rekordbox_track.track_id
 
         # sort the playlists by name so duplicate folders of the same name are not created
@@ -98,9 +98,12 @@ class RekordboxXMLController:
         # todo remove any playlists that have no tracks
         self._rekordbox_xml_orchestrator.save_xml(xml_output_path)
 
-    async def create_subsonic_playlists_from_xml(self, xml_path: Path, audio_files_to_import: Path):
-        self._rekordbox_xml_orchestrator.create_xml(xml_path)
-
+    async def import_to_beets(self, audio_files_to_import: Path):
+        """
+        Import into beets in quiet mode. Any exceptions will interrupt the process.
+        beets should import in to the directory navidrome is working off.
+        Users can use APIs after import to correct any mistakes from the beets quiet import.
+        """
         with self._rb_backup_file_handler.restore_track_meta_and_stage_for_import(audio_files_to_import):
             # 1. invoke beets import on the audio files to import
 
@@ -109,27 +112,29 @@ class RekordboxXMLController:
             # can set to interactive with tty to pipe docker stdin input/output to terminal for user feedback.
             # beets config set to quiet mode and fallback of 'asis'. If user needs to correct later, they will have to
             # specify a musicbrainz id and re import with a specific query. This will need a separate API to be implemented.
-            result = docker.execute(my_container, ['beet',  'import', '-q', '/downloads'])
+            result = docker.execute(my_container, ['beet', 'import', '-q', '/downloads'])
             print(result)
-            # a. use python on whales package and the following api
-            #       execute(service, command, detach=False, envs={}, index=1, tty=True, privileged=False, user=None, workdir=None)
-            # b. docker exec -it beets beet import /downloads
-            # 2. resolve import issues
-            # a. requires marshalling cli input to/from beets container
-            # 3. beets should import in to the directory navidrome is working off.
-            # 4. create internal subbox playlist and tracks as below
-            rekordbox_xml_playlists = self._rekordbox_xml_orchestrator.get_all_xml_playlists()
-            subbox_playlists: List[SubBoxPlaylist] = []
-            self._rekordbox_xml_orchestrator.get_subbox_playlists_from_rekordbox_xml_playlists(rekordbox_xml_playlists, '', subbox_playlists)
-            # 5. given the subbox info, create the playlists in navidrome using subsonic api
-            # 6. get the tracks from navidrome by using the 'query' api for each track.
-            # this sets the subsonic id found from querying navidrome. This can then be used to create the playlist and place
-            # the track in the playlist
-            res = await self._subsonic_orchestrator.update_tracks_with_subid(subbox_playlists)
-            # 8. create the playlists and set the rating of the track in navidrome from the rating taken from xml
-            await self._subsonic_orchestrator.create_playlists_and_set_rating(subbox_playlists)
-            # 9. on success, remove the directory of the beets import - this makes the operation atomic.
+            # 9. on success, remove the directory of the beets import
 
+    async def create_subsonic_playlists_from_xml(self, xml_path: Path, audio_files_to_import: Path):
+        await self.import_to_beets(audio_files_to_import)
+        await self.create_subsonic_playlists(xml_path)
+
+    async def create_subsonic_playlists(self, xml_path: Path):
+        self._rekordbox_xml_orchestrator.create_xml(xml_path)
+
+        # 4. create internal subbox playlist and tracks as below
+        rekordbox_xml_playlists = self._rekordbox_xml_orchestrator.get_all_xml_playlists()
+        subbox_playlists: List[SubBoxPlaylist] = []
+        self._rekordbox_xml_orchestrator.get_subbox_playlists_from_rekordbox_xml_playlists(rekordbox_xml_playlists, '',
+                                                                                           subbox_playlists)
+        # 5. given the subbox info, create the playlists in navidrome using subsonic api
+        # 6. get the tracks from navidrome by using the 'query' api for each track.
+        # this sets the subsonic id found from querying navidrome. This can then be used to create the playlist and place
+        # the track in the playlist
+        res = await self._subsonic_orchestrator.update_tracks_with_subid(subbox_playlists)
+        # 8. create the playlists and set the rating of the track in navidrome from the rating taken from xml
+        await self._subsonic_orchestrator.create_playlists_and_set_rating(subbox_playlists)
 
     async def get_healthcheck(self) -> dict:
         return {

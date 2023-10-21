@@ -41,16 +41,12 @@ class RBBackupFileHandler:
         """
         return f'{track.Artist} - {track.Name}'
 
-    @contextmanager
-    def restore_track_meta_and_stage_for_import(self, audio_files_to_import: Path):
+    def restore_track_meta(self, audio_files_to_import: Path) -> int:
         """
         rekordbox mangles the names of the tracks when creating the backup. It also nukes all the meta data in the
         audio files. This must be restored in to the audio file's meta data to allow beets import work.
-        Finally, the audio file is moved in to the beets docker shared directory that is used for import in to beets.
-        If the context manager completes successfully, then the import has succeeded so the contents of the import dir
-        can be removed.
         """
-
+        n_updated_tracks = 0
         for audio_file in audio_files_to_import.glob('**/*'):
             if audio_file.is_file() and audio_file.suffix:
                 try:
@@ -68,13 +64,33 @@ class RBBackupFileHandler:
                 restored_track = restored_track.parent / (restored_track.name + audio_file.suffix)
                 restored_track.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy(audio_file, restored_track)
-        yield
+                n_updated_tracks += 1
+        return n_updated_tracks
 
+    def clean_up_beets_import_tree(self):
+        """
+        After successful import in to beets, can remove the source tree that was imported.
+        """
         for filepath in Path(self._beets_data_path).iterdir():
             if filepath.is_dir():
                 shutil.rmtree(filepath)
             else:
                 filepath.unlink()
+
+    @contextmanager
+    def restore_track_meta_and_stage_for_import(self, audio_files_to_import: Path) -> int:
+        """
+        rekordbox mangles the names of the tracks when creating the backup. It also nukes all the meta data in the
+        audio files. This must be restored in to the audio file's meta data to allow beets import work.
+        Finally, the audio file is moved in to the beets docker shared directory that is used for import in to beets.
+        If the context manager completes successfully, then the import has succeeded so the contents of the import dir
+        can be removed.
+        """
+        n_updated_tracks = self.restore_track_meta(audio_files_to_import)
+        yield
+        self.clean_up_beets_import_tree()
+        return n_updated_tracks
+
 
     @staticmethod
     def _restore_tags(audio_file: Path, track: Track):
