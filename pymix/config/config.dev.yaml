@@ -7,6 +7,8 @@ subsonic:
   version: 1.16.1
   music_path_base_to_remove: music
   music_path_base_to_add: /Users/lajp/nav_music
+  docker_compose_file: /Users/lukepurnell/vscode/navidrome/docker-compose.yml
+  env_file: /Users/lukepurnell/vscode/navidrome/navidrome_env
 rekordbox:
   xml_path: /Users/lajp/rekordbox/rekordbox_empty.xml
 filebrowser:
@@ -16,3 +18,4 @@ beets:
 logs_directory: logs
 db:
   path: user_db.json
+max_number_of_users: 10

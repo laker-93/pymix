@@ -1,6 +1,8 @@
 from tinydb import TinyDB, Query
 from tinydb.table import Document
 
+from pymix.utils.get_available_port import get_available_port
+
 
 class DbController:
     def __init__(self, db: TinyDB):
@@ -13,19 +15,11 @@ class DbController:
         self._add_user(username, password, beets_port, subsonic_port)
 
     def _get_available_subsonic_port(self):
-        try:
-            last_subsonic_port = sorted(self._db.all(), key=lambda k: k['subsonic_port'])[-1]
-        except IndexError:
-            last_subsonic_port = 4553
-        subsonic_port = last_subsonic_port + 1
+        subsonic_port = get_available_port()
         return subsonic_port
 
     def _get_available_beets_port(self):
-        try:
-            last_beets_port = sorted(self._db.all(), key=lambda k: k['beets_port'])[-1]
-        except IndexError:
-            last_beets_port = 8337
-        beets_port = last_beets_port + 1
+        beets_port = get_available_port()
         return beets_port
 
     def _add_user(
@@ -49,3 +43,6 @@ class DbController:
         user = self.get_user(username)
         doc_id = user.doc_id
         self._db.remove(doc_ids=[doc_id])
+
+    def get_total_number_of_users(self) -> int:
+        return len(self._db)

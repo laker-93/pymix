@@ -10,9 +10,11 @@ from pymix.controllers.db_controller import DbController
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLFactory, RekordboxXMLController
 from pymix.factories.aiohttp_session_resource import init_aiohttp_session
 from pymix.factories.create_db_session import create_db_session
+from pymix.handlers.env_file_handler import NavidromeEnvFileHandler
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.handlers.rb_backup_file_handler import RBBackupFileHandler
 from pymix.orchestrators.rekordbox_xml_orchestrator import RekordboxXMLOrchestrator
+from pymix.orchestrators.services_orchestrator import ServicesOrchestrator
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
 
 
@@ -56,6 +58,18 @@ class Container(containers.DeclarativeContainer):
     db_controller = providers.Singleton(
         DbController,
         db
+    )
+
+    navidrome_env_file_handler = providers.Singleton(
+        NavidromeEnvFileHandler,
+        config.subsonic.env_file
+    )
+
+    services_orchestrator = providers.Singleton(
+        ServicesOrchestrator,
+        db_controller,
+        navidrome_env_file_handler,
+        config
     )
 
     subsonic_orchestrator = providers.Singleton(
