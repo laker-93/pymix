@@ -10,7 +10,7 @@ from pymix.controllers.db_controller import DbController
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLFactory, RekordboxXMLController
 from pymix.factories.aiohttp_session_resource import init_aiohttp_session
 from pymix.factories.create_db_session import create_db_session
-from pymix.handlers.env_file_handler import NavidromeEnvFileHandler
+from pymix.handlers.env_file_handler import DockerEnvFileHandler
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.handlers.rb_backup_file_handler import RBBackupFileHandler
 from pymix.orchestrators.rekordbox_xml_orchestrator import RekordboxXMLOrchestrator
@@ -30,12 +30,12 @@ class Container(containers.DeclarativeContainer):
 
     subsonic_client = providers.Singleton(
         SubsonicClient,
-        host=config.subsonic.host,
+        host=config.containers.subsonic.host,
         session=aiohttp_session,
-        username=config.subsonic.username,
-        version=config.subsonic.version,
-        music_path_base_to_add=config.subsonic.music_path_base_to_add,
-        music_path_base_to_remove=config.subsonic.music_path_base_to_remove
+        username=config.containers.subsonic.username,
+        version=config.containers.subsonic.version,
+        music_path_base_to_add=config.containers.subsonic.music_path_base_to_add,
+        music_path_base_to_remove=config.containers.subsonic.music_path_base_to_remove
     )
 
 
@@ -60,15 +60,14 @@ class Container(containers.DeclarativeContainer):
         db
     )
 
-    navidrome_env_file_handler = providers.Singleton(
-        NavidromeEnvFileHandler,
-        config.subsonic.env_file
+    env_file_handler = providers.Singleton(
+        DockerEnvFileHandler,
     )
 
     services_orchestrator = providers.Singleton(
         ServicesOrchestrator,
         db_controller,
-        navidrome_env_file_handler,
+        env_file_handler,
         config
     )
 
@@ -84,12 +83,12 @@ class Container(containers.DeclarativeContainer):
     rb_backup_file_handler = providers.Singleton(
         RBBackupFileHandler,
         rekordbox_xml_orchestrator,
-        config.beets.data
+        config.containers.beets.data
     )
     file_browser_file_handler = providers.Singleton(
         FileBrowserFileHandler,
-        config.filebrowser.data,
-        config.beets.data
+        config.containers.filebrowser.data,
+        config.containers.beets.data
     )
 
     rekordbox_xml_controller = providers.Singleton(

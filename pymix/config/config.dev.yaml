@@ -1,20 +1,25 @@
 ---
 app_env: dev
-subsonic:
-  #host: http://localhost:4533
-  host: http://localhost:4533/navidrome
-  username: lajp
-  version: 1.16.1
-  music_path_base_to_remove: music
-  music_path_base_to_add: /Users/lajp/nav_music
-  docker_compose_file: /Users/lukepurnell/vscode/navidrome/docker-compose.yml
-  env_file: /Users/lukepurnell/vscode/navidrome/navidrome_env
 rekordbox:
   xml_path: /Users/lajp/rekordbox/rekordbox_empty.xml
-filebrowser:
-  data: /Users/lajp/traefik/filebrowser/data
-beets:
-  data: /Users/lajp/traefik/beets/download
+containers:
+  subsonic:
+    #host: http://localhost:4533
+    host: http://localhost:4533/navidrome
+    username: lajp
+    version: 1.16.1
+    music_path_base_to_remove: music
+    music_path_base_to_add: /Users/lajp/nav_music
+    docker_compose_file: /Users/lukepurnell/subbox/docker-compose/navidrome/docker-compose.yml
+    env_file: /Users/lukepurnell/subbox/docker-compose/navidrome/env
+  filebrowser:
+    data: /Users/lajp/traefik/filebrowser/data
+    docker_compose_file: /Users/lukepurnell/subbox/docker-compose/filebrowser/docker-compose.yml
+    env_file: /Users/lukepurnell/subbox/docker-compose/filebrowser/env
+  beets:
+    data: /Users/lajp/traefik/beets/download
+    docker_compose_file: /Users/lukepurnell/subbox/docker-compose/beets/docker-compose.yml
+    env_file: /Users/lukepurnell/subbox/docker-compose/beets/env
 logs_directory: logs
 db:
   path: user_db.json
