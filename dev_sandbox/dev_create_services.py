@@ -5,7 +5,7 @@ from pymix.registration import create_container
 
 
 async def create_services(services_orchestrator: ServicesOrchestrator):
-    return services_orchestrator.create('lajp', 'lajp')
+    return services_orchestrator.create('emc', 'emc')
 
 
 

@@ -1,7 +1,6 @@
-import os
 from pathlib import Path
 
-from python_on_whales import DockerClient
+from python_on_whales import DockerClient, docker
 
 from pymix.controllers.db_controller import DbController
 from pymix.handlers.env_file_handler import DockerEnvFileHandler
@@ -39,8 +38,7 @@ class ServicesOrchestrator:
         user_root_dir.mkdir(exist_ok=True) # todo change to false when launch
         self._create_navidrome(user)
         self._create_beets(user)
-        # investigate: https://github.com/filebrowser/filebrowser/issues/1929
-        self._create_filebrowser(user)
+        self._create_filebrowser_account(user)
 
     def _create_navidrome(self, user: dict):
         port = user['subsonic_port']
@@ -76,23 +74,20 @@ class ServicesOrchestrator:
         )
         docker.compose.up(detach=True)
 
-    def _create_filebrowser(self, user: dict):
-        port = user['filebrowser_port']
+    def _create_filebrowser_account(self, user: dict):
+        filebrowser_container = docker.container.inspect("filebrowser")
         username = user['username']
-        project_name = f'filebrowser{username}'
-        uid = os.getuid()
-        gid = os.getgid()
-        self._env_file_handler.create_env_file(
-            Path(self._config['containers']['filebrowser']['env_file']),
-            username,
-            port,
-            project_name,
-            uid=uid,
-            gid=gid
+        password = user['password']
+        result = docker.execute(
+            filebrowser_container,
+            [
+                '/filebrowser',
+                'users',
+                'add',
+                username,
+                password,
+                '--database',
+                '/config/filebrowser.db'
+            ]
         )
-        docker = DockerClient(
-            compose_files=[self._config['containers']['filebrowser']['docker_compose_file']],
-            compose_env_file=self._config['containers']['filebrowser']['env_file'],
-            compose_project_name=project_name
-        )
-        docker.compose.up(detach=True)
+        print(result)
