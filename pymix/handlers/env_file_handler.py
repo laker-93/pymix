@@ -17,7 +17,7 @@ class EnvFileHandler:
 
 class DockerEnvFileHandler(EnvFileHandler):
     def create_env_file(self, path: Path, user: str, port: int, project_name: str, **kwargs):
-        keys = ['PORT', 'USER', 'NAME']
+        keys = ['PORT', 'SUBBOXUSERNAME', 'NAME']
         values = [port, user, project_name]
         for k, v in kwargs.items():
             keys.append(k.upper())

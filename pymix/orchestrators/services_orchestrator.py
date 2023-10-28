@@ -2,6 +2,7 @@ from pathlib import Path
 
 from python_on_whales import DockerClient, docker
 
+from pymix.clients.navidrome_client import NavidromeClient
 from pymix.controllers.db_controller import DbController
 from pymix.handlers.env_file_handler import DockerEnvFileHandler
 
@@ -10,15 +11,17 @@ class ServicesOrchestrator:
     def __init__(
             self,
             db_controller: DbController,
+            navidrome_client: NavidromeClient,
             env_file_handler: DockerEnvFileHandler,
             config: dict
     ):
         self._db_controller = db_controller
+        self._navidrome_client = navidrome_client
         self._env_file_handler = env_file_handler
         self._config = config
         self._max_number_of_users = config['max_number_of_users']
 
-    def create(self, username: str, password: str) -> dict:
+    async def create(self, username: str, password: str) -> dict:
         """
         Command to create navidrome for user=nc:
         PORT=4535 USER=nc NAME=navidromenc docker-compose --project-name navidromenc up -d
@@ -34,11 +37,12 @@ class ServicesOrchestrator:
 
         self._db_controller.create_user(username, password)
         user = self._db_controller.get_user(username)
-        user_root_dir = Path(f'/Users/lukepurnell/subbox/{user}')
+        user_root_dir = Path(f'/Users/lukepurnell/subbox/{username}')
         user_root_dir.mkdir(exist_ok=True) # todo change to false when launch
         self._create_navidrome(user)
         self._create_beets(user)
         self._create_filebrowser_account(user)
+        await self._navidrome_client.create_account(user)
 
     def _create_navidrome(self, user: dict):
         port = user['subsonic_port']
@@ -50,6 +54,7 @@ class ServicesOrchestrator:
             port,
             project_name
         )
+
         docker = DockerClient(
             compose_files=[self._config['containers']['subsonic']['docker_compose_file']],
             compose_env_file=self._config['containers']['subsonic']['env_file'],
@@ -67,6 +72,7 @@ class ServicesOrchestrator:
             port,
             project_name
         )
+
         docker = DockerClient(
             compose_files=[self._config['containers']['beets']['docker_compose_file']],
             compose_env_file=self._config['containers']['beets']['env_file'],

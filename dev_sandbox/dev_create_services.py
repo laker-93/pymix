@@ -5,14 +5,14 @@ from pymix.registration import create_container
 
 
 async def create_services(services_orchestrator: ServicesOrchestrator):
-    return services_orchestrator.create('emc', 'emc')
+    return await services_orchestrator.create('emc', 'emc')
 
 
 
 async def main():
     container = create_container('dev')
     container.wire(modules=[__name__])
-    orchestrator = container.services_orchestrator()
+    orchestrator = await container.services_orchestrator()
     result = await create_services(orchestrator)
 
 if __name__ == "__main__":

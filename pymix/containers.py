@@ -5,6 +5,7 @@ from toredocore.providers.healthcheck.async_healthcheck_provider import AsyncHea
 from toredocore.providers.healthcheck.healthcheck_dependency import HealthcheckDependency
 from dependency_injector import containers, providers
 
+from pymix.clients.navidrome_client import NavidromeClient
 from pymix.clients.subsonic_client import SubsonicClient
 from pymix.controllers.db_controller import DbController
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLFactory, RekordboxXMLController
@@ -38,6 +39,11 @@ class Container(containers.DeclarativeContainer):
         music_path_base_to_remove=config.containers.subsonic.music_path_base_to_remove
     )
 
+    navidrome_client = providers.Singleton(
+        NavidromeClient,
+        host=config.containers.subsonic.host,
+        session=aiohttp_session
+    )
 
     rekordbox_xml_factory = providers.Factory(
         RekordboxXMLFactory,
@@ -67,6 +73,7 @@ class Container(containers.DeclarativeContainer):
     services_orchestrator = providers.Singleton(
         ServicesOrchestrator,
         db_controller,
+        navidrome_client,
         env_file_handler,
         config
     )
