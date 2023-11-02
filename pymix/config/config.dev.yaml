@@ -22,5 +22,5 @@ containers:
     env_file: /Users/lukepurnell/subbox/docker-compose/beets/env
 logs_directory: logs
 db:
-  path: user_db.json
+  path: /Users/lukepurnell/PycharmProjects/pymix/user_db.json
 max_number_of_users: 10

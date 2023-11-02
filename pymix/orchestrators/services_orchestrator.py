@@ -1,5 +1,7 @@
+import asyncio
 from pathlib import Path
 
+from aiohttp import ClientConnectorError
 from python_on_whales import DockerClient, docker
 
 from pymix.clients.navidrome_client import NavidromeClient
@@ -42,7 +44,20 @@ class ServicesOrchestrator:
         self._create_navidrome(user)
         self._create_beets(user)
         self._create_filebrowser_account(user)
-        await self._navidrome_client.create_account(user)
+        await self._attempt_to_create_account(user)
+
+    async def _attempt_to_create_account(self, user: dict, attempts: int = 5) -> bool:
+        success = False
+        for attempt in range(attempts):
+            try:
+                await self._navidrome_client.create_account(user)
+            except ClientConnectorError:
+                # account for a race here where navidrome docker is still being created. So attempt multiple times.
+                await asyncio.sleep(0.5)
+            else:
+                success = True
+                break
+        return success
 
     def _create_navidrome(self, user: dict):
         port = user['subsonic_port']

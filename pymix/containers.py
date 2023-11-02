@@ -53,7 +53,7 @@ class Container(containers.DeclarativeContainer):
         )
     )
 
-    db = providers.Factory(
+    db = providers.Singleton(
         create_db_session,
         providers.Factory(
             Path,

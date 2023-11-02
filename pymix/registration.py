@@ -4,19 +4,29 @@ from pathlib import Path
 
 from toredocore.logger import initialise_logger
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from pymix import constants
 from pymix.containers import Container
-from pymix.routers import maintenance, create_xml
+from pymix.routers import maintenance, create_xml, get_user, create_user
 
 
 def create_app():
     app = FastAPI(
         title=constants.title, version=constants.version, description=constants.description
     )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     app.include_router(maintenance.router)
     app.include_router(create_xml.router)
+    app.include_router(get_user.router)
+    app.include_router(create_user.router)
     return app
 
 
@@ -32,7 +42,7 @@ def create_container(environment="dev"):
     container = Container()
     container.config.from_dict(app_config)
     container.init_resources()
-    container.wire(modules=[maintenance, create_xml, sys.modules[__name__]])
+    container.wire(modules=[maintenance, create_xml, get_user, create_user, sys.modules[__name__]])
     return container
 
 
