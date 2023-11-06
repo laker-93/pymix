@@ -11,17 +11,16 @@ router = APIRouter()
 
 logger = logging.getLogger(__name__)
 
-@router.get("/create_subsonic", tags=["RekordBoxXML"])
+@router.get("/beets_import", tags=["import"])
 @inject
 async def create_subsonic_from_xml(
         username: str,
-        rekordbox_xml_filename: str,
         rekordbox_xml_controller: RekordboxXMLController = Depends(Provide[Container.rekordbox_xml_controller])
 )-> dict:
     logger.info(f'creating rekordbox xml')
-    xml_path = Path('/Users/lajp/rekordbox/rekordbox_081023.xml')
-    audio_files_to_import = Path('/Users/lajp/rekordbox/rekordbox_bak')
-    await rekordbox_xml_controller.create_subsonic_playlists_from_xml(xml_path, audio_files_to_import)
+    filebrowser_path = f'/Users/lukepurnell/subbox/docker-compose/filebrowser/data/users/{username}'
+    audio_files_to_import = Path(filebrowser_path)
+    await rekordbox_xml_controller.import_to_beets(audio_files_to_import)
     return {
         'success': True
     }
