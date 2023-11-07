@@ -23,7 +23,7 @@ class ServicesOrchestrator:
         self._config = config
         self._max_number_of_users = config['max_number_of_users']
 
-    async def create(self, username: str, password: str) -> dict:
+    async def create(self, username: str, password: str) -> str:
         """
         Command to create navidrome for user=nc:
         PORT=4535 USER=nc NAME=navidromenc docker-compose --project-name navidromenc up -d
@@ -32,12 +32,9 @@ class ServicesOrchestrator:
         """
 
         if self._db_controller.get_total_number_of_users() > self._max_number_of_users:
-            return {
-                'success': False,
-                'reason': f"exceeded max number of users {self._max_number_of_users}"
-            }
+            raise ValueError(f"exceeded max number of users {self._max_number_of_users}")
 
-        self._db_controller.create_user(username, password)
+        session_id = self._db_controller.create_user(username, password)
         user = self._db_controller.get_user(username)
         user_root_dir = Path(f'/Users/lukepurnell/subbox/{username}')
         user_root_dir.mkdir(exist_ok=True) # todo change to false when launch
@@ -45,6 +42,7 @@ class ServicesOrchestrator:
         self._create_beets(user)
         self._create_filebrowser_account(user)
         await self._attempt_to_create_account(user)
+        return session_id
 
     async def _attempt_to_create_account(self, user: dict, attempts: int = 5) -> bool:
         success = False
