@@ -36,6 +36,32 @@ async def create_user(
         response.set_cookie(key='session_id', value=session_id, httponly=True)
     return response
 
+
+@router.post("/user/login", tags=["db"])
+@inject
+async def user_login(
+        username: str,
+        password: str,
+        db_controller: DbController = Depends(Provide[Container.db_controller]),
+)-> JSONResponse:
+    logger.info(f'logging in user {username}')
+    reason = ""
+    success = True
+    session_id = ""
+    try:
+        session_id = db_controller.create_session(username, password)
+    except Exception as ex:
+        logger.error(f'error occured logging in user', exc_info=True)
+        reason = repr(ex)
+        success = False
+    response = JSONResponse(content=reason, status_code=HTTPStatus.OK if success else HTTPStatus.INTERNAL_SERVER_ERROR)
+    if success:
+        print(f'setting cookie to {session_id}')
+        response.set_cookie(key='session_id', value=session_id, httponly=True)
+    return response
+
+
+
 @router.get("/user/delete", tags=["db"])
 @inject
 async def delete_user(
