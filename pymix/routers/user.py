@@ -32,7 +32,7 @@ async def create_user(
         success = False
     response = JSONResponse(content=reason, status_code=HTTPStatus.OK if success else HTTPStatus.INTERNAL_SERVER_ERROR)
     if success:
-        print(f'setting cookie to {session_id}')
+        logger.info(f'setting cookie to {session_id}')
         response.set_cookie(key='session_id', value=session_id, httponly=True)
     return response
 
@@ -42,21 +42,23 @@ async def create_user(
 async def user_login(
         username: str,
         password: str,
+        session_id: str | None,
         db_controller: DbController = Depends(Provide[Container.db_controller]),
 )-> JSONResponse:
     logger.info(f'logging in user {username}')
     reason = ""
     success = True
-    session_id = ""
-    try:
-        session_id = db_controller.create_session(username, password)
-    except Exception as ex:
-        logger.error(f'error occured logging in user', exc_info=True)
-        reason = repr(ex)
-        success = False
+    print(f'got session id {session_id}')
+    if session_id is None:
+        try:
+            session_id = db_controller.create_session(username, password)
+        except Exception as ex:
+            logger.error(f'error occured logging in user', exc_info=True)
+            reason = repr(ex)
+            success = False
     response = JSONResponse(content=reason, status_code=HTTPStatus.OK if success else HTTPStatus.INTERNAL_SERVER_ERROR)
     if success:
-        print(f'setting cookie to {session_id}')
+        logger.info(f'setting cookie to {session_id}')
         response.set_cookie(key='session_id', value=session_id, httponly=True)
     return response
 
@@ -82,7 +84,7 @@ async def delete_user(
         'reason': reason
     }
 
-@router.get("/user/get", tags=["db"])
+@router.get("/user/get_by_username", tags=["db"])
 @inject
 async def get_user(
         username: str,
@@ -96,6 +98,28 @@ async def get_user(
         user = db_controller.get_user(username)
     except Exception as ex:
         logger.error(f'error occurred getting user {username}', exc_info=True)
+        reason = repr(ex)
+        success = False
+    return {
+        'success': success,
+        'reason': reason,
+        'user': user
+    }
+
+@router.get("/user/get_by_session_id", tags=["db"])
+@inject
+async def get_user_by_session_id(
+        session_id: str,
+        db_controller: DbController = Depends(Provide[Container.db_controller]),
+)-> dict:
+    logger.info(f'retrieving user with session id {session_id}')
+    reason = ""
+    success = True
+    user = {}
+    try:
+        user = db_controller.get_user_by_session_id(session_id)
+    except Exception as ex:
+        logger.error(f'error occurred getting user for session id {session_id}', exc_info=True)
         reason = repr(ex)
         success = False
     return {
