@@ -1,4 +1,5 @@
 import asyncio
+import shutil
 from pathlib import Path
 
 from aiohttp import ClientConnectorError
@@ -92,6 +93,10 @@ class ServicesOrchestrator:
             compose_project_name=project_name
         )
         docker.compose.up(detach=True)
+        # overwrite the default beets config with subbox specific beets config
+        config_src = self._config['containers']['beets']['config_file_src']
+        config_dst = self._config['containers']['beets']['config_file_dst'].format(user=username)
+        shutil.copy(config_src, config_dst)
 
     def _create_filebrowser_account(self, user: dict):
         filebrowser_container = docker.container.inspect("filebrowser")

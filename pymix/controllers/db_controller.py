@@ -82,8 +82,7 @@ class DbController:
             User = Query()
             user_table = self._db.table('user_table')
             results = user_table.search(User.user_id == user_id)
-            # todo be careful not to print passwords. Need to store password as hash really.
-            assert len(results) == 1, f'found {len(results)} users with username {username}: {results}'
+            assert len(results) == 1, f'found {len(results)} users in user table with user id {user_id}'
             result = results.pop()
             return result
 

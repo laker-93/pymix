@@ -43,7 +43,8 @@ class RekordboxXMLController:
         for track in subsonic_playlist.tracks:
             self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(track, playlist)
 
-    async def consume_from_filebrowser(self):
+    # todo this controller is overloaded; this method has nothing to do with rekordbox xml and should live elsewhere.
+    async def consume_from_filebrowser(self, user: str):
         """
         # steps:
         # 1. user uploads to filebrowser
@@ -51,9 +52,10 @@ class RekordboxXMLController:
         # 3. do beet import
         """
 
-        with self._file_browser_file_handler.stage_for_import():
+        with self._file_browser_file_handler.stage_for_import(user):
             # 1. invoke beets import on the audio files to import
-            my_container = docker.container.inspect("beets")
+            my_container = docker.container.inspect(f"beets{user}")
+            print('found container')
             # can set to interactive with tty to pipe docker stdin input/output to terminal for user feedback.
             # beets config set to quiet mode and fallback of 'asis'. If user needs to correct later, they will have to
             # specify a musicbrainz id and re import with a specific query. This will need a separate API to be implemented.

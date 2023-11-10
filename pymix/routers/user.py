@@ -37,7 +37,7 @@ async def create_user(
     return response
 
 
-@router.post("/user/login", tags=["db"])
+@router.post("/user/login", tags=["user"])
 @inject
 async def user_login(
         username: str,

@@ -23,17 +23,25 @@ class FileBrowserFileHandler:
         self._beets_data_path = beets_data_path
 
     @contextmanager
-    def stage_for_import(self):
+    def stage_for_import(self, user: str):
         """
         copy files from filebrowser to beets input data path.
         Delete files on success.
         """
 
-        shutil.copytree(self._filebrowser_data_path, self._beets_data_path, dirs_exist_ok=True)
+        src_dir = self._filebrowser_data_path.format(user=user)
+        dest_dir = self._beets_data_path.format(user=user)
+        logger.info(f'staging for import. Copy from {src_dir} to {dest_dir}')
+        shutil.copytree(src_dir, dest_dir, dirs_exist_ok=True)
         yield
-        shutil.rmtree(self._filebrowser_data_path)
+        logger.info(f'removing contents of {src_dir}')
+        for filepath in Path(src_dir).iterdir():
+            if filepath.is_dir():
+                shutil.rmtree(filepath)
+            else:
+                filepath.unlink()
 
-        for filepath in Path(self._beets_data_path).iterdir():
+        for filepath in Path(dest_dir).iterdir():
             if filepath.is_dir():
                 shutil.rmtree(filepath)
             else:

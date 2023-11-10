@@ -13,13 +13,15 @@ containers:
     docker_compose_file: /Users/lukepurnell/subbox/docker-compose/navidrome/docker-compose.yml
     env_file: /Users/lukepurnell/subbox/docker-compose/navidrome/env
   filebrowser:
-    data: /Users/lajp/traefik/filebrowser/data
+    data: /Users/lukepurnell/subbox/docker-compose/filebrowser/data/users/{user}
     docker_compose_file: /Users/lukepurnell/subbox/docker-compose/filebrowser/docker-compose.yml
     env_file: /Users/lukepurnell/subbox/docker-compose/filebrowser/env
   beets:
-    data: /Users/lajp/traefik/beets/download
+    data: /Users/lukepurnell/subbox/{user}/beets/download
     docker_compose_file: /Users/lukepurnell/subbox/docker-compose/beets/docker-compose.yml
     env_file: /Users/lukepurnell/subbox/docker-compose/beets/env
+    config_file_src: /Users/lukepurnell/traefik/beets/config/config.yaml
+    config_file_dst: /Users/lukepurnell/subbox/{user}/beets/config/config.yaml
 logs_directory: logs
 db:
   path: /Users/lukepurnell/PycharmProjects/pymix/user_db.json
