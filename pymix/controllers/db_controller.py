@@ -16,6 +16,46 @@ class DbController:
         self._db = db
         self._session_to_user_schema = ('session_id', 'user_id')
         self._user_schema = ('username', 'password', 'user_id', 'beets_port', 'subsonic_port', 'filebrowser_port')
+        self._user_jobs_schema = ('user_id', 'job_id')
+        self._import_job_schema = ('job_id', 'name', 'n_tracks_to_import', 'total_n_imported_tracks', 'in_progress', 'result')
+
+    def create_import_job(self, username: str, number_of_tracks_to_import: int, total_n_imported_tracks: int) -> str:
+        user = self.get_user(username)
+        user_id = user['user_id']
+        job_id = uuid.uuid4().hex
+        self._add_user_job(user_id, job_id)
+        self._add_import_job(job_id, number_of_tracks_to_import, total_n_imported_tracks)
+        return job_id
+
+    def get_import_job(self, username: str) -> Document:
+        user = self.get_user(username)
+        user_id: str = user['user_id']
+        user_job_table = self._db.table('user_job_table')
+        UserJob = Query()
+        results = user_job_table.search(UserJob.user_id == user_id)
+        assert len(results) == 1
+        result = results.pop()
+        job_id: str = result['job_id']
+        ImportJob = Query()
+        job_table = self._db.table('job_table')
+        job_results = job_table.search(ImportJob.job_id == job_id)
+        assert len(job_results) == 1
+        job = job_results.pop()
+        return job
+
+
+    def job_completed(self, job_id: str, result: bool):
+        job_table = self._db.table('job')
+        Job = Query()
+        job_table.upsert({'in_progress': False, 'result': result}, Job.job_id == job_id)
+
+    def _add_import_job(self, job_id: str, number_of_tracks_to_import: int, total_n_imported_tracks):
+        job_table = self._db.table('job')
+        job_table.insert(dict(zip(self._import_job_schema, (job_id, 'import', number_of_tracks_to_import, total_n_imported_tracks, True, None))))
+
+    def _add_user_job(self, user_id: str, job_id: str):
+        user_job_table = self._db.table('user_job_table')
+        user_job_table.insert(dict(zip(self._user_jobs_schema, (user_id, job_id))))
 
     def create_user(self, username: str, password: str) -> str:
         User = Query()

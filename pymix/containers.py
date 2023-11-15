@@ -8,6 +8,7 @@ from dependency_injector import containers, providers
 from pymix.clients.navidrome_client import NavidromeClient
 from pymix.clients.subsonic_client import SubsonicClient
 from pymix.controllers.db_controller import DbController
+from pymix.controllers.docker_controller import DockerController
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLFactory, RekordboxXMLController
 from pymix.factories.aiohttp_session_resource import init_aiohttp_session
 from pymix.factories.create_db_session import create_db_session
@@ -105,6 +106,10 @@ class Container(containers.DeclarativeContainer):
         rb_backup_file_handler,
         file_browser_file_handler,
         config.rekordbox.restored_rb_output_root
+    )
+
+    docker_controller = providers.Singleton(
+        DockerController
     )
 
     healthcheck_provider = providers.Resource(

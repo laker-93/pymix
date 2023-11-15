@@ -22,6 +22,14 @@ class FileBrowserFileHandler:
         self._filebrowser_data_path = filebrowser_data_path
         self._beets_data_path = beets_data_path
 
+    def get_number_of_tracks_for_import(self, user: str) -> int:
+        src_path = Path(
+            self._filebrowser_data_path.format(user=user)
+        )
+        n_files = sum(1 for f in src_path.rglob('*') if f.is_file())
+        return n_files
+
+
     @contextmanager
     def stage_for_import(self, user: str):
         """
