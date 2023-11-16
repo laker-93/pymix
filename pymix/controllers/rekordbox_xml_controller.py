@@ -1,4 +1,5 @@
 import logging
+import anyio
 from pathlib import Path
 from typing import List, Optional
 from python_on_whales import docker
@@ -45,6 +46,9 @@ class RekordboxXMLController:
 
     # todo this controller is overloaded; this method has nothing to do with rekordbox xml and should live elsewhere.
     async def consume_from_filebrowser(self, user: str):
+        await anyio.to_thread.run_sync(self._consume_from_filebrowser, user)
+
+    def _consume_from_filebrowser(self, user: str):
         """
         # steps:
         # 1. user uploads to filebrowser
