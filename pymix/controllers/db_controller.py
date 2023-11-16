@@ -27,6 +27,14 @@ class DbController:
         self._add_import_job(job_id, number_of_tracks_to_import, total_n_imported_tracks)
         return job_id
 
+    def get_number_of_jobs(self, username: str) -> int:
+        user = self.get_user(username)
+        user_id: str = user['user_id']
+        user_job_table = self._db.table('user_job_table')
+        UserJob = Query()
+        results = user_job_table.search(UserJob.user_id == user_id)
+        return len(results)
+
     def get_import_job(self, username: str) -> Document:
         user = self.get_user(username)
         user_id: str = user['user_id']
@@ -36,21 +44,21 @@ class DbController:
         assert len(results) == 1
         result = results.pop()
         job_id: str = result['job_id']
-        ImportJob = Query()
         job_table = self._db.table('job_table')
+        ImportJob = Query()
         job_results = job_table.search(ImportJob.job_id == job_id)
-        assert len(job_results) == 1
+        assert len(job_results) == 1, f'job results: {job_results}'
         job = job_results.pop()
         return job
 
 
     def job_completed(self, job_id: str, result: bool):
-        job_table = self._db.table('job')
+        job_table = self._db.table('job_table')
         Job = Query()
         job_table.upsert({'in_progress': False, 'result': result}, Job.job_id == job_id)
 
     def _add_import_job(self, job_id: str, number_of_tracks_to_import: int, total_n_imported_tracks):
-        job_table = self._db.table('job')
+        job_table = self._db.table('job_table')
         job_table.insert(dict(zip(self._import_job_schema, (job_id, 'import', number_of_tracks_to_import, total_n_imported_tracks, True, None))))
 
     def _add_user_job(self, user_id: str, job_id: str):

@@ -65,6 +65,7 @@ async def tracks_imported(
 ) -> dict:
     success = False
     reason = ""
+    percentage_complete = 0
     if not username and session_id:
         try:
             user = db_controller.get_user_by_session_id(session_id)
@@ -75,15 +76,17 @@ async def tracks_imported(
             username = user['username']
     if username:
         # this will raise an exception on first invocation when the job has yet to be started.
-        job = db_controller.get_import_job(username)
-        original_total_n_imported_tracks = job['total_n_imported_tracks']
-        original_n_tracks_to_import = job['n_tracks_to_import']
-        total_n_imported_tracks = docker_controller.get_number_of_imported_beets_tracks(username)
-        imported_diff = total_n_imported_tracks - original_total_n_imported_tracks
-        percentage_complete = imported_diff / original_n_tracks_to_import
-        logger.info(f'A total of {total_n_imported_tracks} have been imported.')
-        logger.info(f'have complete {percentage_complete}% out of {original_n_tracks_to_import}')
-        success = True
+        n_jobs = db_controller.get_number_of_jobs(username)
+        if n_jobs > 0:
+            job = db_controller.get_import_job(username)
+            original_total_n_imported_tracks = job['total_n_imported_tracks']
+            original_n_tracks_to_import = job['n_tracks_to_import']
+            total_n_imported_tracks = docker_controller.get_number_of_imported_beets_tracks(username)
+            imported_diff = total_n_imported_tracks - original_total_n_imported_tracks
+            percentage_complete = imported_diff / original_n_tracks_to_import
+            logger.info(f'A total of {total_n_imported_tracks} have been imported.')
+            logger.info(f'have complete {percentage_complete}% out of {original_n_tracks_to_import}')
+            success = True
     return {
         'success': success,
         'reason': reason,
