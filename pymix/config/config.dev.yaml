@@ -17,6 +17,7 @@ containers:
     docker_compose_file: /Users/lukepurnell/subbox/docker-compose/filebrowser/docker-compose.yml
     env_file: /Users/lukepurnell/subbox/docker-compose/filebrowser/env
   beets:
+    host: http://localhost:{port}
     data: /Users/lukepurnell/subbox/{user}/beets/download
     docker_compose_file: /Users/lukepurnell/subbox/docker-compose/beets/docker-compose.yml
     env_file: /Users/lukepurnell/subbox/docker-compose/beets/env

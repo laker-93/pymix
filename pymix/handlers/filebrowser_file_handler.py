@@ -1,14 +1,10 @@
 import logging
 from contextlib import contextmanager
 
-import music_tag
-import os
+import mimetypes
 import shutil
 from pathlib import Path
 
-from pyrekordbox.xml import Track
-
-from pymix.orchestrators.rekordbox_xml_orchestrator import RekordboxXMLOrchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +17,23 @@ class FileBrowserFileHandler:
     ):
         self._filebrowser_data_path = filebrowser_data_path
         self._beets_data_path = beets_data_path
+        self._mimetypes = mimetypes.init()
 
     def get_number_of_tracks_for_import(self, user: str) -> int:
         src_path = Path(
             self._filebrowser_data_path.format(user=user)
         )
-        n_files = sum(1 for f in src_path.rglob('*') if f.is_file())
+        n_files = 0
+        # tradeo off here between speed and accuracy. Proper detection of audio file based on content is slow.
+        # This detects if audio based on file extension (since the upload could contain other types of files).
+        # TODO: must do virus detection in a filebrowser pre hook and proper pre analysis of files.
+        for f in src_path.rglob('*'):
+            if f.is_file():
+                mimestart = mimetypes.guess_type(str(f))[0]
+                if mimestart:
+                    mimecategory = mimestart.split('/')[0]
+                    if mimecategory == 'audio':
+                        n_files += 1
         return n_files
 
 

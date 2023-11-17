@@ -3,9 +3,9 @@ import logging
 from dependency_injector.wiring import Provide, inject
 from fastapi import APIRouter, Depends
 
+from pymix.clients.beets_client import BeetsClient
 from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
-from pymix.controllers.docker_controller import DockerController
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 async def beets_import(
     session_id: str | None = None,
     username: str | None = None,
-    docker_controller: DockerController = Depends(Provide[Container.docker_controller]),
+    beets_client: BeetsClient = Depends(Provide[Container.beets_client]),
     fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
     rekordbox_xml_controller: RekordboxXMLController = Depends(Provide[Container.rekordbox_xml_controller]),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
@@ -38,7 +38,7 @@ async def beets_import(
             username = user['username']
     if username:
         total_n_tracks_for_import = fb_file_handler.get_number_of_tracks_for_import(username)
-        total_n_imported_tracks = docker_controller.get_number_of_imported_beets_tracks(username)
+        total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
         job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
         logger.info(f'importing {total_n_tracks_for_import} tracks for user {username}')
         try:
@@ -60,7 +60,7 @@ async def beets_import(
 async def tracks_imported(
         session_id: str | None = None,
         username: str | None = None,
-        docker_controller: DockerController = Depends(Provide[Container.docker_controller]),
+        beets_client: BeetsClient = Depends(Provide[Container.beets_client]),
         db_controller: DbController = Depends(Provide[Container.db_controller]),
 ) -> dict:
     success = False
@@ -79,9 +79,9 @@ async def tracks_imported(
         n_jobs = db_controller.get_number_of_jobs(username)
         if n_jobs > 0:
             job = db_controller.get_import_job(username)
-            original_total_n_imported_tracks = job['total_n_imported_tracks']
+            original_total_n_imported_tracks: int = job['total_n_imported_tracks']
             original_n_tracks_to_import = job['n_tracks_to_import']
-            total_n_imported_tracks = docker_controller.get_number_of_imported_beets_tracks(username)
+            total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
             imported_diff = total_n_imported_tracks - original_total_n_imported_tracks
             percentage_complete = imported_diff / original_n_tracks_to_import
             logger.info(f'A total of {total_n_imported_tracks} have been imported.')
@@ -98,7 +98,6 @@ async def tracks_imported(
 async def tracks_imported(
     session_id: str | None = None,
     username: str | None = None,
-    docker_controller: DockerController = Depends(Provide[Container.docker_controller]),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
 ) -> dict:
     success = False
