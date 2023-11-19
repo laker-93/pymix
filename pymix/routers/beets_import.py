@@ -25,6 +25,7 @@ async def beets_import(
 )-> dict:
     success = True
     reason = ""
+    total_n_imported_tracks = 0
     if not username and not session_id:
         success = False
         reason = "must have a username or session id to identify user"
@@ -48,9 +49,12 @@ async def beets_import(
             msg = f'error occurred importing the following path in to beets for user {username} {repr(ex)}'
             logger.error(msg, exc_info=True)
             reason = msg
+        else:
+            total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
         db_controller.job_completed(job_id, success)
     return {
         'success': success,
+        'imported_tracks': total_n_imported_tracks,
         'reason': reason
     }
 
