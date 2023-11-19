@@ -45,10 +45,10 @@ class RekordboxXMLController:
             self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(track, playlist)
 
     # todo this controller is overloaded; this method has nothing to do with rekordbox xml and should live elsewhere.
-    async def consume_from_filebrowser(self, user: str):
-        await anyio.to_thread.run_sync(self._consume_from_filebrowser, user)
+    async def consume_from_filebrowser(self, user: str) -> str:
+        return await anyio.to_thread.run_sync(self._consume_from_filebrowser, user)
 
-    def _consume_from_filebrowser(self, user: str):
+    def _consume_from_filebrowser(self, user: str) -> str:
         """
         # steps:
         # 1. user uploads to filebrowser
@@ -65,6 +65,7 @@ class RekordboxXMLController:
             # specify a musicbrainz id and re import with a specific query. This will need a separate API to be implemented.
             result = docker.execute(my_container, ['beet', 'import', '-q', '/downloads'])
             print(result)
+            return result
 
     async def create_rekordbox_xml_from_subsonic_playlists(self, xml_path: Optional[Path], xml_output_path: Path):
 

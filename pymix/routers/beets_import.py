@@ -25,6 +25,7 @@ async def beets_import(
 )-> dict:
     success = True
     reason = ""
+    beets_output = ""
     total_n_imported_tracks = 0
     if not username and not session_id:
         success = False
@@ -43,7 +44,7 @@ async def beets_import(
         job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
         logger.info(f'importing {total_n_tracks_for_import} tracks for user {username}')
         try:
-            await rekordbox_xml_controller.consume_from_filebrowser(username)
+            beets_output = await rekordbox_xml_controller.consume_from_filebrowser(username)
         except Exception as ex:
             success = False
             msg = f'error occurred importing the following path in to beets for user {username} {repr(ex)}'
@@ -55,6 +56,7 @@ async def beets_import(
     return {
         'success': success,
         'imported_tracks': total_n_imported_tracks,
+        'beets_output': beets_output,
         'reason': reason
     }
 
@@ -80,7 +82,7 @@ async def tracks_imported(
             username = user['username']
     if username:
         # this will raise an exception on first invocation when the job has yet to be started.
-        n_jobs = db_controller.get_number_of_jobs(username)
+        n_jobs = db_controller.get_number_of_jobs(username, in_progress=True)
         if n_jobs > 0:
             job = db_controller.get_import_job(username)
             original_total_n_imported_tracks: int = job['total_n_imported_tracks']

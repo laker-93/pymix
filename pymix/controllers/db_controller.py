@@ -27,12 +27,12 @@ class DbController:
         self._add_import_job(job_id, number_of_tracks_to_import, total_n_imported_tracks)
         return job_id
 
-    def get_number_of_jobs(self, username: str) -> int:
+    def get_number_of_jobs(self, username: str, in_progress: bool) -> int:
         user = self.get_user(username)
         user_id: str = user['user_id']
         user_job_table = self._db.table('user_job_table')
         UserJob = Query()
-        results = user_job_table.search(UserJob.user_id == user_id)
+        results = user_job_table.search(UserJob.user_id == user_id and UserJob.in_progress == in_progress)
         return len(results)
 
     def get_import_job(self, username: str) -> Document:
