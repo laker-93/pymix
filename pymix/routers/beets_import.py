@@ -52,7 +52,8 @@ async def beets_import(
             reason = msg
         else:
             total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
-        db_controller.job_completed(job_id, success)
+        finally:
+            db_controller.job_completed(job_id, success)
     return {
         'success': success,
         'imported_tracks': total_n_imported_tracks,
@@ -93,6 +94,10 @@ async def tracks_imported(
             logger.info(f'A total of {total_n_imported_tracks} have been imported.')
             logger.info(f'have complete {percentage_complete}% out of {original_n_tracks_to_import}')
             success = True
+        else:
+            reason = f"no in-progress jobs found for user {username}"
+    else:
+        reason = f"no username found for session id {session_id}"
     return {
         'success': success,
         'reason': reason,
