@@ -82,8 +82,8 @@ async def tracks_imported(
         else:
             username = user['username']
     if username:
-        # this will raise an exception on first invocation when the job has yet to be started.
         n_jobs = db_controller.get_number_of_jobs(username, in_progress=True)
+        # will return 0 on first invocation when the job has yet to be started.
         if n_jobs > 0:
             job = db_controller.get_import_job(username)
             original_total_n_imported_tracks: int = job['total_n_imported_tracks']

@@ -34,11 +34,11 @@ class DbController:
         UserJob = Query()
         results = user_job_table.search(UserJob.user_id == user_id)
         job_table = self._db.table('job_table')
-        Job = Query()
         n_in_progress_jobs = 0
         for result in results:
+            Job = Query()
             job_id: str = result['job_id']
-            job_results = job_table.search(Job.job_id == job_id and Job.in_progress == in_progress)
+            job_results = job_table.search((Job.job_id == job_id) & (Job.in_progress == in_progress))
             assert len(job_results) == 1 or len(job_results) == 0, f'have {len(job_results)} in progress jobs for user {user_id}'
             n_in_progress_jobs += len(job_results)
         assert n_in_progress_jobs == 1 or n_in_progress_jobs == 0, f'have {n_in_progress_jobs} in progress jobs for user {user_id}'
@@ -50,7 +50,7 @@ class DbController:
         user_job_table = self._db.table('user_job_table')
         UserJob = Query()
         results = user_job_table.search(UserJob.user_id == user_id)
-        assert len(results) == 1
+        assert len(results) != 0, f'no entry found in user_job_table for user {user_id}'
         result = results.pop()
         job_id: str = result['job_id']
         job_table = self._db.table('job_table')
