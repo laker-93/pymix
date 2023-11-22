@@ -105,7 +105,7 @@ class RekordboxXMLController:
         # todo remove any playlists that have no tracks
         self._rekordbox_xml_orchestrator.save_xml(xml_output_path)
 
-    async def import_to_beets(self, audio_files_to_import: Path):
+    async def import_to_beets(self, username: str, audio_files_to_import: Path):
         """
         Import into beets in quiet mode. Any exceptions will interrupt the process.
         beets should import in to the directory navidrome is working off.
@@ -114,7 +114,7 @@ class RekordboxXMLController:
         with self._rb_backup_file_handler.restore_track_meta_and_stage_for_import(audio_files_to_import):
             # 1. invoke beets import on the audio files to import
 
-            my_container = docker.container.inspect("beets")
+            my_container = docker.container.inspect(f"beets{username}")
             print(my_container)
             # can set to interactive with tty to pipe docker stdin input/output to terminal for user feedback.
             # beets config set to quiet mode and fallback of 'asis'. If user needs to correct later, they will have to
@@ -123,8 +123,9 @@ class RekordboxXMLController:
             print(result)
             # 9. on success, remove the directory of the beets import
 
-    async def create_subsonic_playlists_from_xml(self, xml_path: Path, audio_files_to_import: Path):
-        await self.import_to_beets(audio_files_to_import)
+    async def create_subsonic_playlists_from_xml(self, username: str, xml_path: Path, audio_files_to_import: Path):
+        self._rekordbox_xml_orchestrator.create_xml(xml_path)
+        await self.import_to_beets(username, audio_files_to_import)
         await self.create_subsonic_playlists(xml_path)
 
     async def create_subsonic_playlists(self, xml_path: Path):

@@ -4,7 +4,7 @@ from contextlib import contextmanager
 import mimetypes
 import shutil
 from pathlib import Path
-
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +18,27 @@ class FileBrowserFileHandler:
         self._filebrowser_data_path = filebrowser_data_path
         self._beets_data_path = beets_data_path
         self._mimetypes = mimetypes.init()
+
+    def get_xml_audio_path(self, user: str) -> tuple[Path, Path]:
+        src_path = Path(
+            self._filebrowser_data_path.format(user=user)
+        )
+        xml_path = None
+        audio_path = None
+        for f in src_path.iterdir():
+            if f.is_file():
+                mimestart = mimetypes.guess_type(str(f))[0]
+                if mimestart:
+                    mimecategory = mimestart.split('/')[1]
+                    if mimecategory == 'xml':
+                        xml_path = f
+                        break
+            elif f.is_dir():
+                if f.name == 'rekordbox_bak':
+                    audio_path = f
+        assert xml_path
+        assert audio_path
+        return xml_path, audio_path
 
     def get_number_of_tracks_for_import(self, user: str) -> int:
         src_path = Path(
