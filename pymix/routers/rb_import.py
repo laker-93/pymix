@@ -46,7 +46,7 @@ async def rekordbox_import(
         try:
             xml_path, audio_path = fb_file_handler.get_xml_audio_path(username)
             beets_output = await rekordbox_xml_controller.create_subsonic_playlists_from_xml(
-                username, xml_path, audio_path
+                user, xml_path, audio_path
             )
         except Exception as ex:
             success = False

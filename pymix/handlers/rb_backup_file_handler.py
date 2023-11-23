@@ -41,11 +41,12 @@ class RBBackupFileHandler:
         """
         return f'{track.Artist} - {track.Name}'
 
-    def restore_track_meta(self, audio_files_to_import: Path) -> int:
+    def restore_track_meta(self, username: str, audio_files_to_import: Path) -> int:
         """
         rekordbox mangles the names of the tracks when creating the backup. It also nukes all the meta data in the
         audio files. This must be restored in to the audio file's meta data to allow beets import work.
         """
+        beets_data_path = self._beets_data_path.format(user=username)
         n_updated_tracks = 0
         for audio_file in audio_files_to_import.glob('**/*'):
             if audio_file.is_file() and audio_file.suffix:
@@ -60,25 +61,26 @@ class RBBackupFileHandler:
                 track_name = self._format_track_name(track)
                 output_parts = list(audio_file.parts)
                 output_parts[-1] = track_name
-                restored_track = Path(self._beets_data_path) / Path('/'.join(output_parts[1:]))
+                restored_track = Path(beets_data_path) / Path('/'.join(output_parts[1:]))
                 restored_track = restored_track.parent / (restored_track.name + audio_file.suffix)
                 restored_track.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy(audio_file, restored_track)
                 n_updated_tracks += 1
         return n_updated_tracks
 
-    def clean_up_beets_import_tree(self):
+    def clean_up_beets_import_tree(self, username: str):
         """
         After successful import in to beets, can remove the source tree that was imported.
         """
-        for filepath in Path(self._beets_data_path).iterdir():
+        beets_data_path = self._beets_data_path.format(user=username)
+        for filepath in Path(beets_data_path).iterdir():
             if filepath.is_dir():
                 shutil.rmtree(filepath)
             else:
                 filepath.unlink()
 
     @contextmanager
-    def restore_track_meta_and_stage_for_import(self, audio_files_to_import: Path) -> int:
+    def restore_track_meta_and_stage_for_import(self, username: str, audio_files_to_import: Path) -> int:
         """
         rekordbox mangles the names of the tracks when creating the backup. It also nukes all the meta data in the
         audio files. This must be restored in to the audio file's meta data to allow beets import work.
@@ -86,9 +88,9 @@ class RBBackupFileHandler:
         If the context manager completes successfully, then the import has succeeded so the contents of the import dir
         can be removed.
         """
-        n_updated_tracks = self.restore_track_meta(audio_files_to_import)
+        n_updated_tracks = self.restore_track_meta(username, audio_files_to_import)
         yield
-        self.clean_up_beets_import_tree()
+        self.clean_up_beets_import_tree(username)
         return n_updated_tracks
 
 

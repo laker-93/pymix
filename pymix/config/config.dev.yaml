@@ -4,8 +4,8 @@ rekordbox:
   xml_path: /Users/lajp/rekordbox/rekordbox_empty.xml
 containers:
   subsonic:
-    #host: http://localhost:4533
-    host: http://localhost:4533/navidrome
+    #host: http://localhost:4533/navidrome
+    host: http://localhost:{port}
     username: lajp
     version: 1.16.1
     music_path_base_to_remove: music

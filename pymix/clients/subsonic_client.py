@@ -6,7 +6,7 @@ import hashlib
 import random
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Tuple, List, Optional, Set, AsyncIterator, AsyncGenerator, Union
+from typing import Tuple, List, Optional, AsyncIterator, Union
 
 import aiohttp
 
@@ -30,7 +30,7 @@ class SubsonicClient(BaseAPIClient):
         self._music_path_base_to_remove = cleaned_music_path_base_to_remove
 
     @staticmethod
-    def _calculate_token() -> Tuple[str, str]:
+    def _calculate_token(password: str) -> Tuple[str, str]:
         """
         generate random salt of 6 chars
         :return: tuple(token, salt)
@@ -38,11 +38,11 @@ class SubsonicClient(BaseAPIClient):
         letters = string.ascii_lowercase
         salt = ''.join(random.choice(letters) for _ in range(6))
         return hashlib.md5(
-            f"konichiwalajp!{salt}".encode("utf-8")
+            f"{password}{salt}".encode("utf-8")
         ).hexdigest(), salt
 
 
-    def _subsonic_format_url(self, url: str, params: Optional[list[tuple[str, Union[str, int]]]] = None) -> str:
+    def _subsonic_format_url(self, username: str, password: str, url: str, params: Optional[list[tuple[str, Union[str, int]]]] = None) -> str:
         """
         example:
         http://localhost:4533/rest/getStarred.view?u=lajp&p=konichiwalajp!&v=1.16.1&c=myapp
@@ -50,9 +50,9 @@ class SubsonicClient(BaseAPIClient):
         :param url:
         :return:
         """
-        token, salt = self._calculate_token()
+        token, salt = self._calculate_token(password)
         required_params = [
-            ("u", self._username),
+            ("u", username),
             ("t", token),
             ("s", salt),
             ("v", self._version),
@@ -106,8 +106,25 @@ class SubsonicClient(BaseAPIClient):
             ) for entry in resp_playlist
         ]
 
-    async def get_playlists(self) -> List[SubBoxPlaylist]:
-        url = self._subsonic_format_url(f"{self._host}/rest/getPlaylists")
+    async def scan(self, user: dict) -> bool:
+        username = user['username']
+        password = user['password']
+        port = user['subsonic_port']
+        base_path = self._host.format(port=port)
+        url = self._subsonic_format_url(
+            username,
+            password,
+            f"{base_path}/rest/startScan",
+        )
+        response = await self.get(url)
+        return response['subsonic-response']['status'] == 'ok'
+
+    async def get_playlists(self, user: dict) -> List[SubBoxPlaylist]:
+        username = user['username']
+        password = user['password']
+        port = user['subsonic_port']
+        base_path = self._host.format(port=port)
+        url = self._subsonic_format_url(username, password, f"{base_path}/rest/getPlaylists")
         response = await self.get(url)
         assert response
         try:
@@ -116,37 +133,53 @@ class SubsonicClient(BaseAPIClient):
             logger.error("no playlists found in navidrome")
         return result
 
-    async def create_playlists(self, subbox_playlists: List[SubBoxPlaylist]):
+    async def create_playlists(self, user: dict, subbox_playlists: List[SubBoxPlaylist]):
+        username = user['username']
+        password = user['password']
+        port = user['subsonic_port']
+        base_path = self._host.format(port=port)
         for playlist in subbox_playlists:
             _id = None
             self._subsonic_format_url(
-                f"{self._host}/rest/createPlaylist", params=[("name", playlist.name), ("songId", _id)]
+                username, password, f"{base_path}/rest/createPlaylist", params=[("name", playlist.name), ("songId", _id)]
             )
 
-    async def get_playlist_tracks(self, playlist_id: str) -> List[SubBoxTrack]:
+    async def get_playlist_tracks(self, user: dict, playlist_id: str) -> List[SubBoxTrack]:
+        username = user['username']
+        password = user['password']
+        port = user['subsonic_port']
+        base_path = self._host.format(port=port)
         url = self._subsonic_format_url(
-            f"{self._host}/rest/getPlaylist", params=[("id", playlist_id)]
+            username, password, f"{base_path}/rest/getPlaylist", params=[("id", playlist_id)]
         )
         response = await self.get(url)
         assert response
         tracks = self._parse_tracks(response)
         return tracks
 
-    async def get_track(self, track_id: str):
+    async def get_track(self, user: dict, track_id: str):
+        username = user['username']
+        password = user['password']
+        port = user['subsonic_port']
+        base_path = self._host.format(port=port)
         url = self._subsonic_format_url(
-            f"{self._host}/rest/getSong", params=[("id", track_id)]
+            username, password, f"{base_path}/rest/getSong", params=[("id", track_id)]
         )
         response = await self.get(url)
         return response
 
-    async def get_all_tracks(self, batch_size: int) -> AsyncIterator[List[SubBoxTrack]]:
+    async def get_all_tracks(self, user: dict, batch_size: int) -> AsyncIterator[List[SubBoxTrack]]:
         """
         Iterate over all tracks yielding in batches
         """
+        username = user['username']
+        password = user['password']
+        port = user['subsonic_port']
+        base_path = self._host.format(port=port)
         offset = 0
         while True:
             url = self._subsonic_format_url(
-                f"{self._host}/rest/search3", params=[
+                username, password, f"{base_path}/rest/search3", params=[
                     ("query", "''"),
                     ("artistCount", 0),
                     ("albumCount", 0),
@@ -161,12 +194,16 @@ class SubsonicClient(BaseAPIClient):
                 break
             offset += batch_size
 
-    async def query_track_by_name(self, name: str) -> SubBoxTrack:
+    async def query_track_by_name(self, user: dict, name: str) -> SubBoxTrack:
         """
         Given a name of a track, query subsonic and return matches. Throws an error if no match is found.
         """
+        username = user['username']
+        password = user['password']
+        port = user['subsonic_port']
+        base_path = self._host.format(port=port)
         url = self._subsonic_format_url(
-            f"{self._host}/rest/search2", params=[("query", name)]
+            username, password, f"{base_path}/rest/search2", params=[("query", name)]
         )
         response = await self.get(url)
         try:
@@ -206,19 +243,29 @@ class SubsonicClient(BaseAPIClient):
             logger.warning(f'matched query of {name} to {result} with similarity {max_similarity}')
         return result
 
-    async def create_playlist(self, name: str, tracks: List[SubBoxTrack]) -> bool:
+    async def create_playlist(self, user: dict, name: str, tracks: List[SubBoxTrack]) -> bool:
+        username = user['username']
+        password = user['password']
+        port = user['subsonic_port']
         params = [('name', name)]
         song_id_params = [("songId", song_id) for song_id in map(lambda t:t.sub_track_id, tracks)]
         params.extend(song_id_params)
+        base_path = self._host.format(port=port)
         url = self._subsonic_format_url(
-            f"{self._host}/rest/createPlaylist",
+            username,
+            password,
+            f"{base_path}/rest/createPlaylist",
             params=params
         )
         response = await self.get(url)
         return response['subsonic-response']['status'] == 'ok'
 
-    async def set_rating(self, tracks: List[SubBoxTrack]):
+    async def set_rating(self, user: dict, tracks: List[SubBoxTrack]):
+        username = user['username']
+        password = user['password']
+        port = user['subsonic_port']
         song_ids_ratings: List[Tuple[int, int]] = []
+        base_path = self._host.format(port=port)
         for track in tracks:
             if track.rating > 0:
                 song_ids_ratings.append(
@@ -228,7 +275,7 @@ class SubsonicClient(BaseAPIClient):
             song_id = song_id_rating[0]
             rating = song_id_rating[1]
             url = self._subsonic_format_url(
-                f"{self._host}/rest/setRating",
+                username, password, f"{base_path}/rest/setRating",
                 params=[('id', song_id), ('rating', rating)]
             )
             response = await self.get(url)

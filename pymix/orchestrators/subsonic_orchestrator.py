@@ -12,27 +12,27 @@ class SubsonicOrchestrator:
     def __init__(self, subsonic_client: SubsonicClient):
         self._subsonic_client = subsonic_client
 
-    async def _get_subsonic_playlists(self) -> List[SubBoxPlaylist]:
+    async def _get_subsonic_playlists(self, user: dict) -> List[SubBoxPlaylist]:
         """
         Creates internal view of the playlists and their tracks found in navirdome.
         :return:
         """
-        playlists = await self._subsonic_client.get_playlists()
+        playlists = await self._subsonic_client.get_playlists(user)
         # get all playlists to find their ids.
         # for each playlist, get the playlist and iterate through to find the tracks
         for playlist in playlists:
-            playlist.tracks = await self._subsonic_client.get_playlist_tracks(playlist.subsonic_id)
+            playlist.tracks = await self._subsonic_client.get_playlist_tracks(user, playlist.subsonic_id)
         return playlists
 
-    async def get_subsonic_playlists(self) -> List[SubBoxPlaylist]:
-        subsonic_playlists = await self._get_subsonic_playlists()
+    async def get_subsonic_playlists(self, user: dict) -> List[SubBoxPlaylist]:
+        subsonic_playlists = await self._get_subsonic_playlists(user)
         return subsonic_playlists
 
-    async def get_subsonic_tracks(self) -> List[SubBoxTrack]:
+    async def get_subsonic_tracks(self, user: dict) -> List[SubBoxTrack]:
         """
         Gets all tracks in navidrome
         """
-        subsonic_playlists = await self.get_subsonic_playlists()
+        subsonic_playlists = await self.get_subsonic_playlists(user)
         subsonic_tracks = []
         for subsonic_playlist in subsonic_playlists:
             subsonic_tracks.extend(
@@ -40,16 +40,19 @@ class SubsonicOrchestrator:
             )
         return subsonic_tracks
 
+    async def scan(self, user: dict):
+        result = await self._subsonic_client.scan(user)
+        assert result
 
-    async def create_playlists_and_set_rating(self, subbox_playlists: List[SubBoxPlaylist]):
+    async def create_playlists_and_set_rating(self, user: dict, subbox_playlists: List[SubBoxPlaylist]):
         """
         Given list of subbox playlists (e.g. formed from parsing XML), create the playlist structure in navidrome.
         """
         for playlist in subbox_playlists:
-            await self._subsonic_client.create_playlist(playlist.name, playlist.tracks)
-            await self._subsonic_client.set_rating(playlist.tracks)
+            await self._subsonic_client.create_playlist(user, playlist.name, playlist.tracks)
+            await self._subsonic_client.set_rating(user, playlist.tracks)
 
-    async def update_tracks_with_subid(self, subbox_playlists: List[SubBoxPlaylist]) -> None:
+    async def update_tracks_with_subid(self, user: dict, subbox_playlists: List[SubBoxPlaylist]) -> None:
         """
         Given list of subbox playlists (e.g. formed from parsing XML), update the playlist
         track with the id of the subsonic track.
@@ -58,15 +61,15 @@ class SubsonicOrchestrator:
             for track in playlist.tracks:
                 name = track.name
                 try:
-                    subsonic_track = await self._subsonic_client.query_track_by_name(name)
+                    subsonic_track = await self._subsonic_client.query_track_by_name(user, name)
                 except KeyError as ex:
                     logger.warning(f'unable to find track in navidrome {track}. This track will not be imported properly. Please ensure name of track in rekordbox is correct. Exception {ex}')
                 else:
                     track.sub_track_id = subsonic_track.sub_track_id
         return 'foo'
 
-    async def get_all_tracks(self) -> AsyncIterator[List[SubBoxTrack]]:
-        return self._subsonic_client.get_all_tracks()
+    async def get_all_tracks(self, user: dict) -> AsyncIterator[List[SubBoxTrack]]:
+        return self._subsonic_client.get_all_tracks(user, 50)
 
 
 
