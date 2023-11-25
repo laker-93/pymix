@@ -1,7 +1,9 @@
 ---
 app_env: dev
 rekordbox:
-  xml_path: /Users/lajp/rekordbox/rekordbox_empty.xml
+  #xml_path: /Users/lajp/rekordbox/rekordbox_empty.xml
+  xml_path: /Users/lukepurnell/PycharmProjects/pymix/dev_sandbox/rekordbox_empty.xml
+  zip_name: subbox_export
 containers:
   subsonic:
     #host: http://localhost:4533/navidrome
@@ -9,7 +11,7 @@ containers:
     username: lajp
     version: 1.16.1
     music_path_base_to_remove: music
-    music_path_base_to_add: /Users/lajp/nav_music
+    serving_music_path_base: /Users/lukepurnell/subbox/{user}/nav_music
     docker_compose_file: /Users/lukepurnell/subbox/docker-compose/navidrome/docker-compose.yml
     env_file: /Users/lukepurnell/subbox/docker-compose/navidrome/env
   filebrowser:

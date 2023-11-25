@@ -36,8 +36,8 @@ class Container(containers.DeclarativeContainer):
         session=aiohttp_session,
         username=config.containers.subsonic.username,
         version=config.containers.subsonic.version,
-        music_path_base_to_add=config.containers.subsonic.music_path_base_to_add,
-        music_path_base_to_remove=config.containers.subsonic.music_path_base_to_remove
+        music_path_base_to_remove=config.containers.subsonic.music_path_base_to_remove,
+        zip_name=config.rekordbox.zip_name
     )
 
     navidrome_client = providers.Singleton(
@@ -95,6 +95,8 @@ class Container(containers.DeclarativeContainer):
     )
     file_browser_file_handler = providers.Singleton(
         FileBrowserFileHandler,
+        config.rekordbox.zip_name,
+        config.containers.subsonic.serving_music_path_base,
         config.containers.filebrowser.data,
         config.containers.beets.data
     )

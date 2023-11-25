@@ -4,7 +4,6 @@ from contextlib import contextmanager
 import mimetypes
 import shutil
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -12,12 +11,22 @@ logger = logging.getLogger(__name__)
 class FileBrowserFileHandler:
     def __init__(
             self,
+            zip_name: str,
+            serving_music_path_base: str,
             filebrowser_data_path: str,
             beets_data_path: str
     ):
+        self._zip_name = zip_name
+        self._serving_music_path_base = serving_music_path_base.rstrip('/')
         self._filebrowser_data_path = filebrowser_data_path
         self._beets_data_path = beets_data_path
         self._mimetypes = mimetypes.init()
+
+    def get_xml_output_path(self, username: str) -> Path:
+        src_path = Path(
+            self._filebrowser_data_path.format(user=username)
+        )
+        return src_path / 'subbox_rb_export.xml'
 
     def get_xml_audio_path(self, user: str) -> tuple[Path, Path]:
         src_path = Path(
@@ -57,6 +66,11 @@ class FileBrowserFileHandler:
                         n_files += 1
         return n_files
 
+    def export_subsonic_music(self, username: str):
+        src_dir = self._serving_music_path_base.format(user=username)
+        dst_dir = Path(self._filebrowser_data_path.format(user=username)) / self._zip_name
+        output_path = str(dst_dir)
+        shutil.make_archive(output_path, 'zip', src_dir)
 
     @contextmanager
     def stage_for_import(self, username: str):

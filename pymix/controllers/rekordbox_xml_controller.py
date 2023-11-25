@@ -67,13 +67,12 @@ class RekordboxXMLController:
             print(result)
             return result
 
-    async def create_rekordbox_xml_from_subsonic_playlists(self, user: dict, xml_path: Optional[Path], xml_output_path: Path):
-
+    async def create_rekordbox_xml_from_subsonic_playlists(self, user_root: str, user: dict, xml_path: Optional[Path], xml_output_path: Path):
         # todo this could be made a context manager to create, update then save the xml
         self._rekordbox_xml_orchestrator.create_xml(xml_path)
 
-        subsonic_playlists = await self._subsonic_orchestrator.get_subsonic_playlists(user)
-        subsonic_tracks = await self._subsonic_orchestrator.get_subsonic_tracks(user)
+        subsonic_playlists = await self._subsonic_orchestrator.get_subsonic_playlists(user_root, user)
+        subsonic_tracks = await self._subsonic_orchestrator.get_subsonic_tracks(user_root, user)
 
         rekordbox_tracks = self._rekordbox_xml_orchestrator.get_all_xml_tracks()
 
@@ -97,7 +96,7 @@ class RekordboxXMLController:
         import asyncio
         # todo figure this out - seem to need to pause to avoid getting disconnected from server
         await asyncio.sleep(2)
-        async for tracks in self._subsonic_orchestrator._subsonic_client.get_all_tracks(user, 400):
+        async for tracks in self._subsonic_orchestrator._subsonic_client.get_all_tracks(user_root, user, 400):
             for track in tracks:
                 self._rekordbox_xml_orchestrator.add_track(track, suppress_error=True)
             await asyncio.sleep(2)
@@ -123,16 +122,16 @@ class RekordboxXMLController:
             print(result)
             # 9. on success, remove the directory of the beets import
 
-    async def create_subsonic_playlists_from_xml(self, user: dict, xml_path: Path, audio_files_to_import: Path):
+    async def create_subsonic_playlists_from_xml(self, user_root: str, user: dict, xml_path: Path, audio_files_to_import: Path):
         username = user['username']
         self._rekordbox_xml_orchestrator.create_xml(xml_path)
         await self.import_to_beets(username, audio_files_to_import)
         # must trigger a navidrome scan so the tracks will be queryable when creating and moving in to playlists in the
         # next step
         await self._subsonic_orchestrator.scan(user)
-        await self.create_subsonic_playlists(user, xml_path)
+        await self.create_subsonic_playlists(user_root, user, xml_path)
 
-    async def create_subsonic_playlists(self, user: dict, xml_path: Path):
+    async def create_subsonic_playlists(self, user_root: str, user: dict, xml_path: Path):
 
         self._rekordbox_xml_orchestrator.create_xml(xml_path)
 
@@ -145,7 +144,7 @@ class RekordboxXMLController:
         # 6. get the tracks from navidrome by using the 'query' api for each track.
         # this sets the subsonic id found from querying navidrome. This can then be used to create the playlist and place
         # the track in the playlist
-        res = await self._subsonic_orchestrator.update_tracks_with_subid(user, subbox_playlists)
+        res = await self._subsonic_orchestrator.update_tracks_with_subid(user_root, user, subbox_playlists)
         # 8. create the playlists and set the rating of the track in navidrome from the rating taken from xml
         await self._subsonic_orchestrator.create_playlists_and_set_rating(user, subbox_playlists)
 
