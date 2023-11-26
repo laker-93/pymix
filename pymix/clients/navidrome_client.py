@@ -11,7 +11,7 @@ class NavidromeClient(BaseAPIClient):
         port = user['subsonic_port']
         username = user['username']
         password = user['password']
-        url = f'http://localhost:{port}/auth/createAdmin'
+        url = f'http://navidrome{user}:{port}/auth/createAdmin'
         body = {
            "username": username,
            "password": password

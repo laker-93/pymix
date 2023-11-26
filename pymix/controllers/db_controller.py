@@ -15,7 +15,7 @@ class DbController:
     def __init__(self, db: TinyDB):
         self._db = db
         self._session_to_user_schema = ('session_id', 'user_id')
-        self._user_schema = ('username', 'password', 'user_id', 'beets_port', 'subsonic_port', 'filebrowser_port')
+        self._user_schema = ('username', 'password', 'user_id', 'beets_port', 'subsonic_port')
         self._user_jobs_schema = ('user_id', 'job_id')
         self._import_job_schema = ('job_id', 'name', 'n_tracks_to_import', 'total_n_imported_tracks', 'in_progress', 'result')
 
@@ -81,9 +81,8 @@ class DbController:
         assert len(results) == 0, f'already have {len(results)} users with username {username}'
         beets_port = get_available_port()
         subsonic_port = get_available_port()
-        filebrowser_port = get_available_port()
         user_id = uuid.uuid4().hex
-        self._add_user(username, password, user_id, beets_port, subsonic_port, filebrowser_port)
+        self._add_user(username, password, user_id, beets_port, subsonic_port)
         return self.create_session(username, password)
 
     def create_session(self, username: str, password: str) -> str:
@@ -118,10 +117,9 @@ class DbController:
             user_id: str,
             beets_port: int,
             subsonic_port: int,
-            filebrowser_port: int
     ):
         user_table = self._db.table('user_table')
-        user_table.insert(dict(zip(self._user_schema, (username, password, user_id, beets_port, subsonic_port, filebrowser_port))))
+        user_table.insert(dict(zip(self._user_schema, (username, password, user_id, beets_port, subsonic_port))))
 
     def get_user_by_session_id(self, session_id: str) -> Optional[Document]:
         SessionToUser = Query()

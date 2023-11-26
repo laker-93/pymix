@@ -7,7 +7,7 @@ rekordbox:
 containers:
   subsonic:
     #host: http://localhost:4533/navidrome
-    host: http://localhost:{port}
+    host: http://navidrome{user}:{port}
     username: lajp
     version: 1.16.1
     music_path_base_to_remove: music
@@ -19,7 +19,7 @@ containers:
     docker_compose_file: /Users/lukepurnell/subbox/docker-compose/filebrowser/docker-compose.yml
     env_file: /Users/lukepurnell/subbox/docker-compose/filebrowser/env
   beets:
-    host: http://localhost:{port}
+    host: http://beets{user}:{port}
     data: /Users/lukepurnell/subbox/{user}/beets/download
     docker_compose_file: /Users/lukepurnell/subbox/docker-compose/beets/docker-compose.yml
     env_file: /Users/lukepurnell/subbox/docker-compose/beets/env
@@ -27,5 +27,5 @@ containers:
     config_file_dst: /Users/lukepurnell/subbox/{user}/beets/config/config.yaml
 logs_directory: logs
 db:
-  path: /Users/lukepurnell/PycharmProjects/pymix/user_db.json
+  path: /pymix/db/user_db.json
 max_number_of_users: 10

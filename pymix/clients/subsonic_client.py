@@ -111,7 +111,7 @@ class SubsonicClient(BaseAPIClient):
         logger.info(f'starting scan of subsonic for user {username}')
         password = user['password']
         port = user['subsonic_port']
-        base_path = self._host.format(port=port)
+        base_path = self._host.format(user=username, port=port)
         url = self._subsonic_format_url(
             username,
             password,
@@ -125,7 +125,7 @@ class SubsonicClient(BaseAPIClient):
         username = user['username']
         password = user['password']
         port = user['subsonic_port']
-        base_path = self._host.format(port=port)
+        base_path = self._host.format(user=username, port=port)
         url = self._subsonic_format_url(username, password, f"{base_path}/rest/getPlaylists")
         response = await self.get(url)
         assert response
@@ -139,7 +139,7 @@ class SubsonicClient(BaseAPIClient):
         username = user['username']
         password = user['password']
         port = user['subsonic_port']
-        base_path = self._host.format(port=port)
+        base_path = self._host.format(user=username, port=port)
         for playlist in subbox_playlists:
             _id = None
             self._subsonic_format_url(
@@ -150,7 +150,7 @@ class SubsonicClient(BaseAPIClient):
         username = user['username']
         password = user['password']
         port = user['subsonic_port']
-        base_path = self._host.format(port=port)
+        base_path = self._host.format(user=username, port=port)
         url = self._subsonic_format_url(
             username, password, f"{base_path}/rest/getPlaylist", params=[("id", playlist_id)]
         )
@@ -163,7 +163,7 @@ class SubsonicClient(BaseAPIClient):
         username = user['username']
         password = user['password']
         port = user['subsonic_port']
-        base_path = self._host.format(port=port)
+        base_path = self._host.format(user=username, port=port)
         url = self._subsonic_format_url(
             username, password, f"{base_path}/rest/getSong", params=[("id", track_id)]
         )
@@ -177,7 +177,7 @@ class SubsonicClient(BaseAPIClient):
         username = user['username']
         password = user['password']
         port = user['subsonic_port']
-        base_path = self._host.format(port=port)
+        base_path = self._host.format(user=username, port=port)
         offset = 0
         while True:
             url = self._subsonic_format_url(
@@ -203,7 +203,7 @@ class SubsonicClient(BaseAPIClient):
         username = user['username']
         password = user['password']
         port = user['subsonic_port']
-        base_path = self._host.format(port=port)
+        base_path = self._host.format(user=username, port=port)
         url = self._subsonic_format_url(
             username, password, f"{base_path}/rest/search2", params=[("query", name)]
         )
@@ -252,7 +252,7 @@ class SubsonicClient(BaseAPIClient):
         params = [('name', name)]
         song_id_params = [("songId", song_id) for song_id in map(lambda t:t.sub_track_id, tracks)]
         params.extend(song_id_params)
-        base_path = self._host.format(port=port)
+        base_path = self._host.format(user=username, port=port)
         url = self._subsonic_format_url(
             username,
             password,
@@ -267,7 +267,7 @@ class SubsonicClient(BaseAPIClient):
         password = user['password']
         port = user['subsonic_port']
         song_ids_ratings: List[Tuple[int, int]] = []
-        base_path = self._host.format(port=port)
+        base_path = self._host.format(user=username, port=port)
         for track in tracks:
             if track.rating > 0:
                 song_ids_ratings.append(
