@@ -46,7 +46,9 @@ async def rekordbox_import(
         try:
             xml_path, audio_path = fb_file_handler.get_xml_audio_path(username)
             beets_output = await rekordbox_xml_controller.create_subsonic_playlists_from_xml(
-                user, xml_path, audio_path
+                user=user,
+                xml_path=xml_path,
+                audio_files_to_import=audio_path
             )
         except Exception as ex:
             success = False
@@ -78,7 +80,7 @@ async def rekordbox_export(
     success = True
     reason = ""
     beets_output = ""
-    total_n_imported_tracks = 0
+    n_beets_tracks = 0
     if not username and not session_id:
         success = False
         reason = "must have a username or session id to identify user"

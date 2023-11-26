@@ -100,10 +100,10 @@ class RekordboxXMLOrchestrator:
             logger.debug(f"added track {str(track.path)} {rekord_track}")
 
 
-    def add_track_to_rekordbox_playlist(self, track: SubBoxTrack, playlist: Node):
+    def add_track_to_rekordbox_playlist(self, user_root: str, track: SubBoxTrack, playlist: Node):
         try:
             rekordbox_track = self._rekordbox_xml.add_track(
-                str(track.path),
+                f'{user_root}/{track.path}',
                 Name=track.name,
                 Artist=track.artist,
                 Album=track.album,

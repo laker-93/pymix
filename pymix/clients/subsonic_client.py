@@ -79,13 +79,13 @@ class SubsonicClient(BaseAPIClient):
             ) for playlist in resp_playlists
         ]
 
-    def _parse_query(self, user_root: str, response: dict, search_result: str = 'searchResult2') -> List[SubBoxTrack]:
+    def _parse_query(self, response: dict, search_result: str = 'searchResult2') -> List[SubBoxTrack]:
         resp = response['subsonic-response'][search_result]['song']
         return [
             SubBoxTrack(
                 name=entry['title'],
                 artist=entry['artist'],
-                path=Path(f"{user_root}/{self._zip_name}/{entry['path'].lstrip(self._music_path_base_to_remove)}"),
+                path=Path(f"{self._zip_name}/{entry['path'].lstrip(self._music_path_base_to_remove)}"),
                 album=entry['album'],
                 rating=entry.get('userRating', 0),
                 genre=None if entry.get('genre') == '\x1a' else entry.get('genre'),
@@ -93,13 +93,13 @@ class SubsonicClient(BaseAPIClient):
             ) for entry in resp
         ]
 
-    def _parse_tracks(self, user_root: str, response: dict) -> List[SubBoxTrack]:
+    def _parse_tracks(self, response: dict) -> List[SubBoxTrack]:
         resp_playlist = response['subsonic-response']['playlist'].get('entry', [])
         return [
             SubBoxTrack(
                 name=entry['title'],
                 artist=entry['artist'],
-                path=Path(f"{user_root}/{self._zip_name}/{entry['path'].lstrip(self._music_path_base_to_remove)}"),
+                path=Path(f"{self._zip_name}/{entry['path'].lstrip(self._music_path_base_to_remove)}"),
                 album=entry['album'],
                 rating=entry.get('userRating', 0),
                 genre=entry.get('genre')
@@ -108,6 +108,7 @@ class SubsonicClient(BaseAPIClient):
 
     async def scan(self, user: dict) -> bool:
         username = user['username']
+        logger.info(f'starting scan of subsonic for user {username}')
         password = user['password']
         port = user['subsonic_port']
         base_path = self._host.format(port=port)
@@ -117,6 +118,7 @@ class SubsonicClient(BaseAPIClient):
             f"{base_path}/rest/startScan",
         )
         response = await self.get(url)
+        logger.info(f'completed scan of subsonic for user {username} with response {response}')
         return response['subsonic-response']['status'] == 'ok'
 
     async def get_playlists(self, user: dict) -> List[SubBoxPlaylist]:
@@ -144,7 +146,7 @@ class SubsonicClient(BaseAPIClient):
                 username, password, f"{base_path}/rest/createPlaylist", params=[("name", playlist.name), ("songId", _id)]
             )
 
-    async def get_playlist_tracks(self, user_root: str, user: dict, playlist_id: str) -> List[SubBoxTrack]:
+    async def get_playlist_tracks(self, user: dict, playlist_id: str) -> List[SubBoxTrack]:
         username = user['username']
         password = user['password']
         port = user['subsonic_port']
@@ -154,7 +156,7 @@ class SubsonicClient(BaseAPIClient):
         )
         response = await self.get(url)
         assert response
-        tracks = self._parse_tracks(user_root, response)
+        tracks = self._parse_tracks(response)
         return tracks
 
     async def get_track(self, user: dict, track_id: str):
@@ -168,7 +170,7 @@ class SubsonicClient(BaseAPIClient):
         response = await self.get(url)
         return response
 
-    async def get_all_tracks(self, user_root: str, user: dict, batch_size: int) -> AsyncIterator[List[SubBoxTrack]]:
+    async def get_all_tracks(self, user: dict, batch_size: int) -> AsyncIterator[List[SubBoxTrack]]:
         """
         Iterate over all tracks yielding in batches
         """
@@ -188,13 +190,13 @@ class SubsonicClient(BaseAPIClient):
                 ]
             )
             response = await self.get(url)
-            tracks = self._parse_query(user_root, response, search_result='searchResult3')
+            tracks = self._parse_query(response, search_result='searchResult3')
             yield tracks
             if len(tracks) < batch_size:
                 break
             offset += batch_size
 
-    async def query_track_by_name(self, user_root: str, user: dict, name: str) -> SubBoxTrack:
+    async def query_track_by_name(self, user: dict, name: str) -> SubBoxTrack:
         """
         Given a name of a track, query subsonic and return matches. Throws an error if no match is found.
         """
@@ -207,7 +209,7 @@ class SubsonicClient(BaseAPIClient):
         )
         response = await self.get(url)
         try:
-            tracks = self._parse_query(user_root, response)
+            tracks = self._parse_query(response)
         except Exception as ex:
             raise KeyError(f'unable to parse tracks from url query {url}') from ex
         results = {}

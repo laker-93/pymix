@@ -73,6 +73,7 @@ async def tracks_imported(
     success = False
     reason = ""
     percentage_complete = 0
+    original_n_tracks_to_import = 0
     if not username and session_id:
         try:
             user = db_controller.get_user_by_session_id(session_id)
@@ -90,7 +91,7 @@ async def tracks_imported(
             original_n_tracks_to_import = job['n_tracks_to_import']
             total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
             imported_diff = total_n_imported_tracks - original_total_n_imported_tracks
-            percentage_complete = imported_diff / original_n_tracks_to_import
+            percentage_complete = (imported_diff / original_n_tracks_to_import) * 100
             logger.info(f'A total of {total_n_imported_tracks} have been imported.')
             logger.info(f'have complete {percentage_complete}% out of {original_n_tracks_to_import}')
             success = True
@@ -101,6 +102,7 @@ async def tracks_imported(
     return {
         'success': success,
         'reason': reason,
+        'n_tracks_to_import': original_n_tracks_to_import,
         'percentage_complete': percentage_complete
     }
 

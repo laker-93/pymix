@@ -72,26 +72,19 @@ class FileBrowserFileHandler:
         output_path = str(dst_dir)
         shutil.make_archive(output_path, 'zip', src_dir)
 
-    @contextmanager
     def stage_for_import(self, username: str):
         """
         copy files from filebrowser to beets input data path.
-        Delete files on success.
         """
 
         src_dir = self._filebrowser_data_path.format(user=username)
         dest_dir = self._beets_data_path.format(user=username)
         logger.info(f'staging for import. Copy from {src_dir} to {dest_dir}')
         shutil.copytree(src_dir, dest_dir, dirs_exist_ok=True)
-        yield
-        logger.info(f'removing contents of {src_dir}')
-        for filepath in Path(src_dir).iterdir():
-            if filepath.is_dir():
-                shutil.rmtree(filepath)
-            else:
-                filepath.unlink()
 
-        for filepath in Path(dest_dir).iterdir():
+    def remove_fb_data_path(self, username):
+        logger.info(f'removing contents of {self._filebrowser_data_path.format(user=username)}')
+        for filepath in Path(self._filebrowser_data_path.format(user=username)).iterdir():
             if filepath.is_dir():
                 shutil.rmtree(filepath)
             else:

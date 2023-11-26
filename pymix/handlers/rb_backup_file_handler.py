@@ -73,24 +73,20 @@ class RBBackupFileHandler:
         After successful import in to beets, can remove the source tree that was imported.
         """
         beets_data_path = self._beets_data_path.format(user=username)
+        logger.info(f'removing contents of {beets_data_path}')
         for filepath in Path(beets_data_path).iterdir():
             if filepath.is_dir():
                 shutil.rmtree(filepath)
             else:
                 filepath.unlink()
 
-    @contextmanager
     def restore_track_meta_and_stage_for_import(self, username: str, audio_files_to_import: Path) -> int:
         """
         rekordbox mangles the names of the tracks when creating the backup. It also nukes all the meta data in the
         audio files. This must be restored in to the audio file's meta data to allow beets import work.
         Finally, the audio file is moved in to the beets docker shared directory that is used for import in to beets.
-        If the context manager completes successfully, then the import has succeeded so the contents of the import dir
-        can be removed.
         """
         n_updated_tracks = self.restore_track_meta(username, audio_files_to_import)
-        yield
-        self.clean_up_beets_import_tree(username)
         return n_updated_tracks
 
 

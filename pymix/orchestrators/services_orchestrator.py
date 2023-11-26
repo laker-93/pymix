@@ -114,4 +114,6 @@ class ServicesOrchestrator:
                 '/config/filebrowser.db'
             ]
         )
+        # seems sometimes that despite filebrowser successfully dynamically creating a user in the above command, and
+        # the user appearing in the db, the user cannot successfully login without restarting the filebrowser service.
         print(result)
