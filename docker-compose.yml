@@ -2,6 +2,7 @@ version: '3.5'
 services:
   pymix:
     image: pymix
+    privileged: true
     restart: unless-stopped
     container_name: "pymix"
     #user: "501:20"
@@ -11,6 +12,8 @@ services:
       - 8002:8002
     volumes:
       - ./db:/pymix/db
+      - /Users/lukepurnell/subbox:/subbox
+      - /var/run/docker.sock:/var/run/docker.sock
 networks:
   subbox-bridge:
     external: true

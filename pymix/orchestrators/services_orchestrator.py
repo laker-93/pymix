@@ -23,6 +23,7 @@ class ServicesOrchestrator:
         self._env_file_handler = env_file_handler
         self._config = config
         self._max_number_of_users = config['max_number_of_users']
+        self._user_root = config['user_root']
 
     async def create(self, username: str, password: str) -> str:
         """
@@ -37,7 +38,8 @@ class ServicesOrchestrator:
 
         session_id = self._db_controller.create_user(username, password)
         user = self._db_controller.get_user(username)
-        user_root_dir = Path(f'/Users/lukepurnell/subbox/{username}')
+        user_root = self._user_root.format(user=username)
+        user_root_dir = Path(user_root)
         user_root_dir.mkdir(exist_ok=True) # todo change to false when launch
         self._create_navidrome(user)
         self._create_beets(user)
@@ -102,6 +104,32 @@ class ServicesOrchestrator:
         filebrowser_container = docker.container.inspect("filebrowser")
         username = user['username']
         password = user['password']
+
+        # workaround for https://github.com/filebrowser/filebrowser/issues/627
+        docker.execute(
+            filebrowser_container,
+            [
+                'cp',
+                '/config/filebrowser.db',
+                '/config/filebrowser.db.bak'
+            ]
+        )
+        docker.execute(
+            filebrowser_container,
+            [
+                'cp',
+                '/config/filebrowser.db.bak',
+                '/config/filebrowser.db'
+            ]
+        )
+        docker.execute(
+            filebrowser_container,
+            [
+                'rm',
+                '/config/filebrowser.db.bak',
+            ]
+        )
+
         result = docker.execute(
             filebrowser_container,
             [
@@ -114,6 +142,9 @@ class ServicesOrchestrator:
                 '/config/filebrowser.db'
             ]
         )
+        # this is a blocking call so safe to restart here. However if anything ends up calling this method concurrently
+        # then will have to revise this
+        docker.restart(filebrowser_container)
         # seems sometimes that despite filebrowser successfully dynamically creating a user in the above command, and
         # the user appearing in the db, the user cannot successfully login without restarting the filebrowser service.
         print(result)

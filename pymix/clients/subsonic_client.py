@@ -110,7 +110,7 @@ class SubsonicClient(BaseAPIClient):
         username = user['username']
         logger.info(f'starting scan of subsonic for user {username}')
         password = user['password']
-        port = user['subsonic_port']
+        port = 4533 # since we're inside the same docker network, can call the private port
         base_path = self._host.format(user=username, port=port)
         url = self._subsonic_format_url(
             username,
@@ -124,7 +124,7 @@ class SubsonicClient(BaseAPIClient):
     async def get_playlists(self, user: dict) -> List[SubBoxPlaylist]:
         username = user['username']
         password = user['password']
-        port = user['subsonic_port']
+        port = 4533 # since we're inside the same docker network, can call the private port
         base_path = self._host.format(user=username, port=port)
         url = self._subsonic_format_url(username, password, f"{base_path}/rest/getPlaylists")
         response = await self.get(url)
@@ -138,7 +138,7 @@ class SubsonicClient(BaseAPIClient):
     async def create_playlists(self, user: dict, subbox_playlists: List[SubBoxPlaylist]):
         username = user['username']
         password = user['password']
-        port = user['subsonic_port']
+        port = 4533 # since we're inside the same docker network, can call the private port
         base_path = self._host.format(user=username, port=port)
         for playlist in subbox_playlists:
             _id = None
@@ -149,7 +149,7 @@ class SubsonicClient(BaseAPIClient):
     async def get_playlist_tracks(self, user: dict, playlist_id: str) -> List[SubBoxTrack]:
         username = user['username']
         password = user['password']
-        port = user['subsonic_port']
+        port = 4533 # since we're inside the same docker network, can call the private port
         base_path = self._host.format(user=username, port=port)
         url = self._subsonic_format_url(
             username, password, f"{base_path}/rest/getPlaylist", params=[("id", playlist_id)]
@@ -162,7 +162,7 @@ class SubsonicClient(BaseAPIClient):
     async def get_track(self, user: dict, track_id: str):
         username = user['username']
         password = user['password']
-        port = user['subsonic_port']
+        port = 4533 # since we're inside the same docker network, can call the private port
         base_path = self._host.format(user=username, port=port)
         url = self._subsonic_format_url(
             username, password, f"{base_path}/rest/getSong", params=[("id", track_id)]
@@ -176,7 +176,7 @@ class SubsonicClient(BaseAPIClient):
         """
         username = user['username']
         password = user['password']
-        port = user['subsonic_port']
+        port = 4533 # since we're inside the same docker network, can call the private port
         base_path = self._host.format(user=username, port=port)
         offset = 0
         while True:
@@ -202,7 +202,7 @@ class SubsonicClient(BaseAPIClient):
         """
         username = user['username']
         password = user['password']
-        port = user['subsonic_port']
+        port = 4533 # since we're inside the same docker network, can call the private port
         base_path = self._host.format(user=username, port=port)
         url = self._subsonic_format_url(
             username, password, f"{base_path}/rest/search2", params=[("query", name)]
@@ -248,7 +248,7 @@ class SubsonicClient(BaseAPIClient):
     async def create_playlist(self, user: dict, name: str, tracks: List[SubBoxTrack]) -> bool:
         username = user['username']
         password = user['password']
-        port = user['subsonic_port']
+        port = 4533 # since we're inside the same docker network, can call the private port
         params = [('name', name)]
         song_id_params = [("songId", song_id) for song_id in map(lambda t:t.sub_track_id, tracks)]
         params.extend(song_id_params)
@@ -265,7 +265,7 @@ class SubsonicClient(BaseAPIClient):
     async def set_rating(self, user: dict, tracks: List[SubBoxTrack]):
         username = user['username']
         password = user['password']
-        port = user['subsonic_port']
+        port = 4533 # since we're inside the same docker network, can call the private port
         song_ids_ratings: List[Tuple[int, int]] = []
         base_path = self._host.format(user=username, port=port)
         for track in tracks:

@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 class BeetsClient(BaseAPIClient):
     async def get_number_of_tracks(self, user: dict) -> int:
-        port = user['beets_port']
+        port = 8337 # since we're inside the same docker network, can call the private port
         username = user['username']
         base_url = self._host.format(user=username, port=port)
         path = '/stats'

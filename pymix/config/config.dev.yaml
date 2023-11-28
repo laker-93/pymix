@@ -1,8 +1,7 @@
 ---
 app_env: dev
 rekordbox:
-  #xml_path: /Users/lajp/rekordbox/rekordbox_empty.xml
-  xml_path: /Users/lukepurnell/PycharmProjects/pymix/dev_sandbox/rekordbox_empty.xml
+  xml_path: /subbox/rekordbox/rekordbox_empty.xml
   zip_name: subbox_export
 containers:
   subsonic:
@@ -11,21 +10,22 @@ containers:
     username: lajp
     version: 1.16.1
     music_path_base_to_remove: music
-    serving_music_path_base: /Users/lukepurnell/subbox/{user}/nav_music
-    docker_compose_file: /Users/lukepurnell/subbox/docker-compose/navidrome/docker-compose.yml
-    env_file: /Users/lukepurnell/subbox/docker-compose/navidrome/env
+    serving_music_path_base: /subbox/{user}/nav_music
+    docker_compose_file: /subbox/docker-compose/navidrome/docker-compose.yml
+    env_file: /subbox/docker-compose/navidrome/env
   filebrowser:
-    data: /Users/lukepurnell/subbox/docker-compose/filebrowser/data/users/{user}
-    docker_compose_file: /Users/lukepurnell/subbox/docker-compose/filebrowser/docker-compose.yml
-    env_file: /Users/lukepurnell/subbox/docker-compose/filebrowser/env
+    data: /subbox/docker-compose/filebrowser/data/users/{user}
+    docker_compose_file: /subbox/docker-compose/filebrowser/docker-compose.yml
+    env_file: /subbox/docker-compose/filebrowser/env
   beets:
     host: http://beets{user}:{port}
-    data: /Users/lukepurnell/subbox/{user}/beets/download
-    docker_compose_file: /Users/lukepurnell/subbox/docker-compose/beets/docker-compose.yml
-    env_file: /Users/lukepurnell/subbox/docker-compose/beets/env
-    config_file_src: /Users/lukepurnell/traefik/beets/config/config.yaml
-    config_file_dst: /Users/lukepurnell/subbox/{user}/beets/config/config.yaml
+    data: /subbox/{user}/beets/download
+    docker_compose_file: /subbox/docker-compose/beets/docker-compose.yml
+    env_file: /subbox/docker-compose/beets/env
+    config_file_src: /subbox/beets/config/config.yaml
+    config_file_dst: /subbox/{user}/beets/config/config.yaml
 logs_directory: logs
+user_root: /subbox/{user}
 db:
   path: /pymix/db/user_db.json
 max_number_of_users: 10

@@ -1,13 +1,9 @@
 aiohttp
-aiokafka
 fastapi
 uvicorn[standard]
-argparse
 python-on-whales==0.64.2
 dependency-injector
-asynctest
 pyyaml
-pytest-asyncio
 pyrekordbox
 music-tag
 tinydb
