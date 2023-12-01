@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from pyrekordbox import RekordboxXml
-from pyrekordbox.xml import Node, Track, RATING_MAPPING
+from pyrekordbox.xml import Node, Track, RATING_MAPPING, XmlDuplicateError
 
 from pymix.factories.rekordbox_xml_factory import RekordboxXMLFactory
 from pymix.model.subboxplaylist import SubBoxPlaylist
@@ -77,7 +77,7 @@ class RekordboxXMLOrchestrator:
         new_playlist = playlist_root.add_playlist(playlist_name)
         return new_playlist
 
-    def add_track(self, track: SubBoxTrack, suppress_error: bool=False) -> None:
+    def add_track(self, user_root: str, track: SubBoxTrack, suppress_error: bool=False) -> None:
         """
         Adds the track to the XML. Optionally suppress the error if the track is already present.
         :param track:
@@ -86,18 +86,20 @@ class RekordboxXMLOrchestrator:
         """
         try:
             rekord_track = self._rekordbox_xml.add_track(
-                str(track.path),
+                f'{user_root}/{str(track.path)}',
                 Name=track.name,
                 Artist=track.artist,
                 Album=track.album,
                 Rating=RATING_MAPPING.inverse[track.rating],
                 Genre=track.genre
             )
-        except ValueError as ex:
+        except XmlDuplicateError as ex:
+            msg = f'unable to add track {track} as already present'
+            logger.info(msg)
             if not suppress_error:
-                raise ValueError(f'unable to add track {track}') from ex
+                raise ValueError(msg) from ex
         else:
-            logger.debug(f"added track {str(track.path)} {rekord_track}")
+            logger.info(f"added track {rekord_track.TrackID} {str(track.path)} {rekord_track}")
 
 
     def add_track_to_rekordbox_playlist(self, user_root: str, track: SubBoxTrack, playlist: Node):

@@ -81,6 +81,7 @@ class RekordboxXMLController:
         # If a track in the subsonic set is already present in rekordbox then must remove it before its playlist can be
         # updated. Need the rekordbox TrackID to do this. Therefore, for those subsonic tracks that are already in
         # rekordbox, take the TrackID from the rekordbox set so they can be dealt with.
+        assert subsonic_tracks, f'did not parse any subsonic tracks'
         for subsonic_track in subsonic_tracks:
             for rekordbox_track in rekordbox_tracks:
                 if subsonic_track == rekordbox_track:
@@ -100,7 +101,7 @@ class RekordboxXMLController:
         await asyncio.sleep(2)
         async for tracks in self._subsonic_orchestrator._subsonic_client.get_all_tracks(user, 400):
             for track in tracks:
-                self._rekordbox_xml_orchestrator.add_track(track, suppress_error=True)
+                self._rekordbox_xml_orchestrator.add_track(user_root, track, suppress_error=True)
             await asyncio.sleep(2)
 
         # todo remove any playlists that have no tracks
