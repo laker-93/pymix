@@ -91,7 +91,7 @@ async def tracks_imported(
             original_n_tracks_to_import = job['n_tracks_to_import']
             total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
             imported_diff = total_n_imported_tracks - original_total_n_imported_tracks
-            percentage_complete = (imported_diff / original_n_tracks_to_import) * 100
+            percentage_complete = int((imported_diff / original_n_tracks_to_import) * 100)
             logger.info(f'A total of {total_n_imported_tracks} have been imported.')
             logger.info(f'have complete {percentage_complete}% out of {original_n_tracks_to_import}')
             success = True
