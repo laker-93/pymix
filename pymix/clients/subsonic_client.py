@@ -121,7 +121,7 @@ class SubsonicClient(BaseAPIClient):
         logger.info(f'completed scan of subsonic for user {username} with response {response}')
         return response['subsonic-response']['status'] == 'ok'
 
-    async def get_playlists(self, user: dict) -> List[SubBoxPlaylist]:
+    async def get_playlists(self, user: dict) -> Optional[List[SubBoxPlaylist]]:
         username = user['username']
         password = user['password']
         port = 4533 # since we're inside the same docker network, can call the private port
@@ -129,6 +129,7 @@ class SubsonicClient(BaseAPIClient):
         url = self._subsonic_format_url(username, password, f"{base_path}/rest/getPlaylists")
         response = await self.get(url)
         assert response
+        result = None
         try:
             result = self._parse_playlists(response)
         except KeyError:

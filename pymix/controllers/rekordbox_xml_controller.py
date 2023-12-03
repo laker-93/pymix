@@ -74,6 +74,8 @@ class RekordboxXMLController:
         self._rekordbox_xml_orchestrator.create_xml(xml_path)
 
         subsonic_playlists = await self._subsonic_orchestrator.get_subsonic_playlists(user)
+        if not subsonic_playlists:
+            logger.info(f'no subsonic playlists found for user')
         subsonic_tracks = await self._subsonic_orchestrator.get_subsonic_tracks(user)
 
         rekordbox_tracks = self._rekordbox_xml_orchestrator.get_all_xml_tracks()
@@ -81,7 +83,6 @@ class RekordboxXMLController:
         # If a track in the subsonic set is already present in rekordbox then must remove it before its playlist can be
         # updated. Need the rekordbox TrackID to do this. Therefore, for those subsonic tracks that are already in
         # rekordbox, take the TrackID from the rekordbox set so they can be dealt with.
-        assert subsonic_tracks, f'did not parse any subsonic tracks'
         for subsonic_track in subsonic_tracks:
             for rekordbox_track in rekordbox_tracks:
                 if subsonic_track == rekordbox_track:
@@ -89,11 +90,12 @@ class RekordboxXMLController:
                         f"found subsonic track {subsonic_track} in rekordbox. Setting track id to {rekordbox_track.track_id}")
                     subsonic_track.track_id = rekordbox_track.track_id
 
-        # sort the playlists by name so duplicate folders of the same name are not created
-        subsonic_playlists.sort(key=lambda playlist: playlist.name)
-        # Given the Playlist data from Subsonic create the playlist directory structure in Rekordbox.
-        for subsonic_playlist in subsonic_playlists:
-            self._create_rekordbox_xml_playlist(user_root, subsonic_playlist)
+        if subsonic_playlists:
+            # sort the playlists by name so duplicate folders of the same name are not created
+            subsonic_playlists.sort(key=lambda playlist: playlist.name)
+            # Given the Playlist data from Subsonic create the playlist directory structure in Rekordbox.
+            for subsonic_playlist in subsonic_playlists:
+                self._create_rekordbox_xml_playlist(user_root, subsonic_playlist)
         # add subsonic tracks that do not belong to a playlist.
         # suppress the exception that would be raised due to attempting to add a track that is already present.
         import asyncio

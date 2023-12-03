@@ -1,5 +1,5 @@
 import logging
-from typing import List, Set, AsyncIterator
+from typing import List, Set, AsyncIterator, Optional
 
 from pymix.clients.subsonic_client import SubsonicClient
 from pymix.model.subboxplaylist import SubBoxPlaylist
@@ -12,7 +12,7 @@ class SubsonicOrchestrator:
     def __init__(self, subsonic_client: SubsonicClient):
         self._subsonic_client = subsonic_client
 
-    async def _get_subsonic_playlists(self, user: dict) -> List[SubBoxPlaylist]:
+    async def _get_subsonic_playlists(self, user: dict) -> Optional[List[SubBoxPlaylist]]:
         """
         Creates internal view of the playlists and their tracks found in navirdome.
         :return:
@@ -20,11 +20,12 @@ class SubsonicOrchestrator:
         playlists = await self._subsonic_client.get_playlists(user)
         # get all playlists to find their ids.
         # for each playlist, get the playlist and iterate through to find the tracks
-        for playlist in playlists:
-            playlist.tracks = await self._subsonic_client.get_playlist_tracks(user, playlist.subsonic_id)
+        if playlists:
+            for playlist in playlists:
+                playlist.tracks = await self._subsonic_client.get_playlist_tracks(user, playlist.subsonic_id)
         return playlists
 
-    async def get_subsonic_playlists(self, user: dict) -> List[SubBoxPlaylist]:
+    async def get_subsonic_playlists(self, user: dict) -> Optional[List[SubBoxPlaylist]]:
         subsonic_playlists = await self._get_subsonic_playlists(user)
         return subsonic_playlists
 
@@ -34,10 +35,11 @@ class SubsonicOrchestrator:
         """
         subsonic_playlists = await self.get_subsonic_playlists(user)
         subsonic_tracks = []
-        for subsonic_playlist in subsonic_playlists:
-            subsonic_tracks.extend(
-                subsonic_playlist.tracks
-            )
+        if subsonic_playlists:
+            for subsonic_playlist in subsonic_playlists:
+                subsonic_tracks.extend(
+                    subsonic_playlist.tracks
+                )
         return subsonic_tracks
 
     async def scan(self, user: dict):
