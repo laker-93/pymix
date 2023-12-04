@@ -113,7 +113,7 @@ class RekordboxXMLOrchestrator:
                 Genre=track.genre
             )
             logger.debug(f"added track {str(track.path)}")
-        except ValueError:
+        except XmlDuplicateError:
             track_id = track.track_id
             # if the track_id is set then the subsonic track is already present in the rekordbox xml,
             # otherwise the track has yet to be added to rekordbox xml and appears in multiple playlists.
@@ -123,7 +123,7 @@ class RekordboxXMLOrchestrator:
                 # the rekord box get_track api is stupid so do some very inefficient work around
                 #rekordbox_track = self._rekordbox_xml.get_track(index=1, Location=os.path.normpath(str(track.path)))
                 for other in self._rekordbox_xml.get_tracks():
-                    if os.path.normpath(os.path.normpath(str(track.path))) == other.Location:
+                    if user_root + '/' + str(track.path) == other.Location:
                         rekordbox_track = other
                         break
             logger.debug(f"track already present, found at {str(rekordbox_track)}")
