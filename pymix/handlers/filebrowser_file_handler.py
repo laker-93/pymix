@@ -41,10 +41,11 @@ class FileBrowserFileHandler:
                     mimecategory = mimestart.split('/')[1]
                     if mimecategory == 'xml':
                         xml_path = f
-                        break
             elif f.is_dir():
                 if f.name == 'rekordbox_bak':
                     audio_path = f
+            if audio_path and xml_path:
+                break
         assert xml_path
         assert audio_path
         return xml_path, audio_path
