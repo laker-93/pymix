@@ -28,13 +28,17 @@ class DbController:
         return job_id
 
     def get_number_of_jobs(self, username: str, in_progress: bool) -> int:
+        self._db.clear_cache()
         user = self.get_user(username)
         user_id: str = user['user_id']
         user_job_table = self._db.table('user_job_table')
         UserJob = Query()
+        logger.info(f'getting in progress jobs for user id {user_id}')
         results = user_job_table.search(UserJob.user_id == user_id)
         job_table = self._db.table('job_table')
         n_in_progress_jobs = 0
+        logger.info(f'job table content {job_table.all()}')
+        logger.info(f'have {len(results)} jobs for user id {user_id}')
         for result in results:
             Job = Query()
             job_id: str = result['job_id']
@@ -122,10 +126,12 @@ class DbController:
         user_table.insert(dict(zip(self._user_schema, (username, password, user_id, beets_port, subsonic_port))))
 
     def get_user_by_session_id(self, session_id: str) -> Optional[Document]:
+        logger.info(f'get user by session id {session_id}')
         SessionToUser = Query()
         session_table = self._db.table('session_table')
         results = session_table.search(SessionToUser.session_id == session_id)
         if len(results) == 0:
+            logger.error(f'no results found in session table for session id {session_id}')
             return None
         if len(results) > 1:
             msg = f'error found {len(results)} sessions associated with session id {session_id}'
@@ -139,6 +145,7 @@ class DbController:
             results = user_table.search(User.user_id == user_id)
             assert len(results) == 1, f'found {len(results)} users in user table with user id {user_id}'
             result = results.pop()
+            logger.info(f'returning a single user table result for session id {session_id}')
             return result
 
     def get_user(self, username: str) -> Document:
