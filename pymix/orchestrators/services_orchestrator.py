@@ -99,6 +99,11 @@ class ServicesOrchestrator:
         config_src = self._config['containers']['beets']['config_file_src']
         config_dst = self._config['containers']['beets']['config_file_dst'].format(user=username)
         shutil.copy(config_src, config_dst)
+        example_music_path = self._config['containers']['beets']['example_music_path']
+        beets_import_path = self._config['containers']['beets']['data'].format(user=username) + '/example'
+        shutil.copytree(example_music_path, beets_import_path)
+        docker.execute(f"beets{username}", ['beet', 'import', '-q', '/downloads'])
+        shutil.rmtree(beets_import_path)
 
     def _create_filebrowser_account(self, user: dict):
         filebrowser_container = docker.container.inspect("filebrowser")
