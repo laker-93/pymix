@@ -58,12 +58,10 @@ class RekordboxXMLController:
 
         self._file_browser_file_handler.stage_for_import(username)
         # 1. invoke beets import on the audio files to import
-        my_container = docker.container.inspect(f"beets{username}")
-        print('found container')
         # can set to interactive with tty to pipe docker stdin input/output to terminal for user feedback.
         # beets config set to quiet mode and fallback of 'asis'. If user needs to correct later, they will have to
         # specify a musicbrainz id and re import with a specific query. This will need a separate API to be implemented.
-        result = docker.execute(my_container, ['beet', 'import', '-q', '/downloads'])
+        result = docker.execute(f"beets{username}", ['beet', 'import', '-q', '/downloads'])
         print(result)
         self._file_browser_file_handler.remove_fb_data_path(username)
         self._rb_backup_file_handler.clean_up_beets_import_tree(username)
@@ -118,12 +116,10 @@ class RekordboxXMLController:
         self._rb_backup_file_handler.restore_track_meta_and_stage_for_import(username, audio_files_to_import)
         # 1. invoke beets import on the audio files to import
 
-        my_container = docker.container.inspect(f"beets{username}")
-        print(my_container)
         # can set to interactive with tty to pipe docker stdin input/output to terminal for user feedback.
         # beets config set to quiet mode and fallback of 'asis'. If user needs to correct later, they will have to
         # specify a musicbrainz id and re import with a specific query. This will need a separate API to be implemented.
-        result = docker.execute(my_container, ['beet', 'import', '-q', '/downloads'])
+        result = docker.execute(f"beets{username}", ['beet', 'import', '-q', '/downloads'])
         print(result)
         # 9. on success, remove the directory of the beets import
         self._file_browser_file_handler.remove_fb_data_path(username)
