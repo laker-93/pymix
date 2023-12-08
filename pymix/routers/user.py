@@ -122,8 +122,10 @@ async def get_user_by_session_id(
         logger.error(f'error occurred getting user for session id {session_id}', exc_info=True)
         reason = repr(ex)
         success = False
-    return {
-        'success': success,
-        'reason': reason,
-        'user': user
-    }
+    finally:
+        logger.info(f'found user {user}')
+        return {
+            'success': success,
+            'reason': reason,
+            'user': user
+        }
