@@ -97,13 +97,15 @@ class DbController:
         session_table = self._db.table('session_table')
         results = session_table.search(SessionToUser.user_id == user_id)
         if len(results) == 1:
-            logger.debug(f'already have a session for user {user_id}')
+            logger.info(f'already have a session for user {user_id}')
+            session_id = results[0]['session_id']
         elif len(results) > 1:
             msg = f'have {len(results)} in session table for user {user_id}'
             logger.error(msg)
             raise ValueError(msg)
-        session_id = uuid.uuid4().hex
-        self._add_session(session_id, user_id)
+        else:
+            session_id = uuid.uuid4().hex
+            self._add_session(session_id, user_id)
         return session_id
 
     def _add_session(
