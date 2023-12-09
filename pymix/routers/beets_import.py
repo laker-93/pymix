@@ -70,7 +70,7 @@ async def tracks_imported(
         beets_client: BeetsClient = Depends(Provide[Container.beets_client]),
         db_controller: DbController = Depends(Provide[Container.db_controller]),
 ) -> dict:
-    success = False
+    import_in_progress = False
     reason = ""
     percentage_complete = 0
     original_n_tracks_to_import = 0
@@ -91,16 +91,16 @@ async def tracks_imported(
             original_n_tracks_to_import = job['n_tracks_to_import']
             total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
             imported_diff = total_n_imported_tracks - original_total_n_imported_tracks
-            percentage_complete = int((imported_diff / original_n_tracks_to_import) * 100)
+            percentage_complete = round((imported_diff / original_n_tracks_to_import) * 100, 2)
             logger.info(f'A total of {total_n_imported_tracks} have been imported.')
             logger.info(f'have complete {percentage_complete}% out of {original_n_tracks_to_import}')
-            success = True
+            import_in_progress = True
         else:
             reason = f"no in-progress jobs found for user {username}"
     else:
         reason = f"no username found for session id {session_id}"
     return {
-        'success': success,
+        'import_in_progress': import_in_progress,
         'reason': reason,
         'n_tracks_to_import': original_n_tracks_to_import,
         'percentage_complete': percentage_complete
