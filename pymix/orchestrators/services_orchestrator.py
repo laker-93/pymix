@@ -47,18 +47,19 @@ class ServicesOrchestrator:
         self._create_navidrome(user)
         self._create_beets(user)
         self._create_filebrowser_account(user)
-        await self._attempt_to_create_account(user)
+        account_created = await self._attempt_to_create_account(user)
+        assert account_created, 'failed to create navidrome account'
         return session_id
 
-    async def _attempt_to_create_account(self, user: dict, attempts: int = 10) -> bool:
+    async def _attempt_to_create_account(self, user: dict, attempts: int = 15) -> bool:
         success = False
         for attempt in range(attempts):
             try:
                 await self._navidrome_client.create_account(user)
             except Exception:
                 # possible race here where navidrome docker is still being created. So attempt multiple times.
-                logger.error(f'encountered error whebn attempting to create navidrome account. Retrying...', exc_info=True)
-                await asyncio.sleep(1.5)
+                logger.error(f'encountered error when attempting to create navidrome account. Retrying...', exc_info=True)
+                await asyncio.sleep(2)
             else:
                 success = True
                 break
