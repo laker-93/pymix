@@ -26,7 +26,7 @@ containers:
     config_file_dst: /subbox/{user}/beets/config/config.yaml
     example_music:
       path: /subbox/beets/example_music
-      search_id: 2c0e7e2b-a4ad-4b37-b698-3d76534ebc9f
+      search_id: 63d2a9f9-9951-4bed-b402-317d00b8943a
 logs_directory: logs
 user_root: /subbox/{user}
 db:
