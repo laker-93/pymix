@@ -11,7 +11,7 @@ class NavidromeClient(BaseAPIClient):
         port = 4533 # since we're inside the same docker network, can call the private port
         username = user['username']
         password = user['password']
-        url = f'http://navidrome{username}:{port}/auth/createAdmin'
+        url = f'{self._host.format(user=username)}/auth/createAdmin'
         body = {
            "username": username,
            "password": password
