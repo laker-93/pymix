@@ -1,5 +1,6 @@
 import asyncio
 import shutil
+import logging
 from pathlib import Path
 
 from aiohttp import ClientConnectorError
@@ -8,6 +9,8 @@ from python_on_whales import DockerClient, docker
 from pymix.clients.navidrome_client import NavidromeClient
 from pymix.controllers.db_controller import DbController
 from pymix.handlers.env_file_handler import DockerEnvFileHandler
+
+logger = logging.getLogger(__name__)
 
 
 class ServicesOrchestrator:
@@ -47,14 +50,15 @@ class ServicesOrchestrator:
         await self._attempt_to_create_account(user)
         return session_id
 
-    async def _attempt_to_create_account(self, user: dict, attempts: int = 5) -> bool:
+    async def _attempt_to_create_account(self, user: dict, attempts: int = 10) -> bool:
         success = False
         for attempt in range(attempts):
             try:
                 await self._navidrome_client.create_account(user)
-            except ClientConnectorError:
-                # account for a race here where navidrome docker is still being created. So attempt multiple times.
-                await asyncio.sleep(0.5)
+            except Exception:
+                # possible race here where navidrome docker is still being created. So attempt multiple times.
+                logger.error(f'encountered error whebn attempting to create navidrome account. Retrying...', exc_info=True)
+                await asyncio.sleep(1.5)
             else:
                 success = True
                 break
@@ -99,10 +103,11 @@ class ServicesOrchestrator:
         config_src = self._config['containers']['beets']['config_file_src']
         config_dst = self._config['containers']['beets']['config_file_dst'].format(user=username)
         shutil.copy(config_src, config_dst)
-        example_music_path = self._config['containers']['beets']['example_music_path']
+        example_music_path = self._config['containers']['beets']['example_music']['path']
         beets_import_path = self._config['containers']['beets']['data'].format(user=username) + '/example'
+        search_id = self._config['containers']['beets']['example_music']['search_id']
         shutil.copytree(example_music_path, beets_import_path)
-        docker.execute(f"beets{username}", ['beet', 'import', '-q', '/downloads'])
+        docker.execute(f"beets{username}", ['beet', 'import', '-q', '/downloads', '--search-id', search_id])
         shutil.rmtree(beets_import_path)
 
     def _create_filebrowser_account(self, user: dict):
