@@ -6,7 +6,7 @@ rekordbox:
 containers:
   subsonic:
     #host: http://localhost:4533/navidrome
-    host: http://navidrome{user}:{port}
+    host: https://www.sub-box.net/navidrome{user}
     username: lajp
     version: 1.16.1
     music_path_base_to_remove: music
@@ -24,7 +24,9 @@ containers:
     env_file: /subbox/docker-compose/beets/env
     config_file_src: /subbox/beets/config/config.yaml
     config_file_dst: /subbox/{user}/beets/config/config.yaml
-    example_music_path: /subbox/beets/example_music
+    example_music:
+      path: /subbox/beets/example_music
+      search_id: 2c0e7e2b-a4ad-4b37-b698-3d76534ebc9f
 logs_directory: logs
 user_root: /subbox/{user}
 db:
