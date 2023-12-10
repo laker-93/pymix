@@ -49,7 +49,7 @@ async def user_login(
     reason = ""
     success = True
     print(f'got session id {session_id}')
-    if session_id is None:
+    if session_id is None or session_id == 'none':
         try:
             session_id = db_controller.create_session(username, password)
         except Exception as ex:
