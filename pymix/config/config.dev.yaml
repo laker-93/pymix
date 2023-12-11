@@ -6,7 +6,7 @@ rekordbox:
 containers:
   subsonic:
     #host: http://localhost:4533/navidrome
-    host: https://www.sub-box.net/navidrome{user}
+    host: http://navidrome{user}:4533/navidrome{user}
     username: lajp
     version: 1.16.1
     music_path_base_to_remove: music
