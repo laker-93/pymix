@@ -44,6 +44,7 @@ async def beets_import(
         job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
         logger.info(f'importing {total_n_tracks_for_import} tracks for user {username}')
         try:
+            logger.info(f'starting import for user {username}')
             beets_output = await rekordbox_xml_controller.consume_from_filebrowser(username)
         except Exception as ex:
             success = False
@@ -52,7 +53,9 @@ async def beets_import(
             reason = msg
         else:
             total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
+            logger.info(f'successfully imported {total_n_tracks_for_import} for user {username}')
         finally:
+            logger.info(f'marking import job for user {username} as {success}')
             db_controller.job_completed(job_id, success)
     return {
         'success': success,
@@ -92,8 +95,13 @@ async def tracks_imported(
             total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
             imported_diff = total_n_imported_tracks - original_total_n_imported_tracks
             percentage_complete = round((imported_diff / original_n_tracks_to_import) * 100, 2)
-            logger.info(f'A total of {total_n_imported_tracks} have been imported.')
-            logger.info(f'have complete {percentage_complete}% out of {original_n_tracks_to_import}')
+            if job['in_progress'] is False and job['result'] is True:
+                # it's possible due to duplicate tracks that the maths won't quite work out at 100%.
+                # however, if the import job has been marked as complete, then we know we are done.
+                percentage_complete = 100
+            logger.debug(f'Started with a total of {original_total_n_imported_tracks} already imported tracks.')
+            logger.debug(f'A total of {total_n_imported_tracks} have been importe so far.')
+            logger.debug(f'have complete {percentage_complete}% out of {original_n_tracks_to_import}')
             import_in_progress = True
         else:
             reason = f"no in-progress jobs found for user {username}"
