@@ -42,14 +42,17 @@ async def rekordbox_import(
         total_n_tracks_for_import = fb_file_handler.get_number_of_tracks_for_import(username)
         total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
         job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
-        logger.info(f'importing {total_n_tracks_for_import} tracks for user {username}')
+        logger.info(f'RB importing {total_n_tracks_for_import} tracks for user {username}')
         try:
+            logger.info(f'starting RB import track staging for user {username}')
             xml_path, audio_path = fb_file_handler.get_xml_audio_path(username)
+            logger.info(f'finished RB import track staging for user {username}')
             beets_output = await rekordbox_xml_controller.create_subsonic_playlists_from_xml(
                 user=user,
                 xml_path=xml_path,
                 audio_files_to_import=audio_path
             )
+            logger.info(f'finished RB import for user {username}')
         except Exception as ex:
             success = False
             msg = f'error occurred importing the following path in to beets for user {username} {repr(ex)}'
@@ -57,7 +60,9 @@ async def rekordbox_import(
             reason = msg
         else:
             total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
+            logger.info(f'successfully RB imported {total_n_tracks_for_import} for user {username}')
         finally:
+            logger.info(f'marking RB import job for user {username} as {success}')
             db_controller.job_completed(job_id, success)
     return {
         'success': success,

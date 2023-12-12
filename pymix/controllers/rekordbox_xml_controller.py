@@ -119,11 +119,15 @@ class RekordboxXMLController:
         # can set to interactive with tty to pipe docker stdin input/output to terminal for user feedback.
         # beets config set to quiet mode and fallback of 'asis'. If user needs to correct later, they will have to
         # specify a musicbrainz id and re import with a specific query. This will need a separate API to be implemented.
+        logger.info(f'starting beets import for {username}')
         result = docker.execute(f"beets{username}", ['beet', 'import', '-q', '/downloads'])
+        logger.info(f'finished beets import for {username}')
         print(result)
         # 9. on success, remove the directory of the beets import
+        logger.info(f'starting post import clean up for {username}')
         self._file_browser_file_handler.remove_fb_data_path(username)
         self._rb_backup_file_handler.clean_up_beets_import_tree(username)
+        logger.info(f'finished post import clean up for {username}')
 
     async def create_subsonic_playlists_from_xml(self, user: dict, xml_path: Path, audio_files_to_import: Path):
         username = user['username']
