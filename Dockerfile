@@ -21,8 +21,7 @@ RUN apt install python3.11 python3-pip -y
 ENV PORT 8002
 
 # Setup App Environment
-ARG ENVIRONMENT
-ENV APP_ENVIRONMENT ${ENVIRONMENT}
+ENV APP_ENVIRONMENT
 ENV PYTHONPATH "${PYTHONPATH}:/app"
 
 RUN python3 -m pip install --upgrade pip

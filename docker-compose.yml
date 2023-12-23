@@ -14,6 +14,8 @@ services:
       - ./db:/pymix/db
       - /Users/lukepurnell/subbox:/subbox
       - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - APP_ENVIRONMENT=prod
 networks:
   subbox-bridge:
     external: true

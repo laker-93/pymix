@@ -2,6 +2,7 @@ import logging
 
 from dependency_injector.wiring import Provide, inject
 from fastapi import APIRouter, Depends
+from anyio import to_process
 
 from pymix.clients.beets_client import BeetsClient
 from pymix.containers import Container
@@ -117,7 +118,8 @@ async def rekordbox_export(
             reason = msg
         else:
             try:
-                fb_file_handler.export_subsonic_music(username=username)
+                logger.info(f'starting to prepare subbox export zip of {n_beets_tracks} tracks for user {user}')
+                await to_process.run_sync(fb_file_handler.export_subsonic_music, username)
             except Exception as ex:
                 success = False
                 msg = f'error occurred exporting subsonic collection to filebrowser for user {username} {repr(ex)}'

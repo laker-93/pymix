@@ -1,7 +1,38 @@
 ---
-app_env: dev
+app_env: prod
+rekordbox:
+  xml_path: /subbox/rekordbox/rekordbox_empty.xml
+  zip_name: subbox_export
+containers:
+  subsonic:
+    #host: http://localhost:4533/navidrome
+    host: http://navidrome{user}:4533/navidrome{user}
+    username: lajp
+    version: 1.16.1
+    music_path_base_to_remove: music
+    serving_music_path_base: /subbox/{user}/nav_music
+    docker_compose_file: /subbox/docker-compose/navidrome/docker-compose.yml
+    env_file: /subbox/docker-compose/navidrome/env
+  filebrowser:
+    data: /subbox/docker-compose/filebrowser/data/users/{user}
+    docker_compose_file: /subbox/docker-compose/filebrowser/docker-compose.yml
+    env_file: /subbox/docker-compose/filebrowser/env
+  beets:
+    host: http://beets{user}:{port}
+    data: /subbox/{user}/beets/download
+    docker_compose_file: /subbox/docker-compose/beets/docker-compose.yml
+    env_file: /subbox/docker-compose/beets/env
+    config_file_src: /subbox/beets/config/config.yaml
+    config_file_dst: /subbox/{user}/beets/config/config.yaml
+    example_music:
+      path: /subbox/beets/example_music
+      search_id: 63d2a9f9-9951-4bed-b402-317d00b8943a
+logs_directory: logs
+user_root: /subbox/{user}
+db:
+  path: /pymix/db/user_db.json
+max_number_of_users: 10
 subsonic:
   host: http:/localhost:4533
   username: lajp
   version: 1.16.1
-logs_directory: logs
