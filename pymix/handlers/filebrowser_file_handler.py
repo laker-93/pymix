@@ -1,5 +1,4 @@
 import logging
-from contextlib import contextmanager
 
 import mimetypes
 import shutil
@@ -26,7 +25,11 @@ class FileBrowserFileHandler:
         src_path = Path(
             self._filebrowser_data_path.format(user=username)
         )
-        return src_path / 'subbox_rb_export.xml'
+        xml_path = src_path / 'subbox_rb_export.xml'
+        # ensure starting from a clean state.
+        # multiple exports could pick up the xml from a previous run.
+        xml_path.unlink(missing_ok=True)
+        return xml_path
 
     def get_xml_audio_path(self, user: str) -> tuple[Path, Path]:
         src_path = Path(
