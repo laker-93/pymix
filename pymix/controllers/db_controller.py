@@ -1,6 +1,6 @@
 import uuid
 import logging
-from typing import Optional
+from typing import Optional, Literal
 
 from tinydb import TinyDB, Query
 from tinydb.table import Document
@@ -12,8 +12,9 @@ logger = logging.getLogger(__name__)
 
 
 class DbController:
-    def __init__(self, db: TinyDB):
+    def __init__(self, db: TinyDB, app_env: Literal["dev", "prod"]):
         self._db = db
+        self._app_env = app_env
         self._session_to_user_schema = ('session_id', 'user_id')
         self._user_schema = ('username', 'password', 'user_id', 'beets_port', 'subsonic_port')
         self._user_jobs_schema = ('user_id', 'job_id')
@@ -83,8 +84,8 @@ class DbController:
         user_table = self._db.table('user_table')
         results = user_table.search(User.username == username)
         assert len(results) == 0, f'already have {len(results)} users with username {username}'
-        beets_port = get_available_port()
-        subsonic_port = get_available_port()
+        beets_port = 8337 if self._app_env == 'dev' else get_available_port()
+        subsonic_port = 4533 if self._app_env == 'dev' else get_available_port()
         user_id = uuid.uuid4().hex
         self._add_user(username, password, user_id, beets_port, subsonic_port)
         return self.create_session(username, password)
