@@ -1,3 +1,4 @@
+anyio
 aiohttp
 fastapi
 uvicorn[standard]
