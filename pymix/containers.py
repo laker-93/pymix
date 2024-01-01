@@ -64,7 +64,8 @@ class Container(containers.DeclarativeContainer):
 
     db_controller = providers.Singleton(
         DbController,
-        db
+        db,
+        config.app_env
     )
 
     env_file_handler = providers.Singleton(
