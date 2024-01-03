@@ -94,14 +94,20 @@ class RekordboxXMLController:
             # Given the Playlist data from Subsonic create the playlist directory structure in Rekordbox.
             for subsonic_playlist in subsonic_playlists:
                 self._create_rekordbox_xml_playlist(user_root, subsonic_playlist)
-        # add subsonic tracks that do not belong to a playlist.
+        # add subsonic tracks that do not belong to a playlist to a default playlist.
+        default_playlist = self._rekordbox_xml_orchestrator.create_rekordbox_xml_playlist('NOPLAYLIST')
         # suppress the exception that would be raised due to attempting to add a track that is already present.
         import asyncio
         # todo figure this out - seem to need to pause to avoid getting disconnected from server
         await asyncio.sleep(2)
         async for tracks in self._subsonic_orchestrator._subsonic_client.get_all_tracks(user, 400):
             for track in tracks:
-                self._rekordbox_xml_orchestrator.add_track(user_root, track, suppress_error=True)
+                self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(
+                    user_root,
+                    track,
+                    default_playlist,
+                    force=False
+                )
             await asyncio.sleep(2)
 
         # todo remove any playlists that have no tracks

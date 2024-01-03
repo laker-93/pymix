@@ -77,32 +77,11 @@ class RekordboxXMLOrchestrator:
         new_playlist = playlist_root.add_playlist(playlist_name)
         return new_playlist
 
-    def add_track(self, user_root: str, track: SubBoxTrack, suppress_error: bool=False) -> None:
+    def add_track_to_rekordbox_playlist(self, user_root: str, track: SubBoxTrack, playlist: Node, force: bool = True):
         """
-        Adds the track to the XML. Optionally suppress the error if the track is already present.
-        :param track:
-        :param suppress_error:
-        :return:
+        Add track in playlist. Optionally force the track in to playlist even if the track is already in the XML.
         """
-        try:
-            rekord_track = self._rekordbox_xml.add_track(
-                f'{user_root}/{str(track.path)}',
-                Name=track.name,
-                Artist=track.artist,
-                Album=track.album,
-                Rating=RATING_MAPPING.inverse[track.rating],
-                Genre=track.genre
-            )
-        except XmlDuplicateError as ex:
-            msg = f'unable to add track {track} as already present'
-            logger.info(msg)
-            if not suppress_error:
-                raise ValueError(msg) from ex
-        else:
-            logger.info(f"added track {rekord_track.TrackID} {str(track.path)} {rekord_track}")
-
-
-    def add_track_to_rekordbox_playlist(self, user_root: str, track: SubBoxTrack, playlist: Node):
+        rekordbox_track = None
         try:
             rekordbox_track = self._rekordbox_xml.add_track(
                 f'{user_root}/{track.path}',
@@ -114,21 +93,28 @@ class RekordboxXMLOrchestrator:
             )
             logger.debug(f"added track {str(track.path)}")
         except XmlDuplicateError:
-            track_id = track.track_id
-            # if the track_id is set then the subsonic track is already present in the rekordbox xml,
-            # otherwise the track has yet to be added to rekordbox xml and appears in multiple playlists.
-            if track_id:
-                rekordbox_track = self._rekordbox_xml.get_track(TrackID=track_id)
+            if force:
+                track_id = track.track_id
+                # if the track_id is set then the subsonic track is already present in the rekordbox xml,
+                # otherwise the track has yet to be added to rekordbox xml and appears in multiple playlists.
+                if track_id:
+                    rekordbox_track = self._rekordbox_xml.get_track(TrackID=track_id)
+                else:
+                    # the rekord box get_track api is stupid so do some very inefficient work around
+                    #rekordbox_track = self._rekordbox_xml.get_track(index=1, Location=os.path.normpath(str(track.path)))
+                    for other in self._rekordbox_xml.get_tracks():
+                        if user_root + '/' + str(track.path) == other.Location:
+                            rekordbox_track = other
+                            break
+                assert rekordbox_track
+                logger.info(f"track already present, found at {str(rekordbox_track)}")
+                playlist.add_track(rekordbox_track.TrackID)
+                logger.info(f"track {rekordbox_track} added to {playlist}")
             else:
-                # the rekord box get_track api is stupid so do some very inefficient work around
-                #rekordbox_track = self._rekordbox_xml.get_track(index=1, Location=os.path.normpath(str(track.path)))
-                for other in self._rekordbox_xml.get_tracks():
-                    if user_root + '/' + str(track.path) == other.Location:
-                        rekordbox_track = other
-                        break
-            logger.debug(f"track already present, found at {str(rekordbox_track)}")
-        logger.debug(f"track {rekordbox_track} added to {playlist}")
-        playlist.add_track(rekordbox_track.TrackID)
+                logger.info(f"track {track} is already present. Not forcefully adding to playlist {playlist}.")
+        else:
+            playlist.add_track(rekordbox_track.TrackID)
+            logger.info(f"track {rekordbox_track} added to {playlist}")
 
 
     def _get_playlist_folder(self, playlist_folder_name: str) -> Optional[Node]:
