@@ -148,8 +148,6 @@ class RekordboxXMLController:
 
     async def create_subsonic_playlists(self, user: dict, xml_path: Path):
 
-        self._rekordbox_xml_orchestrator.create_xml(xml_path)
-
         # 4. create internal subbox playlist and tracks as below
         rekordbox_xml_playlists = self._rekordbox_xml_orchestrator.get_all_xml_playlists()
         subbox_playlists: List[SubBoxPlaylist] = []
