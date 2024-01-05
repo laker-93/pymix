@@ -16,11 +16,10 @@ logger = logging.getLogger(__name__)
 class RekordboxXMLOrchestrator:
     def __init__(self, rekordbox_xml_factory: RekordboxXMLFactory):
         self._rekordbox_xml_factory = rekordbox_xml_factory
-        self._rekordbox_xml: Optional[RekordboxXml] = None
+        self._rekordbox_xml = None
 
     def create_xml(self, xml_path: Optional[Path] = None):
-        if self._rekordbox_xml is None:
-            self._rekordbox_xml = self._rekordbox_xml_factory.create_rekordbox_xml(xml_path)
+        self._rekordbox_xml = self._rekordbox_xml_factory.create_rekordbox_xml(xml_path)
 
     def get_track_by_id(self, track_id: int) -> Track:
         return self._rekordbox_xml.get_track(TrackID=track_id)
