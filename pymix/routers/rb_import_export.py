@@ -104,12 +104,12 @@ async def rekordbox_export(
         #job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
         logger.info(f'exporting {n_beets_tracks} tracks for user {username}')
         try:
-            xml_path = fb_file_handler.get_xml_output_path(username)
+            xml_output_path = fb_file_handler.get_xml_output_path(username)
             await rekordbox_xml_controller.create_rekordbox_xml_from_subsonic_playlists(
-                user_root,
-                user,
-                None,
-                xml_path
+                user_root=user_root,
+                user=user,
+                xml_path=None,
+                xml_output_path=xml_output_path
             )
         except Exception as ex:
             success = False
