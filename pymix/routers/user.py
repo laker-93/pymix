@@ -27,7 +27,7 @@ async def create_user(
     try:
         session_id = await services_orchestrator.create(username, password)
     except Exception as ex:
-        logger.error(f'error occured creating services for user', exc_info=True)
+        logger.error(f'error occurred creating services for user', exc_info=True)
         reason = repr(ex)
         success = False
     response = JSONResponse(content=reason, status_code=HTTPStatus.OK if success else HTTPStatus.INTERNAL_SERVER_ERROR)

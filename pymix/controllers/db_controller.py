@@ -44,9 +44,9 @@ class DbController:
             Job = Query()
             job_id: str = result['job_id']
             job_results = job_table.search((Job.job_id == job_id) & (Job.in_progress == in_progress))
-            assert len(job_results) == 1 or len(job_results) == 0, f'have {len(job_results)} in progress jobs for user {user_id}'
+            assert len(job_results) == 1 or len(job_results) == 0, f'have {len(job_results)} in progress? {in_progress} jobs for user {user_id}'
             n_in_progress_jobs += len(job_results)
-        assert n_in_progress_jobs == 1 or n_in_progress_jobs == 0, f'have {n_in_progress_jobs} in progress jobs for user {user_id}'
+        assert n_in_progress_jobs == 1 or n_in_progress_jobs == 0, f'have {n_in_progress_jobs} in progress? {in_progress} jobs for user {user_id}'
         return n_in_progress_jobs
 
     def get_import_job(self, username: str) -> Document:

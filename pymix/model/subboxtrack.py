@@ -5,7 +5,7 @@ from typing import Optional
 import dataclasses
 
 
-@dataclasses.dataclass()
+@dataclasses.dataclass
 class SubBoxTrack:
     name: str
     artist: str

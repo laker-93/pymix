@@ -1,33 +1,33 @@
 ---
 app_env: dev
 rekordbox:
-  xml_path: /Users/lukepurnell/subbox/rekordbox/rekordbox_empty.xml
-  zip_name: subbox_export
+  xml_path: /Users/lukepurnell/workspace/subbox/rekordbox/rekordbox_empty.xml
+  zip_name: 'subbox-export'
 containers:
   subsonic:
-    host: http://localhost:4533/navidrome
-    username: lajp
+    host: http://localhost:4533
+    username: emc
     version: 1.16.1
     music_path_base_to_remove: music
-    serving_music_path_base: /Users/lukepurnell/subbox/{user}/nav_music
-    docker_compose_file: /Users/lukepurnell/subbox/docker-compose/navidrome/docker-compose.yml
-    env_file: /Users/lukepurnell/subbox/docker-compose/navidrome/env
+    serving_music_path_base: /Users/lukepurnell/workspace/subbox/{user}/nav_music
+    docker_compose_file: /Users/lukepurnell/workspace/subbox/docker-compose/navidrome/docker-compose.yml
+    env_file: /Users/lukepurnell/workspace/subbox/docker-compose/navidrome/env
   filebrowser:
-    data: /Users/lukepurnell/subbox/docker-compose/filebrowser/data/users/{user}
-    docker_compose_file: /Users/lukepurnell/subbox/docker-compose/filebrowser/docker-compose.yml
-    env_file: /Users/lukepurnell/subbox/docker-compose/filebrowser/env
+    data: /Users/lukepurnell/workspace/subbox/docker-compose/filebrowser/data/users/{user}
+    docker_compose_file: /Users/lukepurnell/workspace/subbox/docker-compose/filebrowser/docker-compose.yml
+    env_file: /Users/lukepurnell/workspace/subbox/docker-compose/filebrowser/env
   beets:
-    host: http://beets{user}:{port}
-    data: /Users/lukepurnell/subbox/{user}/beets/download
-    docker_compose_file: /Users/lukepurnell/subbox/docker-compose/beets/docker-compose.yml
-    env_file: /Users/lukepurnell/subbox/docker-compose/beets/env
-    config_file_src: /Users/lukepurnell/subbox/beets/config/config.yaml
-    config_file_dst: /Users/lukepurnell/subbox/{user}/beets/config/config.yaml
+    host: http://localhost:8337
+    data: /Users/lukepurnell/workspace/subbox/{user}/beets/download
+    docker_compose_file: /Users/lukepurnell/workspace/subbox/docker-compose/beets/docker-compose.yml
+    env_file: /Users/lukepurnell/workspace/subbox/docker-compose/beets/env
+    config_file_src: /Users/lukepurnell/workspace/subbox/beets/config/config.yaml
+    config_file_dst: /Users/lukepurnell/workspace/subbox/{user}/beets/config/config.yaml
     example_music:
-      path: /Users/lukepurnell/subbox/beets/example_music
+      path: /Users/lukepurnell/workspace/subbox/beets/example_music
       search_id: 63d2a9f9-9951-4bed-b402-317d00b8943a
 logs_directory: logs
-user_root: /Users/lukepurnell/subbox/{user}
+user_root: /Users/lukepurnell/workspace/subbox/{user}
 db:
   path: /Users/lukepurnell/PycharmProjects/pymix/db/user_db.json
 max_number_of_users: 10

@@ -3,6 +3,7 @@ import logging
 import mimetypes
 import shutil
 from pathlib import Path
+from zipfile import ZipFile
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,32 @@ class FileBrowserFileHandler:
         xml_path.unlink(missing_ok=True)
         return xml_path
 
+    def get_crate_output_path(self, username: str) -> Path:
+        src_path = Path(
+            self._filebrowser_data_path.format(user=username)
+        )
+        path = src_path
+        return path
+
+
+    def get_subcrate_audio_path(self, user: str) -> tuple[Path, Path]:
+        src_path = Path(
+            self._filebrowser_data_path.format(user=user)
+        )
+        subcrate_path = None
+        audio_path = None
+        for f in src_path.iterdir():
+            if f.name.lower() == 'audio_files.zip':
+                audio_path = f
+            elif f.name.lower() == 'subcrates.zip':
+                subcrate_path = f
+            if audio_path and subcrate_path:
+                break
+        assert subcrate_path
+        assert audio_path
+        return subcrate_path, audio_path
+
+
     def get_xml_audio_path(self, user: str) -> tuple[Path, Path]:
         src_path = Path(
             self._filebrowser_data_path.format(user=user)
@@ -44,8 +71,7 @@ class FileBrowserFileHandler:
                     mimecategory = mimestart.split('/')[1]
                     if mimecategory == 'xml':
                         xml_path = f
-            elif f.is_dir():
-                if f.name == 'rekordbox_bak':
+                if f.name.endswith('.zip'):
                     audio_path = f
             if audio_path and xml_path:
                 break
@@ -57,17 +83,22 @@ class FileBrowserFileHandler:
         src_path = Path(
             self._filebrowser_data_path.format(user=user)
         )
+        audio_files_zip = None
+        for f in src_path.iterdir():
+            if f.is_file() and f.name.endswith('.zip'):
+                audio_files_zip = f
+                break
+        assert audio_files_zip, f"no audio files zip found in {src_path}"
         n_files = 0
-        # tradeo off here between speed and accuracy. Proper detection of audio file based on content is slow.
-        # This detects if audio based on file extension (since the upload could contain other types of files).
-        # TODO: must do virus detection in a filebrowser pre hook and proper pre analysis of files.
-        for f in src_path.rglob('*'):
-            if f.is_file():
+        with ZipFile(audio_files_zip) as zip:
+            files = zip.namelist()
+            for f in files:
                 mimestart = mimetypes.guess_type(str(f))[0]
                 if mimestart:
                     mimecategory = mimestart.split('/')[0]
                     if mimecategory == 'audio':
                         n_files += 1
+
         return n_files
 
     def export_subsonic_music(self, username: str):
