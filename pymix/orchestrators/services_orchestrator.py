@@ -43,12 +43,17 @@ class ServicesOrchestrator:
         user = self._db_controller.get_user(username)
         user_root = self._user_root.format(user=username)
         user_root_dir = Path(user_root)
-        user_root_dir.mkdir(exist_ok=True) # todo change to false when launch
-        self._create_navidrome(user)
-        self._create_beets(user)
-        self._create_filebrowser_account(user)
-        account_created = await self._attempt_to_create_account(user)
-        assert account_created, 'failed to create navidrome account'
+        user_root_dir.mkdir(exist_ok=True)  # todo change to false when launch
+        try:
+            self._create_navidrome(user)
+            self._create_beets(user)
+            self._create_filebrowser_account(user)
+            account_created = await self._attempt_to_create_account(user)
+            assert account_created, 'failed to create navidrome account'
+        except Exception as ex:
+            logger.error(f"failed to create account for user {username} with error: {ex}")
+            self._db_controller.delete_user(username)
+            raise
         return session_id
 
     async def _attempt_to_create_account(self, user: dict, attempts: int = 15) -> bool:
@@ -107,7 +112,7 @@ class ServicesOrchestrator:
         example_music_path = self._config['containers']['beets']['example_music']['path']
         beets_import_path = self._config['containers']['beets']['data'].format(user=username) + '/example'
         search_id = self._config['containers']['beets']['example_music']['search_id']
-        shutil.copytree(example_music_path, beets_import_path)
+        shutil.copytree(example_music_path, beets_import_path, dirs_exist_ok=True)
         docker.execute(f"beets{username}", ['beet', 'import', '-q', '/downloads', '--search-id', search_id])
         shutil.rmtree(beets_import_path)
 

@@ -20,13 +20,13 @@ async def consume_from_filebrowser(rekordbox_xml_controller: RekordboxXMLControl
 
 async def main():
     user = {
-        'username': 'lajp',
-        'password': 'lajp',
+        'username': 'emc',
+        'password': 'emc',
     }
     container = create_container('dev')
     container.wire(modules=[__name__])
     controller = await container.rekordbox_xml_controller()
-    result = await create_xml_from_nav(controller, '/Users/lajp/nav_music', user,  None, Path('subbox_export_rekordbox.xml'))
+    result = await create_xml_from_nav(controller, '/Users/lukepurnell/subbox/emc/nav_music', user,  None, Path('subbox_export_rekordbox.xml'))
     #result = await create_nav_from_xml(controller, Path('/Users/lajp/rekordbox/rekordbox_081023.xml'), Path('/Users/lajp/rekordbox/rekordbox_bak'))
     #await consume_from_filebrowser(controller)
 

@@ -12,7 +12,7 @@ services:
       - 8002:8002
     volumes:
       - ./db:/pymix/db
-      - /Users/lukepurnell/subbox:/subbox
+      - /Users/lajp/subbox:/subbox
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - APP_ENVIRONMENT=prod

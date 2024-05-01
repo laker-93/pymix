@@ -52,7 +52,7 @@ async def beets_import(
             logger.error(msg, exc_info=True)
             reason = msg
         else:
-            total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
+            #total_n_tracks = await beets_client.get_number_of_tracks(user)
             logger.info(f'successfully imported {total_n_tracks_for_import} for user {username}')
         finally:
             logger.info(f'marking import job for user {username} as {success}')
@@ -77,6 +77,7 @@ async def tracks_imported(
     reason = ""
     percentage_complete = 0
     original_n_tracks_to_import = 0
+    n_tracks_imported = 0
     if not username and session_id:
         try:
             user = db_controller.get_user_by_session_id(session_id)
@@ -92,17 +93,18 @@ async def tracks_imported(
             job = db_controller.get_import_job(username)
             original_total_n_imported_tracks: int = job['total_n_imported_tracks']
             original_n_tracks_to_import = job['n_tracks_to_import']
-            total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
-            imported_diff = total_n_imported_tracks - original_total_n_imported_tracks
-            percentage_complete = round((imported_diff / original_n_tracks_to_import) * 100, 2)
-            if job['in_progress'] is False and job['result'] is True:
-                # it's possible due to duplicate tracks that the maths won't quite work out at 100%.
-                # however, if the import job has been marked as complete, then we know we are done.
-                percentage_complete = 100
-            logger.debug(f'Started with a total of {original_total_n_imported_tracks} already imported tracks.')
-            logger.debug(f'A total of {total_n_imported_tracks} have been importe so far.')
-            logger.debug(f'have complete {percentage_complete}% out of {original_n_tracks_to_import}')
-            import_in_progress = True
+            if original_n_tracks_to_import:
+                total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
+                n_tracks_imported = total_n_imported_tracks - original_total_n_imported_tracks
+                percentage_complete = round((n_tracks_imported / original_n_tracks_to_import) * 100, 2)
+                if job['in_progress'] is False and job['result'] is True:
+                    # it's possible due to duplicate tracks that the maths won't quite work out at 100%.
+                    # however, if the import job has been marked as complete, then we know we are done.
+                    percentage_complete = 100
+                logger.debug(f'Started with a total of {original_total_n_imported_tracks} already imported tracks.')
+                logger.debug(f'A total of {total_n_imported_tracks} have been imported so far.')
+                logger.debug(f'have complete {percentage_complete}% out of {original_n_tracks_to_import}')
+                import_in_progress = True
         else:
             reason = f"no in-progress jobs found for user {username}"
     else:
@@ -111,6 +113,7 @@ async def tracks_imported(
         'import_in_progress': import_in_progress,
         'reason': reason,
         'n_tracks_to_import': original_n_tracks_to_import,
+        'n_tracks_imported': n_tracks_imported,
         'percentage_complete': percentage_complete
     }
 

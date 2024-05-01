@@ -60,15 +60,15 @@ class SubsonicOrchestrator:
         track with the id of the subsonic track.
         """
         for playlist in subbox_playlists:
-            for track in playlist.tracks:
-                name = track.name
-                try:
-                    subsonic_track = await self._subsonic_client.query_track_by_name(user, name)
-                except KeyError as ex:
-                    logger.warning(f'unable to find track in navidrome {track}. This track will not be imported properly. Please ensure name of track in rekordbox is correct. Exception {ex}')
-                else:
-                    track.sub_track_id = subsonic_track.sub_track_id
-        return 'foo'
+            if playlist.tracks:
+                for track in playlist.tracks:
+                    name = track.name
+                    try:
+                        subsonic_track = await self._subsonic_client.query_track_by_name(user, name)
+                    except KeyError as ex:
+                        logger.warning(f'unable to find track in navidrome {track}. This track will not be imported properly. Please ensure name of track in rekordbox is correct. Exception {ex}')
+                    else:
+                        track.sub_track_id = subsonic_track.sub_track_id
 
     async def get_all_tracks(self, user: dict) -> AsyncIterator[List[SubBoxTrack]]:
         return self._subsonic_client.get_all_tracks(user, 50)

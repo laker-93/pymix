@@ -21,9 +21,10 @@ logger = logging.getLogger(__name__)
 
 
 class SubsonicClient(BaseAPIClient):
-    def __init__(self, host: str, session: aiohttp.ClientSession, username: str, version: str, music_path_base_to_remove: str, zip_name: str):
+    def __init__(self, host: str, session: aiohttp.ClientSession, username: str, version: str,
+                 music_path_base_to_remove: str, zip_name: Optional[str]):
         super().__init__(host, session)
-        self._zip_name = zip_name
+        self._zip_name = zip_name + '/' if zip_name else ''
         self._username = username
         self._version = version
         cleaned_music_path_base_to_remove = '/' + music_path_base_to_remove.rstrip('/').lstrip('/')
@@ -85,7 +86,7 @@ class SubsonicClient(BaseAPIClient):
             SubBoxTrack(
                 name=entry['title'],
                 artist=entry['artist'],
-                path=Path(f"{self._zip_name}/{entry['path'].lstrip(self._music_path_base_to_remove)}"),
+                path=Path(f"{self._zip_name}{entry['path'].lstrip(self._music_path_base_to_remove)}"),
                 album=entry['album'],
                 rating=entry.get('userRating', 0),
                 genre=None if entry.get('genre') == '\x1a' else entry.get('genre'),
@@ -99,7 +100,7 @@ class SubsonicClient(BaseAPIClient):
             SubBoxTrack(
                 name=entry['title'],
                 artist=entry['artist'],
-                path=Path(f"{self._zip_name}/{entry['path'].lstrip(self._music_path_base_to_remove)}"),
+                path=Path(f"{self._zip_name}{entry['path'].lstrip(self._music_path_base_to_remove)}"),
                 album=entry['album'],
                 rating=entry.get('userRating', 0),
                 genre=entry.get('genre')
@@ -232,7 +233,7 @@ class SubsonicClient(BaseAPIClient):
                     # TODO this overwrites existing matches of the same similarity
                     results[similarity] = track
                 else:
-                    logger.warning(f'cannot find a good similarity for {name} and {track}')
+                    logger.warning(f'did not find a good similarity for {name} against {track}')
         if len(results) != 1:
             # todo would like to make the following assertion assert result is None,
             # however can have genuine duplicates here since beets is conifugred to merge duplicates (for example same
