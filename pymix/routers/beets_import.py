@@ -90,7 +90,7 @@ async def tracks_imported(
         n_jobs = db_controller.get_number_of_jobs(username, in_progress=True)
         # will return 0 on first invocation when the job has yet to be started.
         if n_jobs > 0:
-            job = db_controller.get_import_job(username)
+            job = db_controller.get_in_progress_job(username)
             original_total_n_imported_tracks: int = job['total_n_imported_tracks']
             original_n_tracks_to_import = job['n_tracks_to_import']
             if original_n_tracks_to_import:
@@ -110,10 +110,10 @@ async def tracks_imported(
     else:
         reason = f"no username found for session id {session_id}"
     return {
-        'import_in_progress': import_in_progress,
+        'in_progress': import_in_progress,
         'reason': reason,
-        'n_tracks_to_import': original_n_tracks_to_import,
-        'n_tracks_imported': n_tracks_imported,
+        'n_tracks_to_process': original_n_tracks_to_import,
+        'n_tracks_processed': n_tracks_imported,
         'percentage_complete': percentage_complete
     }
 

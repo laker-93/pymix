@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from pymix import constants
 from pymix.containers import Container
-from pymix.routers import maintenance, create, user, beets_import, rb_import_export, serato_import_export
+from pymix.routers import maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress
 
 
 def create_app():
@@ -29,6 +29,7 @@ def create_app():
     app.include_router(beets_import.router)
     app.include_router(rb_import_export.router)
     app.include_router(serato_import_export.router)
+    app.include_router(export_progress.router)
     return app
 
 
@@ -46,7 +47,7 @@ def create_container(environment="dev"):
     container.init_resources()
     container.wire(
         modules=[
-            maintenance, create, user, beets_import, rb_import_export, serato_import_export, sys.modules[__name__]
+            maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sys.modules[__name__]
         ]
     )
     return container

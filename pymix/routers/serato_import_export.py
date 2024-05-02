@@ -102,7 +102,7 @@ async def serato_export(
     if username:
         # todo: check number of tracks in xml export matches that in beets matches that in the export zip etc.
         n_beets_tracks = await beets_client.get_number_of_tracks(user)
-        #job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
+        job_id = db_controller.create_export_job(username, n_beets_tracks)
         logger.info(f'exporting {n_beets_tracks} tracks for user {username}')
         try:
             output_path = fb_file_handler.get_crate_output_path(username)
@@ -119,16 +119,15 @@ async def serato_export(
         else:
             try:
                 logger.info(f'starting to prepare subbox export zip of {n_beets_tracks} tracks for user {user}')
-                await to_process.run_sync(fb_file_handler.export_subsonic_music, username)
+                await to_process.run_sync(fb_file_handler.export_subsonic_music, username, job_id)
             except Exception as ex:
                 success = False
                 msg = f'error occurred exporting subsonic collection to filebrowser for user {username} {repr(ex)}'
                 logger.error(msg, exc_info=True)
                 reason = msg
             finally:
-                pass
-                #todo do the job book keeping
-                #db_controller.job_completed(job_id, success)
+                logger.info(f'marking serato export job for user {username} as {success}')
+                db_controller.job_completed(job_id, success)
     return {
         'success': success,
         'n_beets_tracks': n_beets_tracks,
