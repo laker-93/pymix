@@ -32,4 +32,4 @@ db:
   path: /Users/lukepurnell/PycharmProjects/pymix/db/user_db.json
 max_number_of_users: 10
 # number of seconds after which the export job will be updated with number of files written to zip during export job
-update_job_period_s: 2
+update_job_period_s: 1

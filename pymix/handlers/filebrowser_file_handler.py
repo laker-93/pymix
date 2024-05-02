@@ -7,6 +7,8 @@ import zipfile
 from pathlib import Path
 from zipfile import ZipFile
 
+from tinydb import TinyDB
+
 from pymix.controllers.db_controller import DbController
 
 logger = logging.getLogger(__name__)
@@ -20,14 +22,12 @@ class FileBrowserFileHandler:
             filebrowser_data_path: str,
             beets_data_path: str,
             update_job_period_s: int,
-            db_controller: DbController
     ):
         self._zip_name = zip_name
         self._serving_music_path_base = serving_music_path_base.rstrip('/')
         self._filebrowser_data_path = filebrowser_data_path
         self._beets_data_path = beets_data_path
         self._update_job_period_s = update_job_period_s
-        self._db_controller = db_controller
         self._mimetypes = mimetypes.init()
 
     def get_xml_output_path(self, username: str) -> Path:
@@ -109,21 +109,28 @@ class FileBrowserFileHandler:
 
         return n_files
 
-    def export_subsonic_music(self, username: str, job_id: str) -> None:
+    def export_subsonic_music(self, db_path: str, app_env: str, username: str, job_id: str) -> int:
+        db_controller = DbController(TinyDB(db_path), app_env)
         src_dir = self._serving_music_path_base.format(user=username)
         dst_dir = Path(self._filebrowser_data_path.format(user=username)) / self._zip_name
+        dst_dir = dst_dir.with_suffix('.zip')
         output_path = str(dst_dir)
         # todo use zipfile and write mechanism. Can then write file by file and use this to update export job
         datetime_start = datetime.datetime.now()
         n_files_written = 0
-        with zipfile.ZipFile(output_path,'w') as zip_file:
-            for audio_file in Path(src_dir).glob("*"):
-                zip_file.write(audio_file, compress_type=zipfile.ZIP_DEFLATED)
+        import time
+        logger.info(f'LAJP ZIPPING START')
+        with zipfile.ZipFile(output_path,'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for entry in Path(src_dir).rglob("*"):
+                zip_file.write(entry, entry.relative_to(src_dir))
                 n_files_written += 1
                 datetime_now = datetime.datetime.now()
                 if (datetime_now - datetime_start).total_seconds() > self._update_job_period_s:
-                    self._db_controller.update_export_job(job_id, n_files_written)
-        self._db_controller.update_export_job(job_id, n_files_written)
+                    logger.info(f'LAJP UPDATING EXPORT')
+                    db_controller.update_export_job(job_id, n_files_written)
+                time.sleep(1)
+        db_controller.update_export_job(job_id, n_files_written)
+        return n_files_written
 
 
     def stage_for_import(self, username: str):

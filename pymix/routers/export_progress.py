@@ -41,6 +41,7 @@ async def export_progress(
             job = db_controller.get_in_progress_job(username)
             total_n_tracks_to_export: int = job['total_n_tracks_to_export']
             n_exported_tracks: int = job['n_exported_tracks']
+            logger.info(f'lajp n exported tracks {n_exported_tracks}')
             if n_exported_tracks:
                 percentage_complete = round((n_exported_tracks / total_n_tracks_to_export) * 100, 2)
                 if job['in_progress'] is False and job['result'] is True:

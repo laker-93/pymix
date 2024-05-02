@@ -105,8 +105,7 @@ class Container(containers.DeclarativeContainer):
         config.containers.subsonic.serving_music_path_base,
         config.containers.filebrowser.data,
         config.containers.beets.data,
-        config.update_job_period_s,
-        db_controller
+        config.update_job_period_s
     )
 
     rekordbox_xml_controller = providers.Singleton(
