@@ -101,12 +101,15 @@ class FileBrowserFileHandler:
         with ZipFile(audio_files_zip) as zip:
             files = zip.namelist()
             for f in files:
+                if '__MACOSX' in str(f):
+                    # ignore meta info
+                    continue
                 mimestart = mimetypes.guess_type(str(f))[0]
                 if mimestart:
                     mimecategory = mimestart.split('/')[0]
                     if mimecategory == 'audio':
+                        logger.info(f'found audio file {f}')
                         n_files += 1
-
         return n_files
 
     def export_subsonic_music(self, db_path: str, app_env: str, username: str, job_id: str) -> int:
@@ -133,11 +136,17 @@ class FileBrowserFileHandler:
         """
         copy files from filebrowser to beets input data path.
         """
-
         src_dir = self._filebrowser_data_path.format(user=username)
         dest_dir = self._beets_data_path.format(user=username)
-        logger.info(f'staging for import. Copy from {src_dir} to {dest_dir}')
-        shutil.copytree(src_dir, dest_dir, dirs_exist_ok=True)
+        logger.info(f'staging for import. Extracting from {src_dir} to {dest_dir}')
+        for entry in Path(src_dir).iterdir():
+            if entry.is_file():
+                if entry.suffix == '.zip':
+                    with zipfile.ZipFile(entry, 'r') as zip_ref:
+                        zip_ref.extractall(dest_dir)
+                else:
+                    file_name = entry.parts[-1]
+                    entry.rename(Path(dest_dir) / file_name)
 
     def remove_fb_data_path(self, username):
         logger.info(f'removing contents of {self._filebrowser_data_path.format(user=username)}')

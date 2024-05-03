@@ -1,4 +1,5 @@
 import logging
+from typing import Dict
 
 from dependency_injector.wiring import Provide, inject
 from fastapi import APIRouter, Depends
@@ -83,6 +84,7 @@ async def serato_export(
         fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
         serato_controller: SeratoController = Depends(Provide[Container.serato_controller]),
         db_controller: DbController = Depends(Provide[Container.db_controller]),
+        config: Dict = Depends(Provide[Container.config])
 )-> dict:
     success = True
     reason = ""
@@ -119,14 +121,14 @@ async def serato_export(
         else:
             try:
                 logger.info(f'starting to prepare subbox export zip of {n_beets_tracks} tracks for user {user}')
-                await to_process.run_sync(fb_file_handler.export_subsonic_music, username, job_id)
+                n_tracks_zipped = await to_process.run_sync(fb_file_handler.export_subsonic_music, config["db"]["path"], config["app_env"], username, job_id)
             except Exception as ex:
                 success = False
                 msg = f'error occurred exporting subsonic collection to filebrowser for user {username} {repr(ex)}'
                 logger.error(msg, exc_info=True)
                 reason = msg
             finally:
-                logger.info(f'marking serato export job for user {username} as {success}')
+                logger.info(f'zipped {n_tracks_zipped} tracks. marking serato export job for user {username} as {success}')
                 db_controller.job_completed(job_id, success)
     return {
         'success': success,
