@@ -118,17 +118,13 @@ class FileBrowserFileHandler:
         # todo use zipfile and write mechanism. Can then write file by file and use this to update export job
         datetime_start = datetime.datetime.now()
         n_files_written = 0
-        import time
-        logger.info(f'LAJP ZIPPING START')
         with zipfile.ZipFile(output_path,'w', zipfile.ZIP_DEFLATED) as zip_file:
             for entry in Path(src_dir).rglob("*"):
                 zip_file.write(entry, entry.relative_to(src_dir))
                 n_files_written += 1
                 datetime_now = datetime.datetime.now()
                 if (datetime_now - datetime_start).total_seconds() > self._update_job_period_s:
-                    logger.info(f'LAJP UPDATING EXPORT')
                     db_controller.update_export_job(job_id, n_files_written)
-                time.sleep(1)
         db_controller.update_export_job(job_id, n_files_written)
         return n_files_written
 

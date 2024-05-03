@@ -68,6 +68,7 @@ class DbController:
 
         assert len(results) != 0, f'no entry found in user_job_table for user {user_id}'
         job_table = self._db.table('job_table')
+        job_table.clear_cache()
         job = None
         for result in results:
             Job = Query()
