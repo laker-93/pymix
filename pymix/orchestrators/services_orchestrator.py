@@ -48,7 +48,7 @@ class ServicesOrchestrator:
         user_root_dir.mkdir(exist_ok=True)  # todo change to false when launch
         try:
             self._create_navidrome(user)
-            self._create_beets(user)
+            await self._create_beets(user)
             self._create_filebrowser_account(user)
             account_created = await self._attempt_to_create_account(user)
             assert account_created, 'failed to create navidrome account'
@@ -90,7 +90,7 @@ class ServicesOrchestrator:
         )
         docker.compose.up(detach=True)
 
-    def _create_beets(self, user: dict):
+    async def _create_beets(self, user: dict):
         port = user['beets_port']
         username = user['username']
         project_name = f'beets{username}'
@@ -115,6 +115,7 @@ class ServicesOrchestrator:
         beets_import_path = self._config['containers']['beets']['data'].format(user=username) + '/example'
         search_id = self._config['containers']['beets']['example_music']['search_id']
         shutil.copytree(example_music_path, beets_import_path, dirs_exist_ok=True)
+        await asyncio.sleep(1)
         docker.execute(f"beets{username}", ['beet', 'import', '-q', '/downloads', '--search-id', search_id])
         shutil.rmtree(beets_import_path)
 
