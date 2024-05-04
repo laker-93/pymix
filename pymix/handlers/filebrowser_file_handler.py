@@ -92,24 +92,32 @@ class FileBrowserFileHandler:
             self._filebrowser_data_path.format(user=user)
         )
         audio_files_zip = None
-        for f in src_path.iterdir():
-            if f.is_file() and f.name.endswith('.zip'):
-                audio_files_zip = f
-                break
-        assert audio_files_zip, f"no audio files zip found in {src_path}"
         n_files = 0
-        with ZipFile(audio_files_zip) as zip:
-            files = zip.namelist()
-            for f in files:
-                if '__MACOSX' in str(f):
-                    # ignore meta info
-                    continue
+        for f in src_path.iterdir():
+            if f.is_file():
+                if f.name.endswith('.zip'):
+                    audio_files_zip = f
+                    break
                 mimestart = mimetypes.guess_type(str(f))[0]
                 if mimestart:
                     mimecategory = mimestart.split('/')[0]
                     if mimecategory == 'audio':
                         logger.info(f'found audio file {f}')
                         n_files += 1
+
+        if audio_files_zip:
+            with ZipFile(audio_files_zip) as zip:
+                files = zip.namelist()
+                for f in files:
+                    if '__MACOSX' in str(f):
+                        # ignore meta info
+                        continue
+                    mimestart = mimetypes.guess_type(str(f))[0]
+                    if mimestart:
+                        mimecategory = mimestart.split('/')[0]
+                        if mimecategory == 'audio':
+                            logger.info(f'found audio file {f}')
+                            n_files += 1
         return n_files
 
     def export_subsonic_music(self, db_path: str, app_env: str, username: str, job_id: str) -> int:

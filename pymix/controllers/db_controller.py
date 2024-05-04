@@ -193,4 +193,6 @@ class DbController:
         user_table.remove(doc_ids=[doc_id])
 
     def get_total_number_of_users(self) -> int:
-        return len(self._db)
+        self._db.clear_cache()
+        user_table = self._db.table('user_table')
+        return len(user_table)

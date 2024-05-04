@@ -24,6 +24,7 @@ async def rekordbox_import(
     fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
     rekordbox_xml_controller: RekordboxXMLController = Depends(Provide[Container.rekordbox_xml_controller]),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
+    config: Dict = Depends(Provide[Container.config]),
 )-> dict:
     success = True
     reason = ""
@@ -43,6 +44,16 @@ async def rekordbox_import(
     if username:
         total_n_tracks_for_import = fb_file_handler.get_number_of_tracks_for_import(username)
         total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
+        if total_n_tracks_for_import + total_n_imported_tracks > config["max_number_of_tracks"]:
+            logger.error(
+                f"user {username} has exceeded max number of tracks that can be uploaded of {config['max_number_of_tracks']}."
+            )
+            return {
+                'success': False,
+                'imported_tracks': 0,
+                'beets_output': "",
+                'reason': f"user {username} has exceeded max number of tracks that can be uploaded."
+            }
         job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
         logger.info(f'RB importing {total_n_tracks_for_import} tracks for user {username}')
         try:
