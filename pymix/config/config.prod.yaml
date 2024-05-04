@@ -14,7 +14,7 @@ containers:
     docker_compose_file: /subbox/docker-compose/navidrome/docker-compose.yml
     env_file: /subbox/docker-compose/navidrome/env
   filebrowser:
-    data: /subbox/docker-compose/filebrowser/data/users/{user}
+    data: /fb-data/users/{user}
     docker_compose_file: /subbox/docker-compose/filebrowser/docker-compose.yml
     env_file: /subbox/docker-compose/filebrowser/env
   beets:
