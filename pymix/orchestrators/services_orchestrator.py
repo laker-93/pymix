@@ -2,6 +2,7 @@ import asyncio
 import shutil
 import logging
 from pathlib import Path
+from typing import Optional
 
 from aiohttp import ClientConnectorError
 from python_on_whales import DockerClient, docker
@@ -28,7 +29,7 @@ class ServicesOrchestrator:
         self._max_number_of_users = config['max_number_of_users']
         self._user_root = config['user_root']
 
-    async def create(self, username: str, password: str) -> str:
+    async def create(self, username: str, password: str) -> Optional[str]:
         """
         Command to create navidrome for user=nc:
         PORT=4535 USER=nc NAME=navidromenc docker-compose --project-name navidromenc up -d
@@ -36,8 +37,9 @@ class ServicesOrchestrator:
         PORT=4534 USER=lajp NAME=navidromelajp docker-compose --project-name navidromelajp up -d
         """
 
-        if self._db_controller.get_total_number_of_users() > self._max_number_of_users:
-            raise ValueError(f"exceeded max number of users {self._max_number_of_users}")
+        if self._db_controller.get_total_number_of_users() >= self._max_number_of_users:
+            logger.error(f"exceeded max number of users {self._max_number_of_users}")
+            return None
 
         session_id = self._db_controller.create_user(username, password)
         user = self._db_controller.get_user(username)

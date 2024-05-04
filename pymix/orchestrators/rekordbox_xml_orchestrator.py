@@ -116,24 +116,37 @@ class RekordboxXMLOrchestrator:
             logger.info(f"track {rekordbox_track} added to {playlist}")
 
 
-    def _get_playlist_folder(self, playlist_folder_name: str) -> Optional[Node]:
-        playlists = self._rekordbox_xml._root_node.get_playlists()
+    def _get_playlist_folder(self, playlist_folder_name: str, parent_folder: Optional[Node] = None) -> Optional[Node]:
+        playlists = self._rekordbox_xml._root_node.get_playlists() if parent_folder is None else parent_folder.get_playlists()
         playlist_folder = None
         for playlist in playlists:
             if playlist.name == playlist_folder_name and playlist.is_folder:
                 playlist_folder = playlist
+                break
         return playlist_folder
 
-    def _create_playlist_folders(self, folder_names: List[str]) -> Node:
+    def _create_playlist_folders(self, folder_names: List[str], parent_folder: Optional[Node]=None) -> Node:
+        """
+        Given the folder names (e.g. ['root-folder', 'mid-folder', 'child-folder'])
+        return the child folder Node with the correct structure.
+        If ['root-folder', 'mid-folder'] already exists -> add 'child-folder' as a new node
+        If 'root-folder' does not exist, create new folders.
+        """
         folder_name = folder_names.pop(0)
-        # todo extend pyrekordbox to provide a get_playlist_folder api that uses the below code
-        playlist_folder = self._get_playlist_folder(folder_name)
+        playlist_folder = self._get_playlist_folder(folder_name, parent_folder)
         if not playlist_folder:
-            playlist_folder = self._rekordbox_xml.add_playlist_folder(folder_name)
-        # go through the folders, creating if they don't exist until reach the child folder. Then add playlist
-        for folder_name in folder_names:
-            playlist_folder = playlist_folder.add_playlist_folder(folder_name)
-        return playlist_folder
+            if parent_folder:
+                playlist_folder = parent_folder.add_playlist_folder(folder_name)
+            else:
+                playlist_folder = self._rekordbox_xml.add_playlist_folder(folder_name)
+        if not folder_names:
+            return playlist_folder
+        else:
+            return self._create_playlist_folders(
+                folder_names,
+                playlist_folder
+            )
+
 
     def get_all_xml_playlists(self) -> List[Node]:
         all_playlists: List[Node] = self._rekordbox_xml.root_playlist_folder.get_playlists()

@@ -30,8 +30,10 @@ async def create_user(
         logger.error(f'error occurred creating services for user', exc_info=True)
         reason = repr(ex)
         success = False
+    if session_id is None:
+        reason = "max number of users reached"
     response = JSONResponse(content=reason, status_code=HTTPStatus.OK if success else HTTPStatus.INTERNAL_SERVER_ERROR)
-    if success:
+    if success and session_id:
         logger.info(f'setting cookie to {session_id}')
         response.set_cookie(key='session_id', value=session_id, httponly=True)
     return response

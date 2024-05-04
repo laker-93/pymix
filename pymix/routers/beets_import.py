@@ -1,4 +1,5 @@
 import logging
+from typing import Dict
 
 from dependency_injector.wiring import Provide, inject
 from fastapi import APIRouter, Depends
@@ -22,6 +23,7 @@ async def beets_import(
     fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
     rekordbox_xml_controller: RekordboxXMLController = Depends(Provide[Container.rekordbox_xml_controller]),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
+    config: Dict = Depends((Provide[Container.config]))
 )-> dict:
     success = True
     reason = ""
@@ -41,6 +43,17 @@ async def beets_import(
     if username:
         total_n_tracks_for_import = fb_file_handler.get_number_of_tracks_for_import(username)
         total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
+        if total_n_tracks_for_import + total_n_imported_tracks > config["max_number_of_tracks"]:
+            logger.error(
+                f"user {username} has exceeded max number of tracks that can be uploaded of {config['max_number_of_tracks']}."
+            )
+            return {
+                'success': False,
+                'imported_tracks': 0,
+                'beets_output': "",
+                'reason': f"user {username} has exceeded max number of tracks that can be uploaded."
+            }
+
         job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
         logger.info(f'importing {total_n_tracks_for_import} tracks for user {username}')
         try:
@@ -90,7 +103,7 @@ async def tracks_imported(
         n_jobs = db_controller.get_number_of_jobs(username, in_progress=True)
         # will return 0 on first invocation when the job has yet to be started.
         if n_jobs > 0:
-            job = db_controller.get_import_job(username)
+            job = db_controller.get_in_progress_job(username)
             original_total_n_imported_tracks: int = job['total_n_imported_tracks']
             original_n_tracks_to_import = job['n_tracks_to_import']
             if original_n_tracks_to_import:
@@ -110,10 +123,10 @@ async def tracks_imported(
     else:
         reason = f"no username found for session id {session_id}"
     return {
-        'import_in_progress': import_in_progress,
+        'in_progress': import_in_progress,
         'reason': reason,
-        'n_tracks_to_import': original_n_tracks_to_import,
-        'n_tracks_imported': n_tracks_imported,
+        'n_tracks_to_process': original_n_tracks_to_import,
+        'n_tracks_processed': n_tracks_imported,
         'percentage_complete': percentage_complete
     }
 

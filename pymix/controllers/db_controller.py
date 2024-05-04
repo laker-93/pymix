@@ -19,6 +19,7 @@ class DbController:
         self._user_schema = ('username', 'password', 'user_id', 'beets_port', 'subsonic_port')
         self._user_jobs_schema = ('user_id', 'job_id')
         self._import_job_schema = ('job_id', 'name', 'n_tracks_to_import', 'total_n_imported_tracks', 'in_progress', 'result')
+        self._export_job_schema = ('job_id', 'name', 'total_n_tracks_to_export', 'n_exported_tracks', 'in_progress', 'result')
 
     def create_import_job(self, username: str, number_of_tracks_to_import: int, total_n_imported_tracks: int) -> str:
         user = self.get_user(username)
@@ -27,6 +28,15 @@ class DbController:
         self._add_user_job(user_id, job_id)
         self._add_import_job(job_id, number_of_tracks_to_import, total_n_imported_tracks)
         return job_id
+
+    def create_export_job(self, username: str, total_n_tracks: int) -> str:
+        user = self.get_user(username)
+        user_id = user['user_id']
+        job_id = uuid.uuid4().hex
+        self._add_user_job(user_id, job_id)
+        self._add_export_job(job_id, total_n_tracks)
+        return job_id
+
 
     def get_number_of_jobs(self, username: str, in_progress: bool) -> int:
         self._db.clear_cache()
@@ -49,22 +59,34 @@ class DbController:
         assert n_in_progress_jobs == 1 or n_in_progress_jobs == 0, f'have {n_in_progress_jobs} in progress? {in_progress} jobs for user {user_id}'
         return n_in_progress_jobs
 
-    def get_import_job(self, username: str) -> Document:
+    def get_in_progress_job(self, username: str) -> Document:
         user = self.get_user(username)
         user_id: str = user['user_id']
         user_job_table = self._db.table('user_job_table')
         UserJob = Query()
         results = user_job_table.search(UserJob.user_id == user_id)
+
         assert len(results) != 0, f'no entry found in user_job_table for user {user_id}'
-        result = results.pop()
-        job_id: str = result['job_id']
         job_table = self._db.table('job_table')
-        ImportJob = Query()
-        job_results = job_table.search(ImportJob.job_id == job_id)
-        assert len(job_results) == 1, f'job results: {job_results}'
-        job = job_results.pop()
+        job_table.clear_cache()
+        job = None
+        for result in results:
+            Job = Query()
+            job_id: str = result['job_id']
+            job_results = job_table.search((Job.job_id == job_id) & (Job.in_progress==True))
+            if len(job_results) == 1:
+                job = job_results.pop()
+                break
+        assert job
         return job
 
+
+    def update_export_job(self, job_id: str, n_exported_tracks: int):
+        job_table = self._db.table('job_table')
+        ExportJob = Query()
+        job_results = job_table.search(ExportJob.job_id == job_id)
+        assert len(job_results) == 1, f'job results: {job_results}'
+        job_table.update({'n_exported_tracks': n_exported_tracks}, ExportJob.job_id == job_id)
 
     def job_completed(self, job_id: str, result: bool):
         job_table = self._db.table('job_table')
@@ -74,6 +96,10 @@ class DbController:
     def _add_import_job(self, job_id: str, number_of_tracks_to_import: int, total_n_imported_tracks):
         job_table = self._db.table('job_table')
         job_table.insert(dict(zip(self._import_job_schema, (job_id, 'import', number_of_tracks_to_import, total_n_imported_tracks, True, None))))
+
+    def _add_export_job(self, job_id: str, total_n_tracks):
+        job_table = self._db.table('job_table')
+        job_table.insert(dict(zip(self._export_job_schema, (job_id, 'export', total_n_tracks, 0, True, None))))
 
     def _add_user_job(self, user_id: str, job_id: str):
         user_job_table = self._db.table('user_job_table')
@@ -167,4 +193,6 @@ class DbController:
         user_table.remove(doc_ids=[doc_id])
 
     def get_total_number_of_users(self) -> int:
-        return len(self._db)
+        self._db.clear_cache()
+        user_table = self._db.table('user_table')
+        return len(user_table)

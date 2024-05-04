@@ -1,9 +1,15 @@
+import datetime
 import logging
 
 import mimetypes
 import shutil
+import zipfile
 from pathlib import Path
 from zipfile import ZipFile
+
+from tinydb import TinyDB
+
+from pymix.controllers.db_controller import DbController
 
 logger = logging.getLogger(__name__)
 
@@ -14,12 +20,14 @@ class FileBrowserFileHandler:
             zip_name: str,
             serving_music_path_base: str,
             filebrowser_data_path: str,
-            beets_data_path: str
+            beets_data_path: str,
+            update_job_period_s: int,
     ):
         self._zip_name = zip_name
         self._serving_music_path_base = serving_music_path_base.rstrip('/')
         self._filebrowser_data_path = filebrowser_data_path
         self._beets_data_path = beets_data_path
+        self._update_job_period_s = update_job_period_s
         self._mimetypes = mimetypes.init()
 
     def get_xml_output_path(self, username: str) -> Path:
@@ -84,38 +92,69 @@ class FileBrowserFileHandler:
             self._filebrowser_data_path.format(user=user)
         )
         audio_files_zip = None
-        for f in src_path.iterdir():
-            if f.is_file() and f.name.endswith('.zip'):
-                audio_files_zip = f
-                break
-        assert audio_files_zip, f"no audio files zip found in {src_path}"
         n_files = 0
-        with ZipFile(audio_files_zip) as zip:
-            files = zip.namelist()
-            for f in files:
+        for f in src_path.iterdir():
+            if f.is_file():
+                if f.name.endswith('.zip'):
+                    audio_files_zip = f
+                    break
                 mimestart = mimetypes.guess_type(str(f))[0]
                 if mimestart:
                     mimecategory = mimestart.split('/')[0]
                     if mimecategory == 'audio':
+                        logger.info(f'found audio file {f}')
                         n_files += 1
 
+        if audio_files_zip:
+            with ZipFile(audio_files_zip) as zip:
+                files = zip.namelist()
+                for f in files:
+                    if '__MACOSX' in str(f):
+                        # ignore meta info
+                        continue
+                    mimestart = mimetypes.guess_type(str(f))[0]
+                    if mimestart:
+                        mimecategory = mimestart.split('/')[0]
+                        if mimecategory == 'audio':
+                            logger.info(f'found audio file {f}')
+                            n_files += 1
         return n_files
 
-    def export_subsonic_music(self, username: str):
+    def export_subsonic_music(self, db_path: str, app_env: str, username: str, job_id: str) -> int:
+        db_controller = DbController(TinyDB(db_path), app_env)
         src_dir = self._serving_music_path_base.format(user=username)
         dst_dir = Path(self._filebrowser_data_path.format(user=username)) / self._zip_name
+        dst_dir = dst_dir.with_suffix('.zip')
         output_path = str(dst_dir)
-        shutil.make_archive(output_path, 'zip', src_dir)
+        # todo use zipfile and write mechanism. Can then write file by file and use this to update export job
+        datetime_start = datetime.datetime.now()
+        n_files_written = 0
+        with zipfile.ZipFile(output_path,'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for entry in Path(src_dir).rglob("*"):
+                zip_file.write(entry, entry.relative_to(src_dir))
+                n_files_written += 1
+                datetime_now = datetime.datetime.now()
+                if (datetime_now - datetime_start).total_seconds() > self._update_job_period_s:
+                    db_controller.update_export_job(job_id, n_files_written)
+        db_controller.update_export_job(job_id, n_files_written)
+        return n_files_written
+
 
     def stage_for_import(self, username: str):
         """
         copy files from filebrowser to beets input data path.
         """
-
         src_dir = self._filebrowser_data_path.format(user=username)
         dest_dir = self._beets_data_path.format(user=username)
-        logger.info(f'staging for import. Copy from {src_dir} to {dest_dir}')
-        shutil.copytree(src_dir, dest_dir, dirs_exist_ok=True)
+        logger.info(f'staging for import. Extracting from {src_dir} to {dest_dir}')
+        for entry in Path(src_dir).iterdir():
+            if entry.is_file():
+                if entry.suffix == '.zip':
+                    with zipfile.ZipFile(entry, 'r') as zip_ref:
+                        zip_ref.extractall(dest_dir)
+                else:
+                    file_name = entry.parts[-1]
+                    entry.rename(Path(dest_dir) / file_name)
 
     def remove_fb_data_path(self, username):
         logger.info(f'removing contents of {self._filebrowser_data_path.format(user=username)}')
