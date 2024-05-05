@@ -154,7 +154,9 @@ class FileBrowserFileHandler:
                         zip_ref.extractall(dest_dir)
                 else:
                     file_name = entry.parts[-1]
-                    entry.rename(Path(dest_dir) / file_name)
+                    # must use shutil as pathlib doesn't work cross filesystem as fb-data path is on a docker volume
+                    shutil.copy(entry, Path(dest_dir) / file_name)
+                    #entry.rename(Path(dest_dir) / file_name)
 
     def remove_fb_data_path(self, username):
         logger.info(f'removing contents of {self._filebrowser_data_path.format(user=username)}')
