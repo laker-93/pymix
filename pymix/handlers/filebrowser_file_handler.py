@@ -124,14 +124,13 @@ class FileBrowserFileHandler:
         db_controller = DbController(TinyDB(db_path), app_env)
         src_dir = self._serving_music_path_base.format(user=username)
         dst_dir = Path(self._filebrowser_data_path.format(user=username)) / self._zip_name
-        dst_dir = dst_dir.with_suffix('.zip')
-        output_path = str(dst_dir)
+        output_path = str(dst_dir.with_suffix('.zip'))
         # todo use zipfile and write mechanism. Can then write file by file and use this to update export job
         datetime_start = datetime.datetime.now()
         n_files_written = 0
         with zipfile.ZipFile(output_path,'w', zipfile.ZIP_DEFLATED) as zip_file:
             for entry in Path(src_dir).rglob("*"):
-                zip_file.write(entry, entry.relative_to(src_dir))
+                zip_file.write(entry, Path(self._zip_name) / entry.relative_to(src_dir))
                 n_files_written += 1
                 datetime_now = datetime.datetime.now()
                 if (datetime_now - datetime_start).total_seconds() > self._update_job_period_s:
