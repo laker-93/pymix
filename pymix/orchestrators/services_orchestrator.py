@@ -55,6 +55,9 @@ class ServicesOrchestrator:
         except Exception as ex:
             logger.error(f"failed to create account for user {username} with error: {ex}")
             self._db_controller.delete_user(username)
+            if session_id:
+                logger.info(f"deleting session id {session_id}")
+                self._db_controller.delete_session(session_id)
             raise
         return session_id
 
