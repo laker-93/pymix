@@ -30,6 +30,7 @@ async def rekordbox_import(
     reason = ""
     beets_output = ""
     total_n_imported_tracks = 0
+    total_n_tracks_for_import = 0
     if not username and not session_id:
         success = False
         reason = "must have a username or session id to identify user"
@@ -51,8 +52,20 @@ async def rekordbox_import(
             return {
                 'success': False,
                 'imported_tracks': 0,
+                'n_tracks_for_import': total_n_tracks_for_import,
                 'beets_output': "",
                 'reason': f"user {username} has exceeded max number of tracks that can be uploaded."
+            }
+        if total_n_tracks_for_import == 0:
+            logger.error(
+                f"user {username} has attempted to import before uploading any tracks"
+            )
+            return {
+                'success': False,
+                'imported_tracks': 0,
+                'n_tracks_for_import': total_n_tracks_for_import,
+                'beets_output': "",
+                'reason': f"user {username} has attempted to import before uploading any tracks."
             }
         job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
         logger.info(f'RB importing {total_n_tracks_for_import} tracks for user {username}')
@@ -80,6 +93,7 @@ async def rekordbox_import(
     return {
         'success': success,
         'imported_tracks': total_n_imported_tracks,
+        'n_tracks_for_import': total_n_tracks_for_import,
         'beets_output': beets_output,
         'reason': reason
     }
