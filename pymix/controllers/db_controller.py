@@ -192,6 +192,14 @@ class DbController:
         user_table = self._db.table('user_table')
         user_table.remove(doc_ids=[doc_id])
 
+    def delete_session(self, session_id: str):
+        Session = Query()
+        session_table = self._db.table('session_table')
+        results = session_table.search(Session.session_id == session_id)
+        result = results.pop()
+        doc_id = result.doc_id
+        session_table.remove(doc_ids=[doc_id])
+
     def get_total_number_of_users(self) -> int:
         self._db.clear_cache()
         user_table = self._db.table('user_table')
