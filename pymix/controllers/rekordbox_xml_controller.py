@@ -40,10 +40,10 @@ class RekordboxXMLController:
             self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(user_root, track, playlist)
 
     # todo this controller is overloaded; this method has nothing to do with rekordbox xml and should live elsewhere.
-    async def consume_from_filebrowser(self, username: str) -> str:
-        return await anyio.to_thread.run_sync(self._consume_from_filebrowser, username)
+    async def consume_from_filebrowser(self, username: str, public: bool) -> str:
+        return await anyio.to_thread.run_sync(self._consume_from_filebrowser, username, public)
 
-    def _consume_from_filebrowser(self, username: str) -> str:
+    def _consume_from_filebrowser(self, username: str, public: bool) -> str:
         """
         # steps:
         # 1. user uploads to filebrowser
@@ -51,15 +51,16 @@ class RekordboxXMLController:
         # 3. do beet import
         """
 
-        self._file_browser_file_handler.stage_for_import(username)
+        self._file_browser_file_handler.stage_for_import(username, public)
         # 1. invoke beets import on the audio files to import
         # can set to interactive with tty to pipe docker stdin input/output to terminal for user feedback.
         # beets config set to quiet mode and fallback of 'asis'. If user needs to correct later, they will have to
         # specify a musicbrainz id and re import with a specific query. This will need a separate API to be implemented.
-        result = docker.execute(f"beets{username}", ['beet', 'import', '-q', '/downloads'])
+        container_name = "beets" if public else f"beets{username}"
+        result = docker.execute(container_name, ['beet', 'import', '-q', '/downloads'])
         print(result)
-        self._file_browser_file_handler.remove_fb_data_path(username)
-        self._rb_backup_file_handler.clean_up_beets_import_tree(username)
+        self._file_browser_file_handler.remove_fb_data_path(username, public)
+        self._rb_backup_file_handler.clean_up_beets_import_tree(username, public)
         return result
 
     async def create_rekordbox_xml_from_subsonic_playlists(self, user_root: str, user: dict, xml_path: Optional[Path], xml_output_path: Path):

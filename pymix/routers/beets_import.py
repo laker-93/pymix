@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 async def beets_import(
     session_id: str | None = None,
     username: str | None = None,
+    public: bool = False,
     beets_client: BeetsClient = Depends(Provide[Container.beets_client]),
     fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
     rekordbox_xml_controller: RekordboxXMLController = Depends(Provide[Container.rekordbox_xml_controller]),
@@ -71,7 +72,7 @@ async def beets_import(
         logger.info(f'importing {total_n_tracks_for_import} tracks for user {username}')
         try:
             logger.info(f'starting import for user {username}')
-            beets_output = await rekordbox_xml_controller.consume_from_filebrowser(username)
+            beets_output = await rekordbox_xml_controller.consume_from_filebrowser(username, public)
         except Exception as ex:
             success = False
             msg = f'error occurred importing the following path in to beets for user {username} {repr(ex)}'
