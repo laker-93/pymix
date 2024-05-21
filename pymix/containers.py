@@ -97,7 +97,8 @@ class Container(containers.DeclarativeContainer):
     rb_backup_file_handler = providers.Singleton(
         RBBackupFileHandler,
         rekordbox_xml_orchestrator,
-        config.containers.beets.data
+        config.containers.beets.data,
+        config.containers.beets.data_public,
     )
     file_browser_file_handler = providers.Singleton(
         FileBrowserFileHandler,
@@ -105,6 +106,7 @@ class Container(containers.DeclarativeContainer):
         config.containers.subsonic.serving_music_path_base,
         config.containers.filebrowser.data,
         config.containers.beets.data,
+        config.containers.beets.data_public,
         config.update_job_period_s
     )
 

@@ -21,12 +21,14 @@ class FileBrowserFileHandler:
             serving_music_path_base: str,
             filebrowser_data_path: str,
             beets_data_path: str,
+            beets_data_path_public: str,
             update_job_period_s: int,
     ):
         self._zip_name = zip_name
         self._serving_music_path_base = serving_music_path_base.rstrip('/')
         self._filebrowser_data_path = filebrowser_data_path
         self._beets_data_path = beets_data_path
+        self._beets_data_path_public = beets_data_path_public
         self._update_job_period_s = update_job_period_s
         self._mimetypes = mimetypes.init()
 
@@ -139,22 +141,25 @@ class FileBrowserFileHandler:
         return n_files_written
 
 
-    def stage_for_import(self, username: str):
+    def stage_for_import(self, username: str, public: bool):
         """
         copy files from filebrowser to beets input data path.
         """
         src_dir = self._filebrowser_data_path.format(user=username)
-        dest_dir = self._beets_data_path.format(user=username)
-        logger.info(f'staging for import. Extracting from {src_dir} to {dest_dir}')
+        if public:
+            dst_dir = self._beets_data_path_public
+        else:
+            dst_dir = self._beets_data_path.format(user=username)
+        logger.info(f'staging for import. Extracting from {src_dir} to {dst_dir}')
         for entry in Path(src_dir).iterdir():
             if entry.is_file():
                 if entry.suffix == '.zip':
                     with zipfile.ZipFile(entry, 'r') as zip_ref:
-                        zip_ref.extractall(dest_dir)
+                        zip_ref.extractall(dst_dir)
                 else:
                     file_name = entry.parts[-1]
                     # must use shutil as pathlib doesn't work cross filesystem as fb-data path is on a docker volume
-                    shutil.copy(entry, Path(dest_dir) / file_name)
+                    shutil.copy(entry, Path(dst_dir) / file_name)
                     #entry.rename(Path(dest_dir) / file_name)
 
     def remove_fb_data_path(self, username):
