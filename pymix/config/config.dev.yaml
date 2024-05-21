@@ -8,7 +8,7 @@ containers:
     host: http://localhost:4533
     username: emc
     version: 1.16.1
-    music_path_base_to_remove: music
+    music_path_base_to_remove: music/private
     serving_music_path_base: /Users/lukepurnell/workspace/subbox/private/{user}/nav_music
     docker_compose_file: /Users/lukepurnell/workspace/subbox/docker-compose/navidrome/docker-compose.yml
     env_file: /Users/lukepurnell/workspace/subbox/docker-compose/navidrome/env
