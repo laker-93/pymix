@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 async def create_user(
         username: str,
         password: str,
+        email: str,
         services_orchestrator: ServicesOrchestrator = Depends(Provide[Container.services_orchestrator]),
 )-> JSONResponse:
     logger.info(f'creating user {username}')
@@ -25,7 +26,7 @@ async def create_user(
     success = True
     session_id = ""
     try:
-        session_id = await services_orchestrator.create(username, password)
+        session_id = await services_orchestrator.create(username, password, email)
     except Exception as ex:
         logger.error(f'error occurred creating services for user', exc_info=True)
         reason = repr(ex)
