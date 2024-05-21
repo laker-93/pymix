@@ -29,7 +29,7 @@ class ServicesOrchestrator:
         self._max_number_of_users = config['max_number_of_users']
         self._user_root = config['user_root']
 
-    async def create(self, username: str, password: str) -> Optional[str]:
+    async def create(self, username: str, password: str, email: str) -> Optional[str]:
         """
         Command to create navidrome for user=nc:
         PORT=4535 USER=nc NAME=navidromenc docker-compose --project-name navidromenc up -d
@@ -42,7 +42,7 @@ class ServicesOrchestrator:
             return None
 
         try:
-            session_id = self._db_controller.create_user(username, password)
+            session_id = self._db_controller.create_user(username, password, email)
             user = self._db_controller.get_user(username)
             user_root = self._user_root.format(user=username)
             user_root_dir = Path(user_root)

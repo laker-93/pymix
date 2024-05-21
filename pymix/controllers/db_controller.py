@@ -16,7 +16,7 @@ class DbController:
         self._db = db
         self._app_env = app_env
         self._session_to_user_schema = ('session_id', 'user_id')
-        self._user_schema = ('username', 'password', 'user_id', 'beets_port', 'subsonic_port')
+        self._user_schema = ('username', 'password', 'email', 'user_id', 'beets_port', 'subsonic_port')
         self._user_jobs_schema = ('user_id', 'job_id')
         self._import_job_schema = ('job_id', 'name', 'n_tracks_to_import', 'total_n_imported_tracks', 'in_progress', 'result')
         self._export_job_schema = ('job_id', 'name', 'total_n_tracks_to_export', 'n_exported_tracks', 'in_progress', 'result')
@@ -105,7 +105,7 @@ class DbController:
         user_job_table = self._db.table('user_job_table')
         user_job_table.insert(dict(zip(self._user_jobs_schema, (user_id, job_id))))
 
-    def create_user(self, username: str, password: str) -> str:
+    def create_user(self, username: str, password: str, email: str) -> str:
         User = Query()
         user_table = self._db.table('user_table')
         results = user_table.search(User.username == username)
@@ -113,7 +113,7 @@ class DbController:
         beets_port = 8337 if self._app_env == 'dev' else get_available_port()
         subsonic_port = 4533 if self._app_env == 'dev' else get_available_port()
         user_id = uuid.uuid4().hex
-        self._add_user(username, password, user_id, beets_port, subsonic_port)
+        self._add_user(username, password, email, user_id, beets_port, subsonic_port)
         return self.create_session(username, password)
 
     def create_session(self, username: str, password: str) -> str:
@@ -147,12 +147,13 @@ class DbController:
             self,
             username: str,
             password: str,
+            email: str,
             user_id: str,
             beets_port: int,
             subsonic_port: int,
     ):
         user_table = self._db.table('user_table')
-        user_table.insert(dict(zip(self._user_schema, (username, password, user_id, beets_port, subsonic_port))))
+        user_table.insert(dict(zip(self._user_schema, (username, password, email, user_id, beets_port, subsonic_port))))
 
     def get_user_by_session_id(self, session_id: str) -> Optional[Document]:
         logger.info(f'get user by session id {session_id}')

@@ -5,7 +5,7 @@ from pymix.registration import create_container
 
 
 async def create_services(services_orchestrator: ServicesOrchestrator):
-    return await services_orchestrator.create('emc', 'emc')
+    return await services_orchestrator.create('emc', 'emc', 'em.christmas@gmail.com')
 
 
 
