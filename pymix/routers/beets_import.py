@@ -19,13 +19,17 @@ logger = logging.getLogger(__name__)
 async def beets_import(
     session_id: str | None = None,
     username: str | None = None,
-    public: bool = False,
+    public: bool | str = False,
     beets_client: BeetsClient = Depends(Provide[Container.beets_client]),
     fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
     rekordbox_xml_controller: RekordboxXMLController = Depends(Provide[Container.rekordbox_xml_controller]),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
     config: Dict = Depends((Provide[Container.config]))
 )-> dict:
+    if public is True or public == 'True':
+        public = True
+    else:
+        public = False
     success = True
     reason = ""
     beets_output = ""
@@ -82,6 +86,7 @@ async def beets_import(
             #total_n_tracks = await beets_client.get_number_of_tracks(user)
             logger.info(f'successfully imported {total_n_tracks_for_import} for user {username}')
         finally:
+            logger.info(f"beets output {beets_output}")
             logger.info(f'marking import job for user {username} as {success}')
             db_controller.job_completed(job_id, success)
     return {

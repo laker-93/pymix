@@ -57,9 +57,12 @@ class RekordboxXMLController:
         # beets config set to quiet mode and fallback of 'asis'. If user needs to correct later, they will have to
         # specify a musicbrainz id and re import with a specific query. This will need a separate API to be implemented.
         container_name = "beets" if public else f"beets{username}"
-        result = docker.execute(container_name, ['beet', 'import', '-q', '/downloads'])
-        print(result)
-        self._file_browser_file_handler.remove_fb_data_path(username, public)
+        #result = docker.execute(container_name, "ls /downloads".split())
+        #logger.info(f"beets has following tracks waiting for import {result}")
+        beets_command = "beet import -q /downloads"
+        result = docker.execute(container_name, beets_command.split())
+        logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
+        self._file_browser_file_handler.remove_fb_data_path(username)
         self._rb_backup_file_handler.clean_up_beets_import_tree(username, public)
         return result
 

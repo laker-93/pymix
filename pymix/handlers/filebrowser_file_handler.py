@@ -21,7 +21,6 @@ class FileBrowserFileHandler:
             serving_music_path_base: str,
             filebrowser_data_path: str,
             beets_data_path: str,
-            filebrowser_data_path_public: str,
             beets_data_path_public: str,
             update_job_period_s: int,
     ):
@@ -29,7 +28,6 @@ class FileBrowserFileHandler:
         self._serving_music_path_base = serving_music_path_base.rstrip('/')
         self._filebrowser_data_path = filebrowser_data_path
         self._beets_data_path = beets_data_path
-        self._filebrowser_data_path_public = filebrowser_data_path_public
         self._beets_data_path_public = beets_data_path_public
         self._update_job_period_s = update_job_period_s
         self._mimetypes = mimetypes.init()
@@ -147,11 +145,10 @@ class FileBrowserFileHandler:
         """
         copy files from filebrowser to beets input data path.
         """
+        src_dir = self._filebrowser_data_path.format(user=username)
         if public:
-            src_dir = self._filebrowser_data_path_public
             dst_dir = self._beets_data_path_public
         else:
-            src_dir = self._filebrowser_data_path.format(user=username)
             dst_dir = self._beets_data_path.format(user=username)
         logger.info(f'staging for import. Extracting from {src_dir} to {dst_dir}')
         for entry in Path(src_dir).iterdir():

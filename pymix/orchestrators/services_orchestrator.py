@@ -41,12 +41,12 @@ class ServicesOrchestrator:
             logger.error(f"exceeded max number of users {self._max_number_of_users}")
             return None
 
-        session_id = self._db_controller.create_user(username, password)
-        user = self._db_controller.get_user(username)
-        user_root = self._user_root.format(user=username)
-        user_root_dir = Path(user_root)
-        user_root_dir.mkdir(exist_ok=True)  # todo change to false when launch
         try:
+            session_id = self._db_controller.create_user(username, password)
+            user = self._db_controller.get_user(username)
+            user_root = self._user_root.format(user=username)
+            user_root_dir = Path(user_root)
+            user_root_dir.mkdir(parents=True, exist_ok=True)  # todo change to false when launch
             self._create_navidrome(user)
             await self._create_beets(user)
             self._create_filebrowser_account(user)

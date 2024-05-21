@@ -13,8 +13,7 @@ containers:
     docker_compose_file: /Users/lukepurnell/workspace/subbox/docker-compose/navidrome/docker-compose.yml
     env_file: /Users/lukepurnell/workspace/subbox/docker-compose/navidrome/env
   filebrowser:
-    data: /Users/lukepurnell/workspace/subbox/docker-compose/filebrowser/data/users/{user}/private
-    data_public: /Users/lukepurnell/workspace/subbox/docker-compose/filebrowser/data/users/{user}/public
+    data: /Users/lukepurnell/workspace/subbox/docker-compose/filebrowser/data/users/{user}
     docker_compose_file: /Users/lukepurnell/workspace/subbox/docker-compose/filebrowser/docker-compose.yml
     env_file: /Users/lukepurnell/workspace/subbox/docker-compose/filebrowser/env
   beets:
@@ -24,7 +23,7 @@ containers:
     docker_compose_file: /Users/lukepurnell/workspace/subbox/docker-compose/beets/docker-compose.yml
     env_file: /Users/lukepurnell/workspace/subbox/docker-compose/beets/env
     config_file_src: /Users/lukepurnell/workspace/subbox/beets/config/config.yaml
-    config_file_dst: /Users/lukepurnell/workspace/subbox/{user}/beets/config/config.yaml
+    config_file_dst: /Users/lukepurnell/workspace/subbox/private/{user}/beets/config/config.yaml
     example_music:
       path: /Users/lukepurnell/workspace/subbox/beets/example_music
       search_id: 63d2a9f9-9951-4bed-b402-317d00b8943a

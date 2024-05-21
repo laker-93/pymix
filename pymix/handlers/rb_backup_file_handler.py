@@ -16,10 +16,12 @@ class RBBackupFileHandler:
     def __init__(
             self,
             rekordbox_xml_orchestrator: RekordboxXMLOrchestrator,
-            beets_data_path: str
+            beets_data_path: str,
+            beets_data_path_public: str
     ):
         self._rekordbox_xml_orchestrator = rekordbox_xml_orchestrator
         self._beets_data_path = beets_data_path
+        self._beets_data_path_public = beets_data_path_public
 
     @staticmethod
     def _get_track_id(audio_file: Path) -> int:
@@ -69,11 +71,15 @@ class RBBackupFileHandler:
                 n_updated_tracks += 1
         return n_updated_tracks
 
-    def clean_up_beets_import_tree(self, username: str):
+    def clean_up_beets_import_tree(self, username: str, public: bool):
         """
         After successful import in to beets, can remove the source tree that was imported.
         """
-        beets_data_path = self._beets_data_path.format(user=username)
+        if public:
+            beets_data_path = self._beets_data_path_public
+        else:
+            beets_data_path = self._beets_data_path.format(user=username)
+
         logger.info(f'removing contents of {beets_data_path}')
         for filepath in Path(beets_data_path).iterdir():
             if filepath.is_dir():
