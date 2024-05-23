@@ -47,8 +47,21 @@ async def beets_import(
         else:
             username = user['username']
     if username:
+        if user['dj'] is False and not public:
+            msg = f"user {username} has a non DJ account but has attempted to upload private music."
+            logger.error(
+               msg
+            )
+            return {
+                'success': False,
+                'imported_tracks': 0,
+                'n_tracks_for_import': 0,
+                'beets_output': "",
+                'reason': msg + " You cannot upload music privately with a non DJ account."
+            }
+
         total_n_tracks_for_import = fb_file_handler.get_number_of_tracks_for_import(username)
-        total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
+        total_n_imported_tracks = await beets_client.get_number_of_tracks(user, public)
         if total_n_tracks_for_import + total_n_imported_tracks > config["max_number_of_tracks"]:
             logger.error(
                 f"user {username} has exceeded max number of tracks that can be uploaded of {config['max_number_of_tracks']}."
@@ -71,6 +84,8 @@ async def beets_import(
                 'beets_output': "",
                 'reason': f"user {username} has attempted to import before uploading any tracks."
             }
+
+
 
         job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
         logger.info(f'importing {total_n_tracks_for_import} tracks for user {username}')
@@ -103,9 +118,14 @@ async def beets_import(
 async def tracks_imported(
         session_id: str | None = None,
         username: str | None = None,
+        public: bool = False,
         beets_client: BeetsClient = Depends(Provide[Container.beets_client]),
         db_controller: DbController = Depends(Provide[Container.db_controller]),
 ) -> dict:
+    if public is True or public == 'True':
+        public = True
+    else:
+        public = False
     import_in_progress = False
     reason = ""
     percentage_complete = 0
@@ -127,7 +147,7 @@ async def tracks_imported(
             original_total_n_imported_tracks: int = job['total_n_imported_tracks']
             original_n_tracks_to_import = job['n_tracks_to_import']
             if original_n_tracks_to_import:
-                total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
+                total_n_imported_tracks = await beets_client.get_number_of_tracks(user, public)
                 n_tracks_imported = total_n_imported_tracks - original_total_n_imported_tracks
                 percentage_complete = round((n_tracks_imported / original_n_tracks_to_import) * 100, 2)
                 if job['in_progress'] is False and job['result'] is True:
