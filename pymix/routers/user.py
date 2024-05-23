@@ -19,14 +19,21 @@ async def create_user(
         username: str,
         password: str,
         email: str,
+        dj: str,
         services_orchestrator: ServicesOrchestrator = Depends(Provide[Container.services_orchestrator]),
 )-> JSONResponse:
-    logger.info(f'creating user {username}')
+
+    if dj is True or dj == 'True':
+        dj = True
+    else:
+        dj = False
+
+    logger.info(f'creating user {username} dj? {dj}')
     reason = ""
     success = True
     session_id = ""
     try:
-        session_id = await services_orchestrator.create(username, password, email)
+        session_id = await services_orchestrator.create(username, password, email, dj)
     except Exception as ex:
         logger.error(f'error occurred creating services for user', exc_info=True)
         reason = repr(ex)

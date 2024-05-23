@@ -39,10 +39,10 @@ class Container(containers.DeclarativeContainer):
         SubsonicClient,
         host=config.containers.subsonic.host,
         session=aiohttp_session,
-        username=config.containers.subsonic.username,
         version=config.containers.subsonic.version,
         music_path_base_to_remove=config.containers.subsonic.music_path_base_to_remove,
-        zip_name=config.rekordbox.zip_name
+        zip_name=config.rekordbox.zip_name,
+        app_env=config.app_env
     )
 
     navidrome_client = providers.Singleton(
@@ -138,7 +138,8 @@ class Container(containers.DeclarativeContainer):
     beets_client = providers.Singleton(
         BeetsClient,
         host=config.containers.beets.host,
-        session=aiohttp_session
+        session=aiohttp_session,
+        app_env=config.app_env
     )
 
     healthcheck_provider = providers.Resource(

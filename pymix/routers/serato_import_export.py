@@ -44,6 +44,18 @@ async def serato_import(
         else:
             username = user['username']
     if username:
+        if user['dj'] is False:
+            logger.error(
+                f"user {username} has attempted to import but did not create a DJ account."
+            )
+            return {
+                'success': False,
+                'imported_tracks': 0,
+                'n_tracks_for_import': 0,
+                'beets_output': "",
+                'reason': f"user {username} has exceeded max number of tracks that can be uploaded."
+            }
+
         total_n_tracks_for_import = fb_file_handler.get_number_of_tracks_for_import(username)
         total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
         if total_n_tracks_for_import + total_n_imported_tracks > config["max_number_of_tracks"]:
@@ -127,6 +139,16 @@ async def serato_export(
         else:
             username = user['username']
     if username:
+        if user['dj'] is False:
+            logger.error(
+                f"user {username} has attempted to import but did not create a DJ account."
+            )
+            return {
+                'success': False,
+                'n_beets_tracks': n_beets_tracks,
+                'beets_output': "",
+                'reason': f"user {username} has attempted to import but does not have a DJ account."
+            }
         # todo: check number of tracks in xml export matches that in beets matches that in the export zip etc.
         n_beets_tracks = await beets_client.get_number_of_tracks(user)
         job_id = db_controller.create_export_job(username, n_beets_tracks)

@@ -29,7 +29,7 @@ class ServicesOrchestrator:
         self._max_number_of_users = config['max_number_of_users']
         self._user_root = config['user_root']
 
-    async def create(self, username: str, password: str, email: str) -> Optional[str]:
+    async def create(self, username: str, password: str, email: str, dj: bool) -> Optional[str]:
         """
         Command to create navidrome for user=nc:
         PORT=4535 USER=nc NAME=navidromenc docker-compose --project-name navidromenc up -d
@@ -42,13 +42,14 @@ class ServicesOrchestrator:
             return None
 
         try:
-            session_id = self._db_controller.create_user(username, password, email)
+            session_id = self._db_controller.create_user(username, password, email, dj)
             user = self._db_controller.get_user(username)
             user_root = self._user_root.format(user=username)
             user_root_dir = Path(user_root)
             user_root_dir.mkdir(parents=True, exist_ok=True)  # todo change to false when launch
             self._create_navidrome(user)
-            await self._create_beets(user)
+            if dj:
+                await self._create_beets(user)
             self._create_filebrowser_account(user)
             account_created = await self._attempt_to_create_account(user)
             assert account_created, 'failed to create navidrome account'
@@ -114,13 +115,6 @@ class ServicesOrchestrator:
         config_src = self._config['containers']['beets']['config_file_src']
         config_dst = self._config['containers']['beets']['config_file_dst'].format(user=username)
         shutil.copy(config_src, config_dst)
-        example_music_path = self._config['containers']['beets']['example_music']['path']
-        beets_import_path = self._config['containers']['beets']['data'].format(user=username) + '/example'
-        search_id = self._config['containers']['beets']['example_music']['search_id']
-        shutil.copytree(example_music_path, beets_import_path, dirs_exist_ok=True)
-        await asyncio.sleep(1)
-        docker.execute(f"beets{username}", ['beet', 'import', '-q', '/downloads', '--search-id', search_id])
-        shutil.rmtree(beets_import_path)
 
     def _create_filebrowser_account(self, user: dict):
         filebrowser_container = docker.container.inspect("filebrowser")
