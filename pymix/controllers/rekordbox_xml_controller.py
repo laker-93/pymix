@@ -59,7 +59,8 @@ class RekordboxXMLController:
         container_name = "beets" if public else f"beets{username}"
         #result = docker.execute(container_name, "ls /downloads".split())
         #logger.info(f"beets has following tracks waiting for import {result}")
-        beets_command = "beet import -q /downloads"
+        # set a custom field of the username that uploaded the track. This allows to query tracks that a username has uploaded.
+        beets_command = f"beet --set user={username} import -q /downloads"
         result = docker.execute(container_name, beets_command.split())
         logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
         self._file_browser_file_handler.remove_fb_data_path(username)
