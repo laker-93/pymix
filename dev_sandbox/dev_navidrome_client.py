@@ -39,7 +39,14 @@ async def get_playlist_tracks(navidrome_client, playlist_id):
 
 async def get_all_tracks(navidrome_client):
     print("get tracks")
-    async for tracks in navidrome_client.get_all_tracks():
+    async for tracks in navidrome_client.get_all_tracks(
+            {
+                'username': 'foo',
+                'password': 'foo',
+                'subsonic_port': 4533,
+            },
+        10
+    ):
         print(tracks[0])
 
 

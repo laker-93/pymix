@@ -27,7 +27,6 @@ class ServicesOrchestrator:
         self._env_file_handler = env_file_handler
         self._config = config
         self._max_number_of_users = config['max_number_of_users']
-        self._user_root = config['user_root']
 
     async def create(self, username: str, password: str, email: str, dj: bool) -> Optional[str]:
         """
@@ -44,9 +43,14 @@ class ServicesOrchestrator:
         try:
             session_id = self._db_controller.create_user(username, password, email, dj)
             user = self._db_controller.get_user(username)
-            user_root = self._user_root.format(user=username)
-            user_root_dir = Path(user_root)
-            user_root_dir.mkdir(parents=True, exist_ok=True)  # todo change to false when launch
+            user_dir = self._config['containers']['subsonic']['serving_music_path_base'].format(user=username)
+            user_dir = Path(user_dir)
+            user_dir.mkdir(parents=True, exist_ok=True)  # todo change to false when launch
+
+            user_dir = self._config['containers']['beets']['data'].format(user=username)
+            user_dir = Path(user_dir)
+            user_dir.mkdir(parents=True, exist_ok=True)  # todo change to false when launch
+
             self._create_navidrome(user)
             if dj:
                 await self._create_beets(user)
@@ -163,4 +167,9 @@ class ServicesOrchestrator:
         docker.restart(filebrowser_container)
         # seems sometimes that despite filebrowser successfully dynamically creating a user in the above command, and
         # the user appearing in the db, the user cannot successfully login without restarting the filebrowser service.
-        print(result)
+        user_dir = self._config['containers']['filebrowser']['data_uploads'].format(user=username)
+        user_dir = Path(user_dir)
+        user_dir.mkdir(parents=False, exist_ok=True)  # todo change to false when launch
+        user_dir = self._config['containers']['filebrowser']['data_downloads'].format(user=username)
+        user_dir = Path(user_dir)
+        user_dir.mkdir(parents=False, exist_ok=True)  # todo change to false when launch

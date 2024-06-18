@@ -48,7 +48,8 @@ class Container(containers.DeclarativeContainer):
     navidrome_client = providers.Singleton(
         NavidromeClient,
         host=config.containers.subsonic.host,
-        session=aiohttp_session
+        session=aiohttp_session,
+        app_env=config.app_env
     )
 
     rekordbox_xml_factory = providers.Factory(
@@ -104,7 +105,8 @@ class Container(containers.DeclarativeContainer):
         FileBrowserFileHandler,
         config.rekordbox.zip_name,
         config.containers.subsonic.serving_music_path_base,
-        config.containers.filebrowser.data,
+        config.containers.filebrowser.data_uploads,
+        config.containers.filebrowser.data_downloads,
         config.containers.beets.data,
         config.containers.beets.data_public,
         config.update_job_period_s

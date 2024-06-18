@@ -1,32 +1,32 @@
 ---
 app_env: dev
 rekordbox:
-  xml_path: /Users/lukepurnell/workspace/subbox/rekordbox/rekordbox_empty.xml
+  xml_path: /subbox/rekordbox/rekordbox_empty.xml
   zip_name: 'subbox-export'
 containers:
   subsonic:
-    host: http://localhost:{port}
+    host: http://host.docker.internal:{port}
     version: 1.16.1
     music_path_base_to_remove: music/private
-    serving_music_path_base: /Users/lukepurnell/workspace/subbox/private/{user}/nav_music
-    docker_compose_file: /Users/lukepurnell/workspace/subbox/docker-compose/navidrome/docker-compose.yml
-    env_file: /Users/lukepurnell/workspace/subbox/docker-compose/navidrome/env
+    serving_music_path_base: /private-sorted/{user}
+    docker_compose_file: /subbox/docker-compose/navidrome/docker-compose.yml
+    env_file: /subbox/docker-compose/navidrome/env
   filebrowser:
-    data: /Users/lukepurnell/workspace/subbox/docker-compose/filebrowser/data/users/{user}
-    docker_compose_file: /Users/lukepurnell/workspace/subbox/docker-compose/filebrowser/docker-compose.yml
-    env_file: /Users/lukepurnell/workspace/subbox/docker-compose/filebrowser/env
+    data_uploads: /private/updownloads/users/{user}/uploads
+    data_downloads: /private/updownloads/users/{user}/downloads
+    docker_compose_file: /subbox/docker-compose/filebrowser/docker-compose.yml
+    env_file: /subbox/docker-compose/filebrowser/env
   beets:
-    host: http://localhost:{port}
-    data: /Users/lukepurnell/workspace/subbox/private/{user}/beets/download
-    data_public: /Users/lukepurnell/workspace/subbox/public/beets/download
-    docker_compose_file: /Users/lukepurnell/workspace/subbox/docker-compose/beets/docker-compose.yml
-    env_file: /Users/lukepurnell/workspace/subbox/docker-compose/beets/env
-    config_file_src: /Users/lukepurnell/workspace/subbox/beets/config/config.yaml
-    config_file_dst: /Users/lukepurnell/workspace/subbox/private/{user}/beets/config/config.yaml
+    host: http://host.docker.internal:{port}
+    data: /private-staged/{user}/
+    data_public: /public-staged
+    docker_compose_file: /subbox/docker-compose/beets/docker-compose.yml
+    env_file: /subbox/docker-compose/beets/env
+    config_file_src: /subbox/beets/config/config.yaml
+    config_file_dst: /subbox/private/{user}/beets/config/config.yaml
 logs_directory: logs
-user_root: /Users/lukepurnell/workspace/subbox/private/{user}
 db:
-  path: /Users/lukepurnell/PycharmProjects/pymix/db/user_db.json
+  path: /pymix/db/user_db.json
 max_number_of_users: 10
 max_number_of_tracks: 1000
 # number of seconds after which the export job will be updated with number of files written to zip during export job

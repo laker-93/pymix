@@ -63,6 +63,10 @@ class RekordboxXMLController:
         beets_command = f"beet --set user={username} import -q /downloads"
         result = docker.execute(container_name, beets_command.split())
         logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
+        if public:
+            write_result = docker.execute(container_name, "beet write")
+            logger.info("result from writing beets db to files %s", write_result)
+
         self._file_browser_file_handler.remove_fb_data_path(username)
         self._rb_backup_file_handler.clean_up_beets_import_tree(username, public)
         return result
@@ -132,7 +136,8 @@ class RekordboxXMLController:
         # 9. on success, remove the directory of the beets import
         logger.info(f'starting post import clean up for {username}')
         self._file_browser_file_handler.remove_fb_data_path(username)
-        self._rb_backup_file_handler.clean_up_beets_import_tree(username)
+        # todo - inject public in from router
+        self._rb_backup_file_handler.clean_up_beets_import_tree(username, False)
         logger.info(f'finished post import clean up for {username}')
 
     async def create_subsonic_playlists_from_xml(self, user: dict, xml_path: Path, audio_files_to_import: Path):
