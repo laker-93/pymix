@@ -169,6 +169,9 @@ class ServicesOrchestrator:
         # the user appearing in the db, the user cannot successfully login without restarting the filebrowser service.
         user_dir = self._config['containers']['filebrowser']['data_uploads'].format(user=username)
         user_dir = Path(user_dir)
+        # while not user_dir.parent.exists():
+        #     logger.info(f'user dir has yet to be created by filebrowser. Sleeping...')
+        #     time.sleep(2)
         user_dir.mkdir(parents=False, exist_ok=True)  # todo change to false when launch
         user_dir = self._config['containers']['filebrowser']['data_downloads'].format(user=username)
         user_dir = Path(user_dir)

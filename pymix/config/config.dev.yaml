@@ -8,12 +8,12 @@ containers:
     host: http://host.docker.internal:{port}
     version: 1.16.1
     music_path_base_to_remove: music/private
-    serving_music_path_base: /private-sorted/{user}
+    serving_music_path_base: /private-music/{user}
     docker_compose_file: /subbox/docker-compose/navidrome/docker-compose.yml
     env_file: /subbox/docker-compose/navidrome/env
   filebrowser:
-    data_uploads: /private/updownloads/users/{user}/uploads
-    data_downloads: /private/updownloads/users/{user}/downloads
+    data_uploads: /user-updownloads/{user}/uploads
+    data_downloads: /user-updownloads/{user}/downloads
     docker_compose_file: /subbox/docker-compose/filebrowser/docker-compose.yml
     env_file: /subbox/docker-compose/filebrowser/env
   beets:

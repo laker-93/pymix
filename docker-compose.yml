@@ -6,34 +6,36 @@ services:
     restart: unless-stopped
     container_name: "pymix"
     #user: "501:20"
-    #networks:
-    #  - subbox-bridge
     ports:
       - 8002:8002
     volumes:
       - ./db:/pymix/db
-      - private-updownloads:/private/updownloads
-      - private-sorted:/private-sorted
+      - user-updownloads:/user-updownloads
+      - private-music:/private-music
       - private-staged:/private-staged
-      - public-uploads:/public/uploads
+      - public-staged:/public-staged
       - /Users/lukepurnell/workspace/subbox:/subbox
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - APP_ENVIRONMENT=dev
-#networks:
-#  subbox-bridge:
-#    external: true
-#    name: subbox-bridge
+
+    networks:
+      - traefik_default
+
+networks:
+  traefik_default:
+    name: traefik_default
+
 volumes:
-  private-updownloads:
+  user-updownloads:
     external: true
-    name: private-updownloads
+    name: user-updownloads
   private-staged:
     driver: local
     name: private-staged
-  public-uploads:
-    external: true
-    name: public-uploads
-  private-sorted:
+  private-music:
     driver: local
-    name: private-sorted
+    name: private-music
+  public-staged:
+    driver: local
+    name: public-staged
