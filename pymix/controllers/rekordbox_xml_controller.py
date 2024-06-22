@@ -60,9 +60,14 @@ class RekordboxXMLController:
         #result = docker.execute(container_name, "ls /downloads".split())
         #logger.info(f"beets has following tracks waiting for import {result}")
         # set a custom field of the username that uploaded the track. This allows to query tracks that a username has uploaded.
-        beets_command = f"beet --set user={username} import -q /downloads"
+        beets_command = f"beet import --set user={username} -q /downloads"
         result = docker.execute(container_name, beets_command.split())
         logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
+        if public:
+            # must write the user tag set above to the audio file
+            write_result = docker.execute(container_name, "beet write".split())
+            logger.info("result from writing beets db to files %s", write_result)
+
         self._file_browser_file_handler.remove_fb_data_path(username)
         self._rb_backup_file_handler.clean_up_beets_import_tree(username, public)
         return result
@@ -132,7 +137,8 @@ class RekordboxXMLController:
         # 9. on success, remove the directory of the beets import
         logger.info(f'starting post import clean up for {username}')
         self._file_browser_file_handler.remove_fb_data_path(username)
-        self._rb_backup_file_handler.clean_up_beets_import_tree(username)
+        # todo - inject public in from router
+        self._rb_backup_file_handler.clean_up_beets_import_tree(username, False)
         logger.info(f'finished post import clean up for {username}')
 
     async def create_subsonic_playlists_from_xml(self, user: dict, xml_path: Path, audio_files_to_import: Path):

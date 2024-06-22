@@ -1,6 +1,6 @@
 import uuid
 import logging
-from typing import Optional, Literal
+from typing import Optional
 
 from tinydb import TinyDB, Query
 from tinydb.table import Document
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class DbController:
-    def __init__(self, db: TinyDB, app_env: Literal["dev", "prod"]):
+    def __init__(self, db: TinyDB, app_env: str):
         self._db = db
         self._app_env = app_env
         self._session_to_user_schema = ('session_id', 'user_id')

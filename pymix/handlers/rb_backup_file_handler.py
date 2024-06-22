@@ -64,7 +64,7 @@ class RBBackupFileHandler:
                 track_name = self._format_track_name(track)
                 output_parts = list(audio_file.parts)
                 output_parts[-1] = track_name
-                restored_track = Path(beets_data_path) / Path('/'.join(output_parts[1:]))
+                restored_track = Path('/'.join(output_parts[1:]))
                 restored_track = restored_track.parent / (restored_track.name + audio_file.suffix)
                 restored_track.parent.mkdir(parents=True, exist_ok=True)
                 audio_file.rename(restored_track)
