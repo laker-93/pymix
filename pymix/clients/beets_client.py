@@ -12,7 +12,8 @@ class BeetsClient(BaseAPIClient):
 
     async def get_number_of_tracks(self, user: dict, public: bool = False) -> int:
         if self._app_env == 'dev':
-            port = user['beets_port']
+            # port = user['beets_port']
+            port = 8337
         else:
             port = 8337 # since we're inside the same docker network, can call the private port
         username = '' if public else user['username']
