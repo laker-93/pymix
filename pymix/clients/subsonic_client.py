@@ -103,7 +103,8 @@ class SubsonicClient(BaseAPIClient):
                 path=Path(f"{self._zip_name}{entry['path'].lstrip(self._music_path_base_to_remove)}"),
                 album=entry['album'],
                 rating=entry.get('userRating', 0),
-                genre=entry.get('genre')
+                genre=entry.get('genre'),
+                sub_track_id=entry['id']
             ) for entry in resp_playlist if entry['path'].startswith('/music/private')
         ]
 
@@ -171,6 +172,16 @@ class SubsonicClient(BaseAPIClient):
         response = await self.get(url)
         assert response
         tracks = self._parse_tracks(response)
+        for track in tracks:
+            # work around as user rating is not returned in playlist response
+            url = self._subsonic_format_url(
+                username, password, f"{base_path}/rest/getSong", params=[("id", track.track_id)]
+            )
+            response = await self.get(url)
+            user_rating = response["subsonic-response"]['song'].get('userRating')
+            if user_rating:
+                track.rating = user_rating
+
         return tracks
 
     async def get_track(self, user: dict, track_id: str):
