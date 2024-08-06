@@ -10,6 +10,7 @@ from zipfile import ZipFile
 from tinydb import TinyDB
 
 from pymix.controllers.db_controller import DbController
+from pymix.model.subboxtrack import SubBoxTrack
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,25 @@ class FileBrowserFileHandler:
                             logger.info(f'found audio file {f}')
                             n_files += 1
         return n_files
+
+
+    def sync(self, username: str, client_tracks: list[SubBoxTrack], server_tracks: dict[int, SubBoxTrack]) -> int:
+        client_tracks_to_remove = []
+        for client_track in client_tracks:
+            if client_track.sub_track_id not in server_tracks:
+                client_tracks_to_remove.append(client_track)
+            else:
+                server_tracks.pop(client_track.sub_track_id)
+        tracks_to_zip = server_tracks
+
+        dst_dir = Path(self._filebrowser_data_path_downloads.format(user=username)) / self._zip_name
+        output_path = str(dst_dir.with_suffix('.zip'))
+        n_files_written = 0
+        with zipfile.ZipFile(output_path,'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for entry in tracks_to_zip.values():
+                zip_file.write(entry, Path(self._zip_name) / entry.relative_to(src_dir))
+                n_files_written += 1
+        return n_files_written
 
     def export_subsonic_music(self, db_path: str, app_env: str, username: str, job_id: str) -> int:
         db_controller = DbController(TinyDB(db_path), app_env)

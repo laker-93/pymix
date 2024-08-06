@@ -216,6 +216,29 @@ class SubsonicClient(BaseAPIClient):
                 break
             offset += batch_size
 
+    async def query_tracks_by_title_and_artist(self, user: dict, title: str, artist: str) -> Optional[SubBoxTrack]:
+        username = user['username']
+        password = user['password']
+        if self._app_env == 'dev':
+            port = user['subsonic_port']
+        else:
+            port = 4533 # since we're inside the same docker network, can call the private port
+        base_path = self._host.format(user=username, port=port)
+        url = self._subsonic_format_url(
+            username, password, f"{base_path}/rest/search2", params=[("query", f"{title} {artist}")]
+        )
+        response = await self.get(url)
+        try:
+            tracks = self._parse_query(response)
+        except Exception as ex:
+            raise KeyError(f'unable to parse tracks from url query {url}') from ex
+        for track in tracks:
+            if track.artist.lower() == artist.lower() and track.name.lower() == title.lower():
+                return track
+        return None
+
+
+
     async def query_track_by_name(self, user: dict, name: str) -> SubBoxTrack:
         """
         Given a name of a track, query subsonic and return matches. Throws an error if no match is found.
