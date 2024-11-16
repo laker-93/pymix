@@ -1,8 +1,10 @@
 import logging
 from http import HTTPStatus
+from typing import Optional
 
 from dependency_injector.wiring import Provide, inject
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 from starlette.responses import JSONResponse
 
 from pymix.containers import Container
@@ -13,27 +15,33 @@ router = APIRouter()
 
 logger = logging.getLogger(__name__)
 
+
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str
+    email: str
+
+class LoginUserRequest(BaseModel):
+    username: str
+    password: str
+    session_id: Optional[str] = None
+
 @router.post("/user/create", tags=["db"])
 @inject
 async def create_user(
-        username: str,
-        password: str,
-        email: str,
-        dj: str,
+        request: CreateUserRequest,
         services_orchestrator: ServicesOrchestrator = Depends(Provide[Container.services_orchestrator]),
 )-> JSONResponse:
 
-    if dj is True or dj == 'True':
-        dj = True
-    else:
-        dj = False
-
-    logger.info(f'creating user {username} dj? {dj}')
+    username = request.username
+    password = request.password
+    email = request.email
+    logger.info(f'creating user {username}')
     reason = ""
     success = True
     session_id = ""
     try:
-        session_id = await services_orchestrator.create(username, password, email, dj)
+        session_id = await services_orchestrator.create(username, password, email)
     except Exception as ex:
         logger.error(f'error occurred creating services for user', exc_info=True)
         reason = repr(ex)
@@ -43,18 +51,19 @@ async def create_user(
     response = JSONResponse(content=reason, status_code=HTTPStatus.OK if success else HTTPStatus.INTERNAL_SERVER_ERROR)
     if success and session_id:
         logger.info(f'setting cookie to {session_id}')
-        response.set_cookie(key='session_id', value=session_id, httponly=True)
+        response.set_cookie(key='session_id', value=session_id, httponly=True, secure=True, samesite="none")
     return response
 
 
 @router.post("/user/login", tags=["user"])
 @inject
 async def user_login(
-        username: str,
-        password: str,
-        session_id: str | None,
+        request: LoginUserRequest,
         db_controller: DbController = Depends(Provide[Container.db_controller]),
 )-> JSONResponse:
+    username = request.username
+    password = request.password
+    session_id = request.session_id
     logger.info(f'logging in user {username}')
     reason = ""
     success = True
@@ -69,7 +78,7 @@ async def user_login(
     response = JSONResponse(content=reason, status_code=HTTPStatus.OK if success else HTTPStatus.INTERNAL_SERVER_ERROR)
     if success:
         logger.info(f'setting cookie to {session_id}')
-        response.set_cookie(key='session_id', value=session_id, httponly=True)
+        response.set_cookie(key='session_id', value=session_id, httponly=True, secure=True, samesite="none")
     return response
 
 

@@ -8,19 +8,23 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from pymix import constants
 from pymix.containers import Container
-from pymix.routers import maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress
+from pymix.routers import maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync
 
 
 def create_app():
     app = FastAPI(
-        title=constants.title, version=constants.version, description=constants.description
+        title=constants.title, version=constants.version, description=constants.description,
+        # required for dev testing
+        root_path="/pymix"
     )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        # need to set explicit origins here rather than * since feishin will be sending credentials in cookies:
+        # https://stackoverflow.com/questions/18642828/origin-origin-is-not-allowed-by-access-control-allow-origin
+        allow_origins=["http://localhost:4343", "https://player.sub-box.net/player"],
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type", "Set-Cookie"],
     )
 
     app.include_router(maintenance.router)
@@ -30,6 +34,7 @@ def create_app():
     app.include_router(rb_import_export.router)
     app.include_router(serato_import_export.router)
     app.include_router(export_progress.router)
+    app.include_router(sync.router)
     return app
 
 
@@ -47,7 +52,7 @@ def create_container(environment="dev"):
     container.init_resources()
     container.wire(
         modules=[
-            maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sys.modules[__name__]
+            maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, sys.modules[__name__]
         ]
     )
     return container

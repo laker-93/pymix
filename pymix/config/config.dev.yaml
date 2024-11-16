@@ -2,7 +2,7 @@
 app_env: dev
 rekordbox:
   xml_path: /subbox/rekordbox/rekordbox_empty.xml
-  zip_name: 'subbox-export'
+  zip_name: 'music'
 containers:
   subsonic:
     host: http://host.docker.internal:{port}

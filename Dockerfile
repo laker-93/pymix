@@ -23,7 +23,7 @@ ENV PORT 8002
 
 # Setup App Environment
 ENV PYTHONPATH "${PYTHONPATH}:/app"
-RUN python3.11 -m pip install --upgrade pip
+#RUN python3.11 -m pip install --upgrade pip
 RUN python3.11 -m venv venv
 COPY ./ToredoCore /app/toredocore
 RUN venv/bin/pip install -e /app/toredocore

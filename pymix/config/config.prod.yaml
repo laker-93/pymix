@@ -2,7 +2,7 @@
 app_env: prod
 rekordbox:
   xml_path: /subbox/rekordbox/rekordbox_empty.xml
-  zip_name: subbox_export
+  zip_name: music
 containers:
   subsonic:
     #host: http://localhost:4533/navidrome

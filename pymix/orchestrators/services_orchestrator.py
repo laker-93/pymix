@@ -28,7 +28,7 @@ class ServicesOrchestrator:
         self._config = config
         self._max_number_of_users = config['max_number_of_users']
 
-    async def create(self, username: str, password: str, email: str, dj: bool) -> Optional[str]:
+    async def create(self, username: str, password: str, email: str) -> Optional[str]:
         """
         Command to create navidrome for user=nc:
         PORT=4535 USER=nc NAME=navidromenc docker-compose --project-name navidromenc up -d
@@ -41,7 +41,7 @@ class ServicesOrchestrator:
             return None
 
         try:
-            session_id = self._db_controller.create_user(username, password, email, dj)
+            session_id = self._db_controller.create_user(username, password, email)
             user = self._db_controller.get_user(username)
             user_dir = self._config['containers']['subsonic']['serving_music_path_base'].format(user=username)
             user_dir = Path(user_dir)
@@ -52,8 +52,7 @@ class ServicesOrchestrator:
             user_dir.mkdir(parents=True, exist_ok=True)  # todo change to false when launch
 
             self._create_navidrome(user)
-            if dj:
-                await self._create_beets(user)
+            await self._create_beets(user)
             self._create_filebrowser_account(user)
             account_created = await self._attempt_to_create_account(user)
             assert account_created, 'failed to create navidrome account'

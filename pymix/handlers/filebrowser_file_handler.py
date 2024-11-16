@@ -5,6 +5,7 @@ import mimetypes
 import shutil
 import zipfile
 from pathlib import Path
+from typing import Tuple
 from zipfile import ZipFile
 
 from tinydb import TinyDB
@@ -128,7 +129,7 @@ class FileBrowserFileHandler:
         return n_files
 
 
-    def sync(self, username: str, client_tracks: list[SubBoxTrack], server_tracks: dict[int, SubBoxTrack]) -> int:
+    def sync(self, username: str, client_tracks: list[SubBoxTrack], server_tracks: dict[int, SubBoxTrack]) -> Tuple[int, Path]:
         client_tracks_to_remove = []
         for client_track in client_tracks:
             if client_track.sub_track_id not in server_tracks:
@@ -140,11 +141,14 @@ class FileBrowserFileHandler:
         dst_dir = Path(self._filebrowser_data_path_downloads.format(user=username)) / self._zip_name
         output_path = str(dst_dir.with_suffix('.zip'))
         n_files_written = 0
+        src_dir = self._serving_music_path_base.format(user=username)
         with zipfile.ZipFile(output_path,'w', zipfile.ZIP_DEFLATED) as zip_file:
             for entry in tracks_to_zip.values():
-                zip_file.write(entry, Path(self._zip_name) / entry.relative_to(src_dir))
+                entry_dir = str(entry.path).lstrip(self._zip_name)
+                p = Path(src_dir + entry_dir)
+                zip_file.write(p, Path(self._zip_name) / p.relative_to(src_dir))
                 n_files_written += 1
-        return n_files_written
+        return n_files_written, dst_dir
 
     def export_subsonic_music(self, db_path: str, app_env: str, username: str, job_id: str) -> int:
         db_controller = DbController(TinyDB(db_path), app_env)

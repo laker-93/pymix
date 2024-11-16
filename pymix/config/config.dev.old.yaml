@@ -2,7 +2,7 @@
 app_env: dev
 rekordbox:
   xml_path: /Users/lukepurnell/workspace/subbox/rekordbox/rekordbox_empty.xml
-  zip_name: 'subbox-export'
+  zip_name: 'music'
 containers:
   subsonic:
     host: http://localhost:{port}
@@ -12,7 +12,8 @@ containers:
     docker_compose_file: /Users/lukepurnell/workspace/subbox/docker-compose/navidrome/docker-compose.old.yml
     env_file: /Users/lukepurnell/workspace/subbox/docker-compose/navidrome/env
   filebrowser:
-    data: /Users/lukepurnell/workspace/subbox/docker-compose/filebrowser/data/users/{user}
+    data_uploads: /Users/lukepurnell/workspace/subbox/docker-compose/filebrowser/data/users/{user}/uploads
+    data_downloads: /Users/lukepurnell/workspace/subbox/docker-compose/filebrowser/data/users/{user}/downloads
     docker_compose_file: /Users/lukepurnell/workspace/subbox/docker-compose/filebrowser/docker-compose.old.yml
     env_file: /Users/lukepurnell/workspace/subbox/docker-compose/filebrowser/env
   beets:

@@ -16,7 +16,7 @@ class DbController:
         self._db = db
         self._app_env = app_env
         self._session_to_user_schema = ('session_id', 'user_id')
-        self._user_schema = ('username', 'password', 'email', 'dj', 'user_id', 'beets_port', 'subsonic_port')
+        self._user_schema = ('username', 'password', 'email', 'user_id', 'beets_port', 'subsonic_port')
         self._user_jobs_schema = ('user_id', 'job_id')
         self._import_job_schema = ('job_id', 'name', 'n_tracks_to_import', 'total_n_imported_tracks', 'in_progress', 'result')
         self._export_job_schema = ('job_id', 'name', 'total_n_tracks_to_export', 'n_exported_tracks', 'in_progress', 'result')
@@ -37,6 +37,22 @@ class DbController:
         self._add_export_job(job_id, total_n_tracks)
         return job_id
 
+    def get_job_by_id(self, username: str, job_id: str) -> int:
+        self._db.clear_cache()
+        user = self.get_user(username)
+        user_id: str = user['user_id']
+        user_job_table = self._db.table('user_job_table')
+        UserJob = Query()
+        logger.info(f'getting in progress jobs for user id {user_id}')
+        results = user_job_table.search(UserJob.user_id == user_id)
+        assert job_id in map(lambda x: x['job_id'], results), f'job id {job_id} not found in user job table for user {user_id}'
+
+        Job = Query()
+        job_table = self._db.table('job_table')
+        results = job_table.search(Job.job_id == job_id)
+        assert len(results) == 1, f'found {len(results)} jobs for job id {job_id}'
+        return results.pop()
+
 
     def get_number_of_jobs(self, username: str, in_progress: bool) -> int:
         self._db.clear_cache()
@@ -48,7 +64,7 @@ class DbController:
         results = user_job_table.search(UserJob.user_id == user_id)
         job_table = self._db.table('job_table')
         n_in_progress_jobs = 0
-        logger.info(f'job table content {job_table.all()}')
+        logger.debug(f'job table content {job_table.all()}')
         logger.info(f'have {len(results)} jobs for user id {user_id}')
         for result in results:
             Job = Query()
@@ -105,15 +121,15 @@ class DbController:
         user_job_table = self._db.table('user_job_table')
         user_job_table.insert(dict(zip(self._user_jobs_schema, (user_id, job_id))))
 
-    def create_user(self, username: str, password: str, email: str, dj: bool) -> str:
+    def create_user(self, username: str, password: str, email: str) -> str:
         User = Query()
         user_table = self._db.table('user_table')
         results = user_table.search(User.username == username)
         assert len(results) == 0, f'already have {len(results)} users with username {username}'
-        beets_port = 8337 if self._app_env == 'dev' else get_available_port()
-        subsonic_port = 4533 if self._app_env == 'dev' else get_available_port()
+        beets_port = get_available_port()
+        subsonic_port = get_available_port()
         user_id = uuid.uuid4().hex
-        self._add_user(username, password, email, dj, user_id, beets_port, subsonic_port)
+        self._add_user(username, password, email, user_id, beets_port, subsonic_port)
         return self.create_session(username, password)
 
     def create_session(self, username: str, password: str) -> str:
@@ -148,13 +164,12 @@ class DbController:
             username: str,
             password: str,
             email: str,
-            dj: bool,
             user_id: str,
             beets_port: int,
             subsonic_port: int,
     ):
         user_table = self._db.table('user_table')
-        user_table.insert(dict(zip(self._user_schema, (username, password, email, dj, user_id, beets_port, subsonic_port))))
+        user_table.insert(dict(zip(self._user_schema, (username, password, email, user_id, beets_port, subsonic_port))))
 
     def get_user_by_session_id(self, session_id: str) -> Optional[Document]:
         logger.info(f'get user by session id {session_id}')
