@@ -61,6 +61,7 @@ class RekordboxXMLController:
         #logger.info(f"beets has following tracks waiting for import {result}")
         # set a custom field of the username that uploaded the track. This allows to query tracks that a username has uploaded.
         beets_command = f"beet import --set user={username} --set public={public} -q /downloads"
+        logger.info(f'running beet import command {beets_command}')
         result = docker.execute(container_name, beets_command.split())
         logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
         if public:

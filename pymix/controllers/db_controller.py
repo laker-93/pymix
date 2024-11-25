@@ -43,7 +43,7 @@ class DbController:
         user_id: str = user['user_id']
         user_job_table = self._db.table('user_job_table')
         UserJob = Query()
-        logger.info(f'getting in progress jobs for user id {user_id}')
+        logger.debug(f'getting in progress jobs for user id {user_id}')
         results = user_job_table.search(UserJob.user_id == user_id)
         assert job_id in map(lambda x: x['job_id'], results), f'job id {job_id} not found in user job table for user {user_id}'
 
@@ -172,7 +172,7 @@ class DbController:
         user_table.insert(dict(zip(self._user_schema, (username, password, email, user_id, beets_port, subsonic_port))))
 
     def get_user_by_session_id(self, session_id: str) -> Optional[Document]:
-        logger.info(f'get user by session id {session_id}')
+        logger.debug(f'get user by session id {session_id}')
         SessionToUser = Query()
         session_table = self._db.table('session_table')
         results = session_table.search(SessionToUser.session_id == session_id)
@@ -191,7 +191,7 @@ class DbController:
             results = user_table.search(User.user_id == user_id)
             assert len(results) == 1, f'found {len(results)} users in user table with user id {user_id}'
             result = results.pop()
-            logger.info(f'returning a single user table result for session id {session_id}')
+            logger.debug(f'returning a single user table result for session id {session_id}')
             return result
 
     def get_user(self, username: str) -> Document:
