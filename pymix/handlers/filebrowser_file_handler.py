@@ -28,7 +28,7 @@ class FileBrowserFileHandler:
             update_job_period_s: int,
     ):
         self._zip_name = zip_name
-        self._serving_music_path_base = serving_music_path_base.rstrip('/')
+        self._serving_music_path_base = serving_music_path_base.removesuffix('/')
         self._filebrowser_data_path_uploads = filebrowser_data_path_uploads
         self._filebrowser_data_path_downloads = filebrowser_data_path_downloads
         self._beets_data_path = beets_data_path
@@ -144,7 +144,7 @@ class FileBrowserFileHandler:
         src_dir = self._serving_music_path_base.format(user=username)
         with zipfile.ZipFile(output_path,'w', zipfile.ZIP_DEFLATED) as zip_file:
             for entry in tracks_to_zip.values():
-                entry_dir = str(entry.path).lstrip(self._zip_name)
+                entry_dir = str(entry.path).removeprefix('/' + self._zip_name)
                 p = Path(src_dir + entry_dir)
                 zip_file.write(p, Path(self._zip_name) / p.relative_to(src_dir))
                 n_files_written += 1

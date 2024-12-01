@@ -7,7 +7,7 @@ containers:
   subsonic:
     host: http://host.docker.internal:{port}
     version: 1.16.1
-    music_path_base_to_remove: music/private
+    music_path_base_to_remove: /music/private
     serving_music_path_base: /private-music/{user}
     docker_compose_file: /subbox/docker-compose/navidrome/docker-compose.yml
     env_file: /subbox/docker-compose/navidrome/env

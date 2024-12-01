@@ -26,7 +26,7 @@ class SubsonicClient(BaseAPIClient):
         super().__init__(host, session)
         self._zip_name = zip_name + '/' if zip_name else ''
         self._version = version
-        cleaned_music_path_base_to_remove = '/' + music_path_base_to_remove.rstrip('/').lstrip('/')
+        cleaned_music_path_base_to_remove = '/' + music_path_base_to_remove.removesuffix('/').removeprefix('/')
         self._music_path_base_to_remove = cleaned_music_path_base_to_remove
         self._app_env = app_env
 
@@ -90,7 +90,7 @@ class SubsonicClient(BaseAPIClient):
             SubBoxTrack(
                 name=entry['title'],
                 artist=entry['artist'],
-                path=Path(f"{self._zip_name}{entry['path'].lstrip(self._music_path_base_to_remove)}"),
+                path=Path(f"{self._zip_name}{entry['path'].removeprefix(self._music_path_base_to_remove)}"),
                 album=entry['album'],
                 rating=entry.get('userRating', 0),
                 genre=None if entry.get('genre') == '\x1a' else entry.get('genre'),
@@ -104,7 +104,7 @@ class SubsonicClient(BaseAPIClient):
             SubBoxTrack(
                 name=entry['title'],
                 artist=entry['artist'],
-                path=Path(f"{self._zip_name}{entry['path'].lstrip(self._music_path_base_to_remove)}"),
+                path=Path(f"{self._zip_name}{entry['path'].removeprefix(self._music_path_base_to_remove)}"),
                 album=entry['album'],
                 rating=entry.get('userRating', 0),
                 genre=entry.get('genre')

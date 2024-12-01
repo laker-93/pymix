@@ -1,5 +1,5 @@
 import logging
-from typing import Dict
+from typing import Dict, Optional
 
 from dependency_injector.wiring import Provide, inject
 from fastapi import APIRouter, Depends, Cookie, BackgroundTasks
@@ -17,10 +17,14 @@ router = APIRouter()
 
 logger = logging.getLogger(__name__)
 
+
+class RBImportRequest(BaseModel):
+    username: Optional[str] = None
+
 @router.post("/rekordbox/import", tags=["import"])
 @inject
 async def rekordbox_import(
-    request: BeetsImportRequest,
+    request: RBImportRequest,
     background_tasks: BackgroundTasks,
     session_id: str | None = Cookie(None),
     beets_client: BeetsClient = Depends(Provide[Container.beets_client]),
