@@ -12,10 +12,7 @@ class NavidromeClient(BaseAPIClient):
         self._app_env = app_env
 
     async def create_account(self, user: dict):
-        if self._app_env == 'dev':
-            port = user['subsonic_port']
-        else:
-            port = 4533 # since we're inside the same docker network, can call the private port
+        port = 4533 # since we're inside the same docker network, can call the private port
         username = user['username']
         password = user['password']
         url = f'{self._host.format(user=username, port=port)}/auth/createAdmin'

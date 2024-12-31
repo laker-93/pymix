@@ -16,6 +16,7 @@ RUN apt update && \
 RUN apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
 RUN add-apt-repository ppa:deadsnakes/ppa
 RUN apt install python3.11 python3-pip python3.11-dev python3.11-venv -y
+RUN apt-get install -y vim
 #RUN apt install docker.io -y
 #RUN apt install docker-compose-plugin -y
 #FROM tiangolo/uvicorn-gunicorn-fastapi:python3.11
@@ -23,7 +24,7 @@ ENV PORT 8002
 
 # Setup App Environment
 ENV PYTHONPATH "${PYTHONPATH}:/app"
-RUN python3.11 -m pip install --upgrade pip
+#RUN python3.11 -m pip install --upgrade pip
 RUN python3.11 -m venv venv
 COPY ./ToredoCore /app/toredocore
 RUN venv/bin/pip install -e /app/toredocore

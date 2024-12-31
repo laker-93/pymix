@@ -2,6 +2,9 @@ import logging
 import anyio
 from pathlib import Path
 from typing import List, Optional
+import mediafile
+from beets.plugins import BeetsPlugin
+from beets.library import Item
 from python_on_whales import docker
 
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
@@ -11,6 +14,21 @@ from pymix.orchestrators.rekordbox_xml_orchestrator import RekordboxXMLOrchestra
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
 
 logger = logging.getLogger(__name__)
+
+
+class FooPlugin(BeetsPlugin):
+    def __init__(self):
+        field = mediafile.MediaField(
+            mediafile.MP3DescStorageStyle(u'dup'),
+            mediafile.StorageStyle(u'dup')
+        )
+        try:
+            self.add_media_field('dup', field)
+        except ValueError as err:
+            if 'property "dup" already exists' in str(err):
+                logger.debug(err)
+            logger.error(err)
+
 
 
 class RekordboxXMLController:
@@ -39,6 +57,52 @@ class RekordboxXMLController:
         for track in subsonic_playlist.tracks:
             self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(user_root, track, playlist)
 
+
+    # todo this controller is overloaded; this method has nothing to do with rekordbox xml and should live elsewhere.
+    async def remove_duplicates(self, username: str, public: bool) -> str:
+        return await anyio.to_thread.run_sync(self._remove_duplicates, username, public)
+
+    def _remove_duplicates(self, username: str, public: bool) -> str:
+        """
+        """
+        container_name = "beets" if public else f"beets{username}"
+        beets_command = f"beet duplicates -d"
+        logger.info(f'running beet duplicates command {beets_command}')
+        result = docker.execute(container_name, beets_command.split())
+        logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
+        return result.split('\n')
+
+    # todo this controller is overloaded; this method has nothing to do with rekordbox xml and should live elsewhere.
+    async def get_duplicates(self, username: str, public: bool) -> List[str]:
+        return await anyio.to_thread.run_sync(self._get_duplicates, username, public)
+
+
+    def _get_duplicates(self, username: str, public: bool) -> Optional[List[str]]:
+        """
+        """
+        container_name = "beets" if public else f"beets{username}"
+        beets_command = f"beet duplicates -p"
+        logger.info(f'running beet duplicate command {beets_command}')
+        result = docker.execute(container_name, beets_command.split())
+        logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
+        if not result:
+            return
+
+        duplicates_paths = result.split('\n')
+        FooPlugin()
+        for duplicate in duplicates_paths:
+            path_in_pymix = duplicate.removeprefix('/music')
+            path_in_pymix = Path(f'/private-music/{username}/{path_in_pymix}')
+            assert path_in_pymix.exists(), path_in_pymix
+            try:
+                item = Item.from_path(path_in_pymix)
+            except Exception:
+                logger.exception(f'error getting item from path {path_in_pymix} for duplicate {duplicate} from {duplicates_paths}')
+                raise
+            item['dup'] = '1'
+            item.write()
+        return duplicates_paths
+
     # todo this controller is overloaded; this method has nothing to do with rekordbox xml and should live elsewhere.
     async def consume_from_filebrowser(self, username: str, public: bool) -> str:
         return await anyio.to_thread.run_sync(self._consume_from_filebrowser, username, public)
@@ -60,7 +124,9 @@ class RekordboxXMLController:
         #result = docker.execute(container_name, "ls /downloads".split())
         #logger.info(f"beets has following tracks waiting for import {result}")
         # set a custom field of the username that uploaded the track. This allows to query tracks that a username has uploaded.
-        beets_command = f"beet import --set user={username} --set public={public} -q /downloads"
+        # group-albums to allow importing correctly tracks with different album tags.
+        beets_command = f"beet import --group-albums --set user={username} --set public={public} -q /downloads"
+        logger.info(f'running beet import command {beets_command}')
         result = docker.execute(container_name, beets_command.split())
         logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
         if public:
@@ -70,6 +136,8 @@ class RekordboxXMLController:
 
         self._file_browser_file_handler.remove_fb_data_path(username)
         self._rb_backup_file_handler.clean_up_beets_import_tree(username, public)
+        # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
+        self._get_duplicates(username, public)
         return result
 
     async def create_rekordbox_xml_from_subsonic_playlists(self, user_root: str, user: dict, xml_path: Optional[Path], xml_output_path: Path):
@@ -140,6 +208,8 @@ class RekordboxXMLController:
         # todo - inject public in from router
         self._rb_backup_file_handler.clean_up_beets_import_tree(username, False)
         logger.info(f'finished post import clean up for {username}')
+        # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
+        self._get_duplicates(username, False)
 
     async def create_subsonic_playlists_from_xml(self, user: dict, xml_path: Path, audio_files_to_import: Path):
         username = user['username']

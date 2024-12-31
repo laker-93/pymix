@@ -24,10 +24,9 @@ class SubsonicClient(BaseAPIClient):
     def __init__(self, host: str, session: aiohttp.ClientSession, version: str,
                  music_path_base_to_remove: str, zip_name: Optional[str], app_env: str):
         super().__init__(host, session)
-        self._zip_name = zip_name + '/' if zip_name else ''
+        self._zip_name = '/' + zip_name + '/' if zip_name else ''
         self._version = version
-        cleaned_music_path_base_to_remove = '/' + music_path_base_to_remove.rstrip('/').lstrip('/')
-        self._music_path_base_to_remove = cleaned_music_path_base_to_remove
+        self._music_path_base_to_remove = music_path_base_to_remove
         self._app_env = app_env
 
     @staticmethod
@@ -81,17 +80,21 @@ class SubsonicClient(BaseAPIClient):
         ]
 
     def _parse_query(self, response: dict, search_result: str = 'searchResult2') -> List[SubBoxTrack]:
-        resp = response['subsonic-response'][search_result]['song']
+        try:
+            resp = response['subsonic-response'][search_result]['song']
+        except KeyError:
+            logger.error(f'no songs found in response {response}')
+            resp = []
         return [
             SubBoxTrack(
                 name=entry['title'],
                 artist=entry['artist'],
-                path=Path(f"{self._zip_name}{entry['path'].lstrip(self._music_path_base_to_remove)}"),
+                path=Path(f"{self._zip_name}{entry['path'].removeprefix(self._music_path_base_to_remove)}"),
                 album=entry['album'],
                 rating=entry.get('userRating', 0),
                 genre=None if entry.get('genre') == '\x1a' else entry.get('genre'),
                 sub_track_id=entry.get('id')
-            ) for entry in resp if entry['path'].startswith('/music/private')
+            ) for entry in resp if 'private' in entry['path']
             ]
 
     def _parse_tracks(self, response: dict) -> List[SubBoxTrack]:
@@ -100,21 +103,18 @@ class SubsonicClient(BaseAPIClient):
             SubBoxTrack(
                 name=entry['title'],
                 artist=entry['artist'],
-                path=Path(f"{self._zip_name}{entry['path'].lstrip(self._music_path_base_to_remove)}"),
+                path=Path(f"{self._zip_name}{entry['path'].removeprefix(self._music_path_base_to_remove)}"),
                 album=entry['album'],
                 rating=entry.get('userRating', 0),
                 genre=entry.get('genre')
-            ) for entry in resp_playlist if entry['path'].startswith('/music/private')
+            ) for entry in resp_playlist
         ]
 
     async def scan(self, user: dict) -> bool:
         username = user['username']
         logger.info(f'starting scan of subsonic for user {username}')
         password = user['password']
-        if self._app_env == 'dev':
-            port = user['subsonic_port']
-        else:
-            port = 4533 # since we're inside the same docker network, can call the private port
+        port = 4533 # since we're inside the same docker network, can call the private port
         base_path = self._host.format(user=username, port=port)
         url = self._subsonic_format_url(
             username,
@@ -128,10 +128,7 @@ class SubsonicClient(BaseAPIClient):
     async def get_playlists(self, user: dict) -> Optional[List[SubBoxPlaylist]]:
         username = user['username']
         password = user['password']
-        if self._app_env == 'dev':
-            port = user['subsonic_port']
-        else:
-            port = 4533 # since we're inside the same docker network, can call the private port
+        port = 4533 # since we're inside the same docker network, can call the private port
         base_path = self._host.format(user=username, port=port)
         url = self._subsonic_format_url(username, password, f"{base_path}/rest/getPlaylists")
         response = await self.get(url)
@@ -146,10 +143,7 @@ class SubsonicClient(BaseAPIClient):
     async def create_playlists(self, user: dict, subbox_playlists: List[SubBoxPlaylist]):
         username = user['username']
         password = user['password']
-        if self._app_env == 'dev':
-            port = user['subsonic_port']
-        else:
-            port = 4533 # since we're inside the same docker network, can call the private port
+        port = 4533 # since we're inside the same docker network, can call the private port
         base_path = self._host.format(user=username, port=port)
         for playlist in subbox_playlists:
             _id = None
@@ -160,10 +154,7 @@ class SubsonicClient(BaseAPIClient):
     async def get_playlist_tracks(self, user: dict, playlist_id: str) -> List[SubBoxTrack]:
         username = user['username']
         password = user['password']
-        if self._app_env == 'dev':
-            port = user['subsonic_port']
-        else:
-            port = 4533 # since we're inside the same docker network, can call the private port
+        port = 4533 # since we're inside the same docker network, can call the private port
         base_path = self._host.format(user=username, port=port)
         url = self._subsonic_format_url(
             username, password, f"{base_path}/rest/getPlaylist", params=[("id", playlist_id)]
@@ -176,10 +167,7 @@ class SubsonicClient(BaseAPIClient):
     async def get_track(self, user: dict, track_id: str):
         username = user['username']
         password = user['password']
-        if self._app_env == 'dev':
-            port = user['subsonic_port']
-        else:
-            port = 4533 # since we're inside the same docker network, can call the private port
+        port = 4533 # since we're inside the same docker network, can call the private port
         base_path = self._host.format(user=username, port=port)
         url = self._subsonic_format_url(
             username, password, f"{base_path}/rest/getSong", params=[("id", track_id)]
@@ -193,11 +181,9 @@ class SubsonicClient(BaseAPIClient):
         """
         username = user['username']
         password = user['password']
-        if self._app_env == 'dev':
-            port = user['subsonic_port']
-        else:
-            port = 4533 # since we're inside the same docker network, can call the private port
+        port = 4533 # since we're inside the same docker network, can call the private port
         base_path = self._host.format(user=username, port=port)
+        logger.info(f'querying subsonic api at {base_path}')
         offset = 0
         while True:
             url = self._subsonic_format_url(
@@ -216,16 +202,41 @@ class SubsonicClient(BaseAPIClient):
                 break
             offset += batch_size
 
+    async def query_tracks_by(self, user: dict, title: str, artist: str, album: str) -> List[SubBoxTrack]:
+        username = user['username']
+        password = user['password']
+        port = 4533 # since we're inside the same docker network, can call the private port
+        base_path = self._host.format(user=username, port=port)
+        url = self._subsonic_format_url(
+            username, password, f"{base_path}/rest/search2", params=[("query", f"{title} {artist}")]
+        )
+        logger.info(f'querying url {url}')
+        response = await self.get(url)
+        logger.info(f'got response {response}')
+        try:
+            tracks = self._parse_query(response)
+        except Exception as ex:
+            raise KeyError(f'unable to parse tracks from url query {url}') from ex
+        logger.info(f'got tracks: {tracks}')
+        track_matches = []
+        for track in tracks:
+            if artist.lower() in track.artist.lower() and title.lower() in track.name.lower():
+                track_matches.append(track)
+        if len(track_matches) > 1:
+            for t in track_matches:
+                if t.album.lower() == album.lower():
+                    return [t]
+        return track_matches
+
+
+
     async def query_track_by_name(self, user: dict, name: str) -> SubBoxTrack:
         """
         Given a name of a track, query subsonic and return matches. Throws an error if no match is found.
         """
         username = user['username']
         password = user['password']
-        if self._app_env == 'dev':
-            port = user['subsonic_port']
-        else:
-            port = 4533 # since we're inside the same docker network, can call the private port
+        port = 4533 # since we're inside the same docker network, can call the private port
         base_path = self._host.format(user=username, port=port)
         url = self._subsonic_format_url(
             username, password, f"{base_path}/rest/search2", params=[("query", name)]
@@ -271,10 +282,7 @@ class SubsonicClient(BaseAPIClient):
     async def create_playlist(self, user: dict, name: str, tracks: List[SubBoxTrack]) -> bool:
         username = user['username']
         password = user['password']
-        if self._app_env == 'dev':
-            port = user['subsonic_port']
-        else:
-            port = 4533 # since we're inside the same docker network, can call the private port
+        port = 4533 # since we're inside the same docker network, can call the private port
         params = [('name', name)]
         song_id_params = [("songId", song_id) for song_id in map(lambda t:t.sub_track_id, tracks)]
         params.extend(song_id_params)
@@ -291,10 +299,7 @@ class SubsonicClient(BaseAPIClient):
     async def set_rating(self, user: dict, tracks: List[SubBoxTrack]):
         username = user['username']
         password = user['password']
-        if self._app_env == 'dev':
-            port = user['subsonic_port']
-        else:
-            port = 4533 # since we're inside the same docker network, can call the private port
+        port = 4533 # since we're inside the same docker network, can call the private port
         song_ids_ratings: List[Tuple[int, int]] = []
         base_path = self._host.format(user=username, port=port)
         for track in tracks:

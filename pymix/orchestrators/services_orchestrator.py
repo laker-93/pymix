@@ -6,6 +6,7 @@ from typing import Optional
 
 from aiohttp import ClientConnectorError
 from python_on_whales import DockerClient, docker
+from jinja2 import Environment, FileSystemLoader
 
 from pymix.clients.navidrome_client import NavidromeClient
 from pymix.controllers.db_controller import DbController
@@ -13,6 +14,8 @@ from pymix.handlers.env_file_handler import DockerEnvFileHandler
 
 logger = logging.getLogger(__name__)
 
+environment = Environment(loader=FileSystemLoader("/app/pymix/templates/"))
+template = environment.get_template("beets/config.yaml")
 
 class ServicesOrchestrator:
     def __init__(
@@ -28,7 +31,7 @@ class ServicesOrchestrator:
         self._config = config
         self._max_number_of_users = config['max_number_of_users']
 
-    async def create(self, username: str, password: str, email: str, dj: bool) -> Optional[str]:
+    async def create(self, username: str, password: str, email: str) -> Optional[str]:
         """
         Command to create navidrome for user=nc:
         PORT=4535 USER=nc NAME=navidromenc docker-compose --project-name navidromenc up -d
@@ -41,7 +44,7 @@ class ServicesOrchestrator:
             return None
 
         try:
-            session_id = self._db_controller.create_user(username, password, email, dj)
+            session_id = self._db_controller.create_user(username, password, email)
             user = self._db_controller.get_user(username)
             user_dir = self._config['containers']['subsonic']['serving_music_path_base'].format(user=username)
             user_dir = Path(user_dir)
@@ -52,8 +55,7 @@ class ServicesOrchestrator:
             user_dir.mkdir(parents=True, exist_ok=True)  # todo change to false when launch
 
             self._create_navidrome(user)
-            if dj:
-                await self._create_beets(user)
+            await self._create_beets(user)
             self._create_filebrowser_account(user)
             account_created = await self._attempt_to_create_account(user)
             assert account_created, 'failed to create navidrome account'
@@ -116,9 +118,12 @@ class ServicesOrchestrator:
         )
         docker.compose.up(detach=True)
         # overwrite the default beets config with subbox specific beets config
-        config_src = self._config['containers']['beets']['config_file_src']
         config_dst = self._config['containers']['beets']['config_file_dst'].format(user=username)
-        shutil.copy(config_src, config_dst)
+
+        content = template.render(username=username, password=user['password'], user_navidrome=f'navidrome{username}')
+        with open(config_dst) as f:
+            f.write(content)
+
 
     def _create_filebrowser_account(self, user: dict):
         filebrowser_container = docker.container.inspect("filebrowser")

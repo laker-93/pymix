@@ -1,4 +1,5 @@
 import logging
+import shutil
 import zipfile
 from pathlib import Path
 from typing import List, Iterable
@@ -104,3 +105,5 @@ class SeratoCrateOrchestrator:
 
     def save(self, crate: Crate, output_path: Path):
         self._crate_builder.save(crate, output_path)
+        sub_crate_path = output_path / "SubCrates"
+        shutil.make_archive(output_path / "SubCrates", 'zip', sub_crate_path)
