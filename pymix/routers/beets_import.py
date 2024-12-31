@@ -23,6 +23,80 @@ class BeetsImportRequest(BaseModel):
 
 router = APIRouter()
 
+
+@router.delete("/beets/duplicates", tags=["import"])
+@inject
+async def beets_duplicates(
+        username: Optional[str] = None,
+        session_id: str | None = Cookie(None),
+        rekordbox_xml_controller: RekordboxXMLController = Depends(Provide[Container.rekordbox_xml_controller]),
+        db_controller: DbController = Depends(Provide[Container.db_controller]),
+) -> dict:
+
+    duplicates_removed = []
+    success = False
+    reason = ""
+    logger.info(f'got request with session id {session_id} and username {username}')
+    if not username and not session_id:
+        return {
+            'duplicates_removed': duplicates_removed,
+            'success': False,
+            'reason': "must have a username or session id to identify user"
+        }
+    if not username and session_id:
+        try:
+            user = db_controller.get_user_by_session_id(session_id)
+        except Exception as ex:
+            logger.error(f'error occurred getting user for session id {session_id}', exc_info=True)
+            reason = repr(ex)
+        else:
+            username = user['username']
+    if username:
+        duplicates_removed = await rekordbox_xml_controller.remove_duplicates(username, False)
+        success = True
+    return {
+        'duplicates_removed': duplicates_removed,
+        'success': success,
+        'reason': reason
+    }
+
+@router.get("/beets/duplicates", tags=["import"])
+@inject
+async def beets_duplicates(
+        username: str,
+        public: bool,
+        session_id: str | None = Cookie(None),
+        rekordbox_xml_controller: RekordboxXMLController = Depends(Provide[Container.rekordbox_xml_controller]),
+        db_controller: DbController = Depends(Provide[Container.db_controller]),
+) -> dict:
+
+    duplicates = []
+    success = False
+    reason = ""
+    logger.info(f'got request with session id {session_id} and username {username}')
+    if not username and not session_id:
+        return {
+            'duplicates': duplicates,
+            'success': False,
+            'reason': "must have a username or session id to identify user"
+        }
+    if not username and session_id:
+        try:
+            user = db_controller.get_user_by_session_id(session_id)
+        except Exception as ex:
+            logger.error(f'error occurred getting user for session id {session_id}', exc_info=True)
+            reason = repr(ex)
+        else:
+            username = user['username']
+    if username:
+        duplicates = await rekordbox_xml_controller.get_duplicates(username, public)
+        success = True
+    return {
+        'duplicates': duplicates,
+        'success': success,
+        'reason': reason
+    }
+
 @router.post("/beets/import", tags=["import"])
 @inject
 async def beets_import(

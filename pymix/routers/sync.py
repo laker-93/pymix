@@ -58,14 +58,16 @@ async def sync(
     if user:
         client_sub_tracks = []
         for client_track in client_tracks.tracks:
-            sub_track = await subsonic_client.query_tracks_by_title_and_artist(
+            sub_tracks = await subsonic_client.query_tracks_by(
                 user=user,
                 title=client_track['title'],
-                artist=client_track['artist']
+                artist=client_track['artist'],
+                album=client_track['album'],
             )
-            if sub_track:
+            # if have an exact match then can exclude it as the client already having it.
+            if len(sub_tracks) == 1:
                 client_sub_tracks.append(
-                    sub_track
+                    sub_tracks[0]
                 )
             else:
                 logger.info(f'no track found matching {client_track}. Adding track to tracks to be deleted on client.')
@@ -73,7 +75,7 @@ async def sync(
 
         async for server_tracks in subsonic_client.get_all_tracks(user, 200):
             for server_track in server_tracks:
-                logger.info(f'adding server track {server_track}')
+                logger.debug(f'adding server track {server_track}')
                 server_tracks_dict[server_track.sub_track_id] = server_track
         n_tracks_zipped, zip_path = fb_file_handler.sync(
             username=username,

@@ -2,14 +2,14 @@ import logging
 from typing import Dict
 
 from dependency_injector.wiring import Provide, inject
-from fastapi import APIRouter, Depends
-from anyio import to_process
+from fastapi import APIRouter, Depends, Cookie
 
 from pymix.clients.beets_client import BeetsClient
 from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
 from pymix.controllers.serato_controller import SeratoController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
+from pymix.routers.rb_import_export import RBExportRequest
 
 router = APIRouter()
 
@@ -102,8 +102,8 @@ async def serato_import(
 @router.post("/serato/export", tags=["import"])
 @inject
 async def serato_export(
-        session_id: str | None = None,
-        user_root: str | None = None,
+        request: RBExportRequest,
+        session_id: str | None = Cookie(None),
         username: str | None = None,
         beets_client: BeetsClient = Depends(Provide[Container.beets_client]),
         fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
@@ -127,9 +127,10 @@ async def serato_export(
         else:
             username = user['username']
     if username:
+        user_root = request.user_root
         # todo: check number of tracks in xml export matches that in beets matches that in the export zip etc.
         n_beets_tracks = await beets_client.get_number_of_tracks(user)
-        job_id = db_controller.create_export_job(username, n_beets_tracks)
+        #job_id = db_controller.create_export_job(username, n_beets_tracks)
         logger.info(f'exporting {n_beets_tracks} tracks for user {username}')
         try:
             output_path = fb_file_handler.get_crate_output_path(username)
@@ -143,18 +144,18 @@ async def serato_export(
             msg = f'error occurred creating serato crates for user {username} {repr(ex)}'
             logger.error(msg, exc_info=True)
             reason = msg
-        else:
-            try:
-                logger.info(f'starting to prepare subbox export zip of {n_beets_tracks} tracks for user {user}')
-                n_tracks_zipped = await to_process.run_sync(fb_file_handler.export_subsonic_music, config["db"]["path"], config["app_env"], username, job_id)
-            except Exception as ex:
-                success = False
-                msg = f'error occurred exporting subsonic collection to filebrowser for user {username} {repr(ex)}'
-                logger.error(msg, exc_info=True)
-                reason = msg
-            finally:
-                logger.info(f'zipped {n_tracks_zipped} tracks. marking serato export job for user {username} as {success}')
-                db_controller.job_completed(job_id, success)
+        #else:
+        #    try:
+        #        logger.info(f'starting to prepare subbox export zip of {n_beets_tracks} tracks for user {user}')
+        #        n_tracks_zipped = await to_process.run_sync(fb_file_handler.export_subsonic_music, config["db"]["path"], config["app_env"], username, job_id)
+        #    except Exception as ex:
+        #        success = False
+        #        msg = f'error occurred exporting subsonic collection to filebrowser for user {username} {repr(ex)}'
+        #        logger.error(msg, exc_info=True)
+        #        reason = msg
+        #    finally:
+        #        logger.info(f'zipped {n_tracks_zipped} tracks. marking serato export job for user {username} as {success}')
+        #        db_controller.job_completed(job_id, success)
     return {
         'success': success,
         'n_beets_tracks': n_beets_tracks,

@@ -1,0 +1,98 @@
+plugins: web fetchart lyrics lastgenre embedart duplicates info subsonicupdate
+directory: /music
+library: /config/musiclibrary.blb
+art_filename: albumart
+threaded: no
+original_date: no
+per_disc_numbering: no
+
+  #convert:
+  #    auto: no
+  #    ffmpeg: /usr/bin/ffmpeg
+  #    opts: -ab 320k -ac 2 -ar 48000
+  #    max_bitrate: 320
+  #    threads: 1
+    
+match:
+  # want to accept a match automatically if it is greater than
+  # 80%.
+  # in order to do that must make beets ignore certain
+  # attributes to prevent it downgrading from a strong rec and
+  # therefore not accepting a match in quiet mode.
+  max_rec:
+    missing_tracks: strong
+    unmatched_tracks: strong
+  ignored: missing_tracks
+  strong_rec_thresh: 0.20
+  # don't mind if tracks are missing from an album
+  distance_weights:
+    missing_tracks: 0
+
+paths:
+    default: $albumartist/$album/$track - $title
+    singleton: Non-Album/$artist - $title
+    comp: Compilations/$album/$track - $title
+    albumtype_soundtrack: Soundtracks/$album/$track $title 
+        
+import:
+    write: yes
+    # we copy so pymix can remove the import src dir when the
+    # process has completed successfully.
+    copy: yes
+    move: no
+    resume: ask
+    incremental: no
+    incremental_skip_later: no
+    # keep and defer to the duplicates plugin for resolving
+    duplicate_action: keep
+    quiet_fallback: asis
+    timid: no
+    log: /config/beet.log
+
+      #lastgenre:
+      #    auto: yes
+      #    source: album
+
+embedart:
+    auto: yes
+
+fetchart:
+    auto: yes
+    
+replaygain:
+    auto: no
+
+scrub:
+    auto: yes
+
+replace:
+    '^\.': _
+    '[\x00-\x1f]': _
+    '[\xE8-\xEB]': e
+    '[\xEC-\xEF]': i
+    '[\xE2-\xE6]': a
+    '[\xF2-\xF6]': o
+    '[\xF8]': o
+    #'\.$': _
+    '\s+$': ''
+
+web:
+    host: 0.0.0.0
+    port: 8337
+    readonly: false
+
+lyrics:
+    auto: no
+
+duplicates:
+    keys:
+        - mb_trackid
+        - mb_albumid
+        - title
+        - album
+    tag: dup=1
+
+subsonic:
+    url: http://{{ user_navidrome }}:4533/{{ user_navidrome }}
+    user: {{ username }}
+    pass: {{ password }}

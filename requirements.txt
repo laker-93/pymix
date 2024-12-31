@@ -10,3 +10,6 @@ music-tag
 tinydb
 toredocore
 pyserato
+mediafile
+beets
+jinja2

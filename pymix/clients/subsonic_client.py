@@ -24,10 +24,9 @@ class SubsonicClient(BaseAPIClient):
     def __init__(self, host: str, session: aiohttp.ClientSession, version: str,
                  music_path_base_to_remove: str, zip_name: Optional[str], app_env: str):
         super().__init__(host, session)
-        self._zip_name = zip_name + '/' if zip_name else ''
+        self._zip_name = '/' + zip_name + '/' if zip_name else ''
         self._version = version
-        cleaned_music_path_base_to_remove = '/' + music_path_base_to_remove.removesuffix('/').removeprefix('/')
-        self._music_path_base_to_remove = cleaned_music_path_base_to_remove
+        self._music_path_base_to_remove = music_path_base_to_remove
         self._app_env = app_env
 
     @staticmethod
@@ -203,7 +202,7 @@ class SubsonicClient(BaseAPIClient):
                 break
             offset += batch_size
 
-    async def query_tracks_by_title_and_artist(self, user: dict, title: str, artist: str) -> Optional[SubBoxTrack]:
+    async def query_tracks_by(self, user: dict, title: str, artist: str, album: str) -> List[SubBoxTrack]:
         username = user['username']
         password = user['password']
         port = 4533 # since we're inside the same docker network, can call the private port
@@ -224,10 +223,10 @@ class SubsonicClient(BaseAPIClient):
             if artist.lower() in track.artist.lower() and title.lower() in track.name.lower():
                 track_matches.append(track)
         if len(track_matches) > 1:
-            raise ValueError(f'found multiple matches for query with title: {title} artist: {artist}. Matches: {track_matches}')
-        if len(track_matches) == 1:
-            return track_matches.pop()
-        return None
+            for t in track_matches:
+                if t.album.lower() == album.lower():
+                    return [t]
+        return track_matches
 
 
 

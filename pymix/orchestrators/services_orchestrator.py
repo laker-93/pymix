@@ -6,6 +6,7 @@ from typing import Optional
 
 from aiohttp import ClientConnectorError
 from python_on_whales import DockerClient, docker
+from jinja2 import Environment, FileSystemLoader
 
 from pymix.clients.navidrome_client import NavidromeClient
 from pymix.controllers.db_controller import DbController
@@ -13,6 +14,8 @@ from pymix.handlers.env_file_handler import DockerEnvFileHandler
 
 logger = logging.getLogger(__name__)
 
+environment = Environment(loader=FileSystemLoader("/app/pymix/templates/"))
+template = environment.get_template("beets/config.yaml")
 
 class ServicesOrchestrator:
     def __init__(
@@ -115,9 +118,12 @@ class ServicesOrchestrator:
         )
         docker.compose.up(detach=True)
         # overwrite the default beets config with subbox specific beets config
-        config_src = self._config['containers']['beets']['config_file_src']
         config_dst = self._config['containers']['beets']['config_file_dst'].format(user=username)
-        shutil.copy(config_src, config_dst)
+
+        content = template.render(username=username, password=user['password'], user_navidrome=f'navidrome{username}')
+        with open(config_dst) as f:
+            f.write(content)
+
 
     def _create_filebrowser_account(self, user: dict):
         filebrowser_container = docker.container.inspect("filebrowser")
