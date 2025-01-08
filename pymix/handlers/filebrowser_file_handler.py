@@ -5,7 +5,7 @@ import mimetypes
 import shutil
 import zipfile
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, Optional
 from zipfile import ZipFile
 
 from tinydb import TinyDB
@@ -74,7 +74,7 @@ class FileBrowserFileHandler:
         return subcrate_path, audio_path
 
 
-    def get_xml_audio_path(self, user: str) -> tuple[Path, Path]:
+    def get_xml_audio_path(self, user: str) -> tuple[Path, Optional[Path]]:
         src_path = Path(
             self._filebrowser_data_path_uploads.format(user=user)
         )
@@ -92,7 +92,6 @@ class FileBrowserFileHandler:
             if audio_path and xml_path:
                 break
         assert xml_path
-        assert audio_path
         return xml_path, audio_path
 
     def get_number_of_tracks_for_import(self, user: str) -> int:

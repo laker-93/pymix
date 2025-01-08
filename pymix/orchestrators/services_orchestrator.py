@@ -121,7 +121,7 @@ class ServicesOrchestrator:
         config_dst = self._config['containers']['beets']['config_file_dst'].format(user=username)
 
         content = template.render(username=username, password=user['password'], user_navidrome=f'navidrome{username}')
-        with open(config_dst) as f:
+        with open(config_dst, 'w') as f:
             f.write(content)
 
 

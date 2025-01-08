@@ -46,29 +46,40 @@ class SubsonicOrchestrator:
         result = await self._subsonic_client.scan(user)
         assert result
 
-    async def create_playlists_and_set_rating(self, user: dict, subbox_playlists: List[SubBoxPlaylist]):
+    async def create_playlists(self, user: dict, subbox_playlists: List[SubBoxPlaylist]):
         """
         Given list of subbox playlists (e.g. formed from parsing XML), create the playlist structure in navidrome.
         """
         for playlist in subbox_playlists:
             await self._subsonic_client.create_playlist(user, playlist.name, playlist.tracks)
-            await self._subsonic_client.set_rating(user, playlist.tracks)
 
-    async def update_tracks_with_subid(self, user: dict, subbox_playlists: List[SubBoxPlaylist]) -> None:
+    async def set_ratings(self, user: dict, tracks: List[SubBoxTrack]):
+        """
+        Given list of subbox playlists (e.g. formed from parsing XML), create the playlist structure in navidrome.
+        """
+        await self._subsonic_client.set_rating(user, tracks)
+
+
+    async def update_tracks_with_subid(self, user: dict, subbox_playlists: Optional[List[SubBoxPlaylist]] = None, tracks: Optional[List[SubBoxTrack]] = None) -> None:
         """
         Given list of subbox playlists (e.g. formed from parsing XML), update the playlist
         track with the id of the subsonic track.
         """
-        for playlist in subbox_playlists:
-            if playlist.tracks:
-                for track in playlist.tracks:
-                    name = track.name
-                    try:
-                        subsonic_track = await self._subsonic_client.query_track_by_name(user, name)
-                    except KeyError as ex:
-                        logger.warning(f'unable to find track in navidrome {track}. This track will not be imported properly. Please ensure name of track in rekordbox is correct. Exception {ex}')
-                    else:
-                        track.sub_track_id = subsonic_track.sub_track_id
+        tracks_to_update = []
+        if not tracks:
+            for playlist in subbox_playlists:
+                if playlist.tracks:
+                    tracks_to_update.extend(playlist.tracks)
+        else:
+            tracks_to_update = tracks
+        for track in tracks_to_update:
+            name = track.name
+            try:
+                subsonic_track = await self._subsonic_client.query_track_by_name(user, name)
+            except KeyError as ex:
+                logger.warning(f'unable to find track in navidrome {track}. This track will not be imported properly. Please ensure name of track in rekordbox is correct. Exception {ex}')
+            else:
+                track.sub_track_id = subsonic_track.sub_track_id
 
     async def get_all_tracks(self, user: dict) -> AsyncIterator[List[SubBoxTrack]]:
         return self._subsonic_client.get_all_tracks(user, 50)

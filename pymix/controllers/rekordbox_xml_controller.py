@@ -211,11 +211,12 @@ class RekordboxXMLController:
         # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
         self._get_duplicates(username, False)
 
-    async def create_subsonic_playlists_from_xml(self, user: dict, xml_path: Path, audio_files_to_import: Path):
+    async def create_subsonic_playlists_from_xml(self, user: dict, xml_path: Path, audio_files_to_import: Optional[Path]):
         username = user['username']
         self._rekordbox_xml_orchestrator.create_xml(xml_path)
 
-        await anyio.to_thread.run_sync(self._import_to_beets, username, audio_files_to_import)
+        if audio_files_to_import:
+            await anyio.to_thread.run_sync(self._import_to_beets, username, audio_files_to_import)
         # must trigger a navidrome scan so the tracks will be queryable when creating and moving in to playlists in the
         # next step
         await self._subsonic_orchestrator.scan(user)
@@ -233,9 +234,13 @@ class RekordboxXMLController:
         # 6. get the tracks from navidrome by using the 'query' api for each track.
         # this sets the subsonic id found from querying navidrome. This can then be used to create the playlist and place
         # the track in the playlist
-        res = await self._subsonic_orchestrator.update_tracks_with_subid(user, subbox_playlists)
+        res = await self._subsonic_orchestrator.update_tracks_with_subid(user, subbox_playlists=subbox_playlists)
         # 8. create the playlists and set the rating of the track in navidrome from the rating taken from xml
-        await self._subsonic_orchestrator.create_playlists_and_set_rating(user, subbox_playlists)
+        await self._subsonic_orchestrator.create_playlists(user, subbox_playlists)
+        rated_tracks = list(filter(lambda t: t.rating > 0, self._rekordbox_xml_orchestrator.get_all_xml_tracks()))
+        await self._subsonic_orchestrator.update_tracks_with_subid(user, tracks=rated_tracks)
+
+        await self._subsonic_orchestrator.set_ratings(user, rated_tracks)
 
     async def get_healthcheck(self) -> dict:
         return {
