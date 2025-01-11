@@ -1,9 +1,10 @@
 import logging
 from http import HTTPStatus
+from pathlib import Path
 from typing import Optional
 
 from dependency_injector.wiring import Provide, inject
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Cookie
 from pydantic import BaseModel
 from starlette.responses import JSONResponse
 
@@ -82,6 +83,33 @@ async def user_login(
     return response
 
 
+@router.get("/user/library_size", tags=["user"])
+@inject
+async def library_size(
+        username: str | None = None,
+        session_id: str | None = Cookie(None),
+        db_controller: DbController = Depends(Provide[Container.db_controller]),
+) -> dict:
+    success = False
+    total_size = 0
+    reason = ""
+    if not session_id:
+        reason = "must have a session id to identify user"
+    if session_id:
+        try:
+            user = db_controller.get_user_by_session_id(session_id)
+        except Exception as ex:
+            logger.error(f'error occurred getting user for session id {session_id}', exc_info=True)
+            reason = repr(ex)
+        else:
+            username = user['username']
+            total_size = sum(file.stat().st_size for file in Path(f'/private-music/{username}').rglob('*'))
+            success = True
+    return {
+        'success': success,
+        'total_size_bytes': total_size,
+        'reason': reason
+    }
 
 @router.get("/user/delete", tags=["db"])
 @inject
