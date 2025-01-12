@@ -75,7 +75,9 @@ class ServicesOrchestrator:
                 await self._navidrome_client.create_account(user)
             except Exception:
                 # possible race here where navidrome docker is still being created. So attempt multiple times.
-                logger.error(f'encountered error when attempting to create navidrome account. Retrying...', exc_info=True)
+                logger.error(f'encountered error when attempting to create navidrome account. Retrying...')
+                if attempt == attempts - 1:
+                    logger.exception('final attempt failed', exc_info=True)
                 await asyncio.sleep(2)
             else:
                 success = True

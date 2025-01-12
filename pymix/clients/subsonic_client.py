@@ -271,7 +271,7 @@ class SubsonicClient(BaseAPIClient):
             # however can have genuine duplicates here since beets is conifugred to merge duplicates (for example same
             # track appears on multiple compilations). I think the right thing to do here is to keep all of them and
             # then let user delete later if they want.
-            logger.error(f'found more than 1 track matching query {name}: {results}')
+            logger.error(f'expected to find 1 track but found {len(results)} matching query {name}: {results}')
         assert len(results), f'failed to find {name} in {tracks}'
         max_similarity = max(results.keys())
         result = results[max_similarity]

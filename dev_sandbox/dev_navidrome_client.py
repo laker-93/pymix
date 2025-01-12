@@ -7,6 +7,21 @@ from pymix.clients.subsonic_client import SubsonicClient
 from pymix.registration import create_app, create_container
 
 
+async def get_track_by_name(
+        navidrome_client: SubsonicClient,
+        name: str
+):
+    #await get_playlists(navidrome_client)
+    #await get_playlist_api(navidrome_client)
+    resp = await navidrome_client.query_track_by_name(
+        {
+            'username': 'test110125',
+            'password': 'test110125',
+            'subsonic_port': 4533,
+        },
+        name)
+    print(resp)
+
 async def get_track_by_id(
         navidrome_client: SubsonicClient,
         track_id: str
@@ -61,7 +76,7 @@ async def main():
     container.wire(modules=[__name__])
     loop = asyncio.get_event_loop()
     subsonic_client = await container.subsonic_client()
-    await get_all_tracks(subsonic_client)
+    await get_track_by_name(subsonic_client, 'B. C. - Stronghold')
     #await subsonic_client.create_playlist('foo2', ['9b81476f6ebf382c933276f97e1ca407'])
     #result = await query(subsonic_client, 'Gnosis')
     #print(result)
