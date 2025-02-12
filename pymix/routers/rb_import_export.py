@@ -32,6 +32,7 @@ async def rekordbox_import(
     job_id = ""
     username = None
     success = False
+    user = None
     reason = ""
     total_n_tracks_for_import = 0
     if not session_id:
@@ -46,24 +47,28 @@ async def rekordbox_import(
             username = user['username']
 
     if username:
-        total_n_tracks_for_import = fb_file_handler.get_number_of_tracks_for_import(username)
-        total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
-        if total_n_tracks_for_import + total_n_imported_tracks > config["max_number_of_tracks"]:
-            logger.error(
-                f"user {username} has exceeded max number of tracks that can be uploaded of {config['max_number_of_tracks']}."
-            )
+        size = fb_file_handler.get_size_of_import(username)
+        size_import_bytes = size['size_tracks']
+        total_n_tracks_for_import = size['n_tracks']
+        if db_controller.user_library_size_exceeded(username, size_import_bytes):
             return {
                 'success': False,
-                'imported_tracks': 0,
+                'job_id': job_id,
                 'n_tracks_for_import': total_n_tracks_for_import,
-                'beets_output': "",
-                'reason': f"user {username} has exceeded max number of tracks that can be uploaded."
+                'reason': f"user {username} has exceeded max library size."
             }
         if total_n_tracks_for_import == 0:
             logger.info(
                 f"user {username} has attempted to import before uploading any tracks"
             )
+            return {
+                'success': False,
+                'job_id': job_id,
+                'n_tracks_for_import': total_n_tracks_for_import,
+                'reason': f"user {username} has not uploaded any files to import."
+            }
 
+        total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
         job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
         logger.info(f'RB importing {total_n_tracks_for_import} tracks for user {username}')
         background_tasks.add_task(run_import_task, rekordbox_xml_controller, username, job_id, db_controller,

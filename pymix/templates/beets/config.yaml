@@ -55,6 +55,7 @@ import:
 
 embedart:
     auto: yes
+    remove_art_file: yes
 
 fetchart:
     auto: yes

@@ -21,6 +21,7 @@ class CreateUserRequest(BaseModel):
     username: str
     password: str
     email: str
+    token: str
 
 class LoginUserRequest(BaseModel):
     username: str
@@ -42,7 +43,7 @@ async def create_user(
     success = True
     session_id = ""
     try:
-        session_id = await services_orchestrator.create(username, password, email)
+        session_id = await services_orchestrator.create(username, password, email, request.token)
     except Exception as ex:
         logger.error(f'error occurred creating services for user', exc_info=True)
         reason = repr(ex)
@@ -81,6 +82,29 @@ async def user_login(
         logger.info(f'setting cookie to {session_id}')
         response.set_cookie(key='session_id', value=session_id, httponly=True, secure=True, samesite="none")
     return response
+
+
+@router.get("/user/is_valid_token", tags=["user"])
+@inject
+async def library_size(
+    token: str,
+    db_controller: DbController = Depends(Provide[Container.db_controller]),
+) -> dict:
+    success = False
+    is_valid_token = False
+    reason = ""
+    try:
+        is_valid_token = db_controller.is_valid_token(token)
+    except Exception as ex:
+        logger.error(f'error occurred checking token {token}', exc_info=True)
+        reason = repr(ex)
+    else:
+        success = True
+    return {
+        'success': success,
+        'is_valid_token': is_valid_token,
+        'reason': reason
+    }
 
 
 @router.get("/user/library_size", tags=["user"])

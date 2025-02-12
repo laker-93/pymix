@@ -1,5 +1,6 @@
 import uuid
 import logging
+from pathlib import Path
 from typing import Optional
 
 from tinydb import TinyDB, Query
@@ -12,14 +13,27 @@ logger = logging.getLogger(__name__)
 
 
 class DbController:
-    def __init__(self, db: TinyDB, app_env: str):
+    def __init__(self, db: TinyDB, app_env: str, max_library_size: int):
         self._db = db
         self._app_env = app_env
         self._session_to_user_schema = ('session_id', 'user_id')
-        self._user_schema = ('username', 'password', 'email', 'user_id', 'beets_port', 'subsonic_port')
+        self._user_schema = ('username', 'password', 'email', 'user_id', 'beets_port', 'subsonic_port', 'max_library_size')
         self._user_jobs_schema = ('user_id', 'job_id')
         self._import_job_schema = ('job_id', 'name', 'n_tracks_to_import', 'total_n_imported_tracks', 'in_progress', 'result')
         self._export_job_schema = ('job_id', 'name', 'total_n_tracks_to_export', 'n_exported_tracks', 'in_progress', 'result')
+        self._user_token_schema = ('user_id', 'token')
+        self._max_library_size = max_library_size
+
+    def set_token(self, token: str):
+        user_token_table = self._db.table('user_token_table')
+        user_token_table.insert({'user_id': '', 'token': token})
+
+    def is_valid_token(self, token: str) -> bool:
+        self._db.clear_cache()
+        user_token_table = self._db.table('user_token_table')
+        Token = Query()
+        results = user_token_table.search((Token.token == token) & (Token.user_id == ""))
+        return len(results) == 1
 
     def create_import_job(self, username: str, number_of_tracks_to_import: int, total_n_imported_tracks: int) -> str:
         user = self.get_user(username)
@@ -121,15 +135,23 @@ class DbController:
         user_job_table = self._db.table('user_job_table')
         user_job_table.insert(dict(zip(self._user_jobs_schema, (user_id, job_id))))
 
-    def create_user(self, username: str, password: str, email: str) -> str:
+    def create_user(self, username: str, password: str, email: str, token: str) -> str:
         User = Query()
         user_table = self._db.table('user_table')
         results = user_table.search(User.username == username)
         assert len(results) == 0, f'already have {len(results)} users with username {username}'
+
         beets_port = get_available_port()
         subsonic_port = get_available_port()
         user_id = uuid.uuid4().hex
-        self._add_user(username, password, email, user_id, beets_port, subsonic_port)
+        # Update the user_token table with the user_id
+        user_token_table = self._db.table('user_token_table')
+        Token = Query()
+        token_results = user_token_table.search(Token.token == token)
+        assert len(token_results) == 1, f'token {token} not found in user_token_table'
+        user_token_table.update({'user_id': user_id}, Token.token == token)
+
+        self._add_user(username, password, email, user_id, beets_port, subsonic_port, self._max_library_size)
         return self.create_session(username, password)
 
     def create_session(self, username: str, password: str) -> str:
@@ -167,9 +189,10 @@ class DbController:
             user_id: str,
             beets_port: int,
             subsonic_port: int,
+            max_library_size: int,
     ):
         user_table = self._db.table('user_table')
-        user_table.insert(dict(zip(self._user_schema, (username, password, email, user_id, beets_port, subsonic_port))))
+        user_table.insert(dict(zip(self._user_schema, (username, password, email, user_id, beets_port, subsonic_port, max_library_size))))
 
     def get_user_by_session_id(self, session_id: str) -> Optional[Document]:
         logger.debug(f'get user by session id {session_id}')
@@ -221,3 +244,15 @@ class DbController:
         self._db.clear_cache()
         user_table = self._db.table('user_table')
         return len(user_table)
+
+    def user_library_size_exceeded(self, username: str, size_import: int) -> int:
+        self._db.clear_cache()
+        total_size = sum(file.stat().st_size for file in Path(f'/private-music/{username}').rglob('*'))
+        user = self.get_user(username)
+        if total_size + size_import > user['max_library_size']:
+            return True
+        else:
+            logger.error(
+                f"user {username} has exceeded max size of library of {user['max_library_size']} with current size: {total_size} and attempted import {size_import}"
+            )
+            return False

@@ -202,7 +202,7 @@ class SubsonicClient(BaseAPIClient):
                 break
             offset += batch_size
 
-    async def query_tracks_by(self, user: dict, title: str, artist: str, album: str) -> List[SubBoxTrack]:
+    async def query_tracks_by(self, user: dict, title: str, artist: str, album: Optional[str] = None) -> List[SubBoxTrack]:
         username = user['username']
         password = user['password']
         port = 4533 # since we're inside the same docker network, can call the private port
@@ -224,7 +224,7 @@ class SubsonicClient(BaseAPIClient):
                 track_matches.append(track)
         if len(track_matches) > 1:
             for t in track_matches:
-                if t.album.lower() == album.lower():
+                if album and t.album.lower() == album.lower():
                     return [t]
         return track_matches
 
