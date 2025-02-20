@@ -146,6 +146,7 @@ async def beets_import(
                 'success': False,
                 'job_id': job_id,
                 'n_tracks_for_import': total_n_tracks_for_import,
+                'max_library_size_exceeded': True,
                 'reason': f"user {username} has exceeded max library size."
             }
         if total_n_tracks_for_import == 0:
@@ -155,6 +156,7 @@ async def beets_import(
             return {
                 'success': False,
                 'job_id': job_id,
+                'max_library_size_exceeded': False,
                 'n_tracks_for_import': total_n_tracks_for_import,
                 'reason': f"user {username} has attempted to import before uploading any tracks."
             }
@@ -169,6 +171,7 @@ async def beets_import(
     return {
         'success': True,
         'job_id': job_id,
+        'max_library_size_exceeded': False,
         'n_tracks_for_import': total_n_tracks_for_import,
         'reason': ""
     }
