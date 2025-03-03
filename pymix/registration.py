@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from pymix import constants
 from pymix.containers import Container
-from pymix.routers import maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync
+from pymix.routers import maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, match_tracks
 
 
 def create_app():
@@ -21,7 +21,7 @@ def create_app():
         CORSMiddleware,
         # need to set explicit origins here rather than * since feishin will be sending credentials in cookies:
         # https://stackoverflow.com/questions/18642828/origin-origin-is-not-allowed-by-access-control-allow-origin
-        allow_origins=["http://localhost:4343", "https://player.sub-box.net/player", "http://localhost"],
+        allow_origins=["http://localhost:4343", "https://sub-box.net", "https://www.sub-box.net", "http://localhost"],
         allow_credentials=True,
         allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "Set-Cookie"],
@@ -35,6 +35,7 @@ def create_app():
     app.include_router(serato_import_export.router)
     app.include_router(export_progress.router)
     app.include_router(sync.router)
+    app.include_router(match_tracks.router)
     return app
 
 

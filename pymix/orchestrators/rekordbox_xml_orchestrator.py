@@ -162,7 +162,8 @@ class RekordboxXMLOrchestrator:
                     path=Path(rekordbox_track.Location),
                     album=rekordbox_track.Album,
                     genre=rekordbox_track.Genre,
-                    track_id=rekordbox_track.TrackID
+                    track_id=rekordbox_track.TrackID,
+                    rating=rekordbox_track.Rating
                 )
             )
         return all_tracks

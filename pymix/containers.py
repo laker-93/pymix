@@ -71,7 +71,8 @@ class Container(containers.DeclarativeContainer):
     db_controller = providers.Singleton(
         DbController,
         db,
-        config.app_env
+        config.app_env,
+        config.max_library_size
     )
 
     env_file_handler = providers.Singleton(

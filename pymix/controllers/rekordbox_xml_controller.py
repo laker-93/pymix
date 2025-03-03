@@ -127,18 +127,23 @@ class RekordboxXMLController:
         # group-albums to allow importing correctly tracks with different album tags.
         beets_command = f"beet import --group-albums --set user={username} --set public={public} -q /downloads"
         logger.info(f'running beet import command {beets_command}')
-        result = docker.execute(container_name, beets_command.split())
-        logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
+        # detach to avoid returning potentially large stdout from the docker logs.
+        # Instead logs are streamed incrementally
+        log_iter = docker.execute(container_name, beets_command.split(), stream=True)
+        for log_type, log in log_iter:
+            logger.info(f'{log_type}: {log.decode()}')
+        logger.info(f"finished beets command {beets_command} on container {container_name}")
         if public:
             # must write the user tag set above to the audio file
-            write_result = docker.execute(container_name, "beet write".split())
-            logger.info("result from writing beets db to files %s", write_result)
+            log_iter = docker.execute(container_name, "beet write".split())
+            for log_type, log in log_iter:
+                logger.info(f'{log_type}: {log.decode()}')
+            logger.info("finished beet write command")
 
         self._file_browser_file_handler.remove_fb_data_path(username)
         self._rb_backup_file_handler.clean_up_beets_import_tree(username, public)
         # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
         self._get_duplicates(username, public)
-        return result
 
     async def create_rekordbox_xml_from_subsonic_playlists(self, user_root: str, user: dict, xml_path: Optional[Path], xml_output_path: Path):
         # todo this could be made a context manager to create, update then save the xml
@@ -195,13 +200,17 @@ class RekordboxXMLController:
         self._rb_backup_file_handler.restore_track_meta_and_stage_for_import(username, audio_files_to_import)
         # 1. invoke beets import on the audio files to import
 
-        # can set to interactive with tty to pipe docker stdin input/output to terminal for user feedback.
-        # beets config set to quiet mode and fallback of 'asis'. If user needs to correct later, they will have to
-        # specify a musicbrainz id and re import with a specific query. This will need a separate API to be implemented.
-        logger.info(f'starting beets import for {username}')
-        result = docker.execute(f"beets{username}", ['beet', 'import', '-q', '/downloads'])
-        logger.info(f'finished beets import for {username}')
-        print(result)
+        # set a custom field of the username that uploaded the track. This allows to query tracks that a username has uploaded.
+        # group-albums to allow importing correctly tracks with different album tags.
+        beets_command = f"beet import --group-albums --set user={username} -q /downloads"
+        logger.info(f'running beet import command {beets_command}')
+        # detach to avoid returning potentially large stdout from the docker logs.
+        # Instead logs are streamed incrementally
+        log_iter = docker.execute(f"beets{username}", beets_command.split(), stream=True)
+        for log_type, log in log_iter:
+            logger.info(f'{log_type}: {log.decode()}')
+        logger.info(f"finished beets command {beets_command} for {username}")
+
         # 9. on success, remove the directory of the beets import
         logger.info(f'starting post import clean up for {username}')
         self._file_browser_file_handler.remove_fb_data_path(username)
@@ -211,11 +220,12 @@ class RekordboxXMLController:
         # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
         self._get_duplicates(username, False)
 
-    async def create_subsonic_playlists_from_xml(self, user: dict, xml_path: Path, audio_files_to_import: Path):
+    async def create_subsonic_playlists_from_xml(self, user: dict, xml_path: Path, audio_files_to_import: Optional[Path]):
         username = user['username']
         self._rekordbox_xml_orchestrator.create_xml(xml_path)
 
-        await anyio.to_thread.run_sync(self._import_to_beets, username, audio_files_to_import)
+        if audio_files_to_import:
+            await anyio.to_thread.run_sync(self._import_to_beets, username, audio_files_to_import)
         # must trigger a navidrome scan so the tracks will be queryable when creating and moving in to playlists in the
         # next step
         await self._subsonic_orchestrator.scan(user)
@@ -233,9 +243,13 @@ class RekordboxXMLController:
         # 6. get the tracks from navidrome by using the 'query' api for each track.
         # this sets the subsonic id found from querying navidrome. This can then be used to create the playlist and place
         # the track in the playlist
-        res = await self._subsonic_orchestrator.update_tracks_with_subid(user, subbox_playlists)
+        res = await self._subsonic_orchestrator.update_tracks_with_subid(user, subbox_playlists=subbox_playlists)
         # 8. create the playlists and set the rating of the track in navidrome from the rating taken from xml
-        await self._subsonic_orchestrator.create_playlists_and_set_rating(user, subbox_playlists)
+        await self._subsonic_orchestrator.create_playlists(user, subbox_playlists)
+        rated_tracks = list(filter(lambda t: t.rating > 0, self._rekordbox_xml_orchestrator.get_all_xml_tracks()))
+        await self._subsonic_orchestrator.update_tracks_with_subid(user, tracks=rated_tracks)
+
+        await self._subsonic_orchestrator.set_ratings(user, rated_tracks)
 
     async def get_healthcheck(self) -> dict:
         return {

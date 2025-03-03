@@ -5,7 +5,7 @@ import mimetypes
 import shutil
 import zipfile
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, Optional, Dict
 from zipfile import ZipFile
 
 from tinydb import TinyDB
@@ -74,7 +74,7 @@ class FileBrowserFileHandler:
         return subcrate_path, audio_path
 
 
-    def get_xml_audio_path(self, user: str) -> tuple[Path, Path]:
+    def get_xml_audio_path(self, user: str) -> tuple[Path, Optional[Path]]:
         src_path = Path(
             self._filebrowser_data_path_uploads.format(user=user)
         )
@@ -87,20 +87,19 @@ class FileBrowserFileHandler:
                     mimecategory = mimestart.split('/')[1]
                     if mimecategory == 'xml':
                         xml_path = f
-                if f.name.endswith('.zip'):
+                if f.name.endswith('.zip') and 'macosx' not in f.name.lower():
                     audio_path = f
             if audio_path and xml_path:
                 break
         assert xml_path
-        assert audio_path
         return xml_path, audio_path
 
-    def get_number_of_tracks_for_import(self, user: str) -> int:
-        src_path = Path(
-            self._filebrowser_data_path_uploads.format(user=user)
-        )
+    def get_size_of_import(self, user: str) -> Dict[str, int]:
+        src_path = Path(self._filebrowser_data_path_uploads.format(user=user))
         audio_files_zip = None
         n_files = 0
+        total_size = 0
+
         for f in src_path.iterdir():
             if f.is_file():
                 if f.name.endswith('.zip'):
@@ -112,12 +111,13 @@ class FileBrowserFileHandler:
                     if mimecategory == 'audio':
                         logger.info(f'found audio file {f}')
                         n_files += 1
+                        total_size += f.stat().st_size
 
         if audio_files_zip:
             with ZipFile(audio_files_zip) as zip:
                 files = zip.namelist()
                 for f in files:
-                    if '__MACOSX' in str(f):
+                    if 'macosx' in str(f).lower():
                         # ignore meta info
                         continue
                     mimestart = mimetypes.guess_type(str(f))[0]
@@ -126,24 +126,18 @@ class FileBrowserFileHandler:
                         if mimecategory == 'audio':
                             logger.info(f'found audio file {f}')
                             n_files += 1
-        return n_files
+                            total_size += zip.getinfo(f).file_size
+
+        return {'n_tracks': n_files, 'size_tracks': total_size}
 
 
-    def sync(self, username: str, client_tracks: list[SubBoxTrack], server_tracks: dict[int, SubBoxTrack]) -> Tuple[int, Path]:
-        client_tracks_to_remove = []
-        for client_track in client_tracks:
-            if client_track.sub_track_id not in server_tracks:
-                client_tracks_to_remove.append(client_track)
-            else:
-                server_tracks.pop(client_track.sub_track_id)
-        tracks_to_zip = server_tracks
-
+    def sync(self, username: str, tracks_to_zip: list[SubBoxTrack]) -> Tuple[int, Path]:
         dst_dir = Path(self._filebrowser_data_path_downloads.format(user=username)) / self._zip_name
         output_path = str(dst_dir.with_suffix('.zip'))
         n_files_written = 0
         src_dir = self._serving_music_path_base.format(user=username)
         with zipfile.ZipFile(output_path,'w', zipfile.ZIP_DEFLATED) as zip_file:
-            for entry in tracks_to_zip.values():
+            for entry in tracks_to_zip:
                 entry_dir = str(entry.path).removeprefix('/' + self._zip_name)
                 p = Path(src_dir + entry_dir)
                 zip_file.write(p, Path(self._zip_name) / p.relative_to(src_dir))

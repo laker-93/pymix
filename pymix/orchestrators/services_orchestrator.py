@@ -31,7 +31,7 @@ class ServicesOrchestrator:
         self._config = config
         self._max_number_of_users = config['max_number_of_users']
 
-    async def create(self, username: str, password: str, email: str) -> Optional[str]:
+    async def create(self, username: str, password: str, email: str, token: str) -> Optional[str]:
         """
         Command to create navidrome for user=nc:
         PORT=4535 USER=nc NAME=navidromenc docker-compose --project-name navidromenc up -d
@@ -44,7 +44,7 @@ class ServicesOrchestrator:
             return None
 
         try:
-            session_id = self._db_controller.create_user(username, password, email)
+            session_id = self._db_controller.create_user(username, password, email, token)
             user = self._db_controller.get_user(username)
             user_dir = self._config['containers']['subsonic']['serving_music_path_base'].format(user=username)
             user_dir = Path(user_dir)
@@ -75,7 +75,9 @@ class ServicesOrchestrator:
                 await self._navidrome_client.create_account(user)
             except Exception:
                 # possible race here where navidrome docker is still being created. So attempt multiple times.
-                logger.error(f'encountered error when attempting to create navidrome account. Retrying...', exc_info=True)
+                logger.error(f'encountered error when attempting to create navidrome account. Retrying...')
+                if attempt == attempts - 1:
+                    logger.exception('final attempt failed', exc_info=True)
                 await asyncio.sleep(2)
             else:
                 success = True
@@ -121,7 +123,7 @@ class ServicesOrchestrator:
         config_dst = self._config['containers']['beets']['config_file_dst'].format(user=username)
 
         content = template.render(username=username, password=user['password'], user_navidrome=f'navidrome{username}')
-        with open(config_dst) as f:
+        with open(config_dst, 'w') as f:
             f.write(content)
 
 

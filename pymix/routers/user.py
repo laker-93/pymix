@@ -1,9 +1,10 @@
 import logging
 from http import HTTPStatus
+from pathlib import Path
 from typing import Optional
 
 from dependency_injector.wiring import Provide, inject
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Cookie
 from pydantic import BaseModel
 from starlette.responses import JSONResponse
 
@@ -20,6 +21,7 @@ class CreateUserRequest(BaseModel):
     username: str
     password: str
     email: str
+    token: str
 
 class LoginUserRequest(BaseModel):
     username: str
@@ -41,7 +43,7 @@ async def create_user(
     success = True
     session_id = ""
     try:
-        session_id = await services_orchestrator.create(username, password, email)
+        session_id = await services_orchestrator.create(username, password, email, request.token)
     except Exception as ex:
         logger.error(f'error occurred creating services for user', exc_info=True)
         reason = repr(ex)
@@ -82,6 +84,56 @@ async def user_login(
     return response
 
 
+@router.get("/user/is_valid_token", tags=["user"])
+@inject
+async def library_size(
+    token: str,
+    db_controller: DbController = Depends(Provide[Container.db_controller]),
+) -> dict:
+    success = False
+    is_valid_token = False
+    reason = ""
+    try:
+        is_valid_token = db_controller.is_valid_token(token)
+    except Exception as ex:
+        logger.error(f'error occurred checking token {token}', exc_info=True)
+        reason = repr(ex)
+    else:
+        success = True
+    return {
+        'success': success,
+        'is_valid_token': is_valid_token,
+        'reason': reason
+    }
+
+
+@router.get("/user/library_size", tags=["user"])
+@inject
+async def library_size(
+        username: str | None = None,
+        session_id: str | None = Cookie(None),
+        db_controller: DbController = Depends(Provide[Container.db_controller]),
+) -> dict:
+    success = False
+    total_size = 0
+    reason = ""
+    if not session_id:
+        reason = "must have a session id to identify user"
+    if session_id:
+        try:
+            user = db_controller.get_user_by_session_id(session_id)
+        except Exception as ex:
+            logger.error(f'error occurred getting user for session id {session_id}', exc_info=True)
+            reason = repr(ex)
+        else:
+            username = user['username']
+            total_size = sum(file.stat().st_size for file in Path(f'/private-music/{username}').rglob('*'))
+            success = True
+    return {
+        'success': success,
+        'total_size_bytes': total_size,
+        'reason': reason
+    }
 
 @router.get("/user/delete", tags=["db"])
 @inject

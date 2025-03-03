@@ -202,7 +202,27 @@ class SubsonicClient(BaseAPIClient):
                 break
             offset += batch_size
 
-    async def query_tracks_by(self, user: dict, title: str, artist: str, album: str) -> List[SubBoxTrack]:
+    async def get_track_match(self, user: dict, title: str, artist: str, album: Optional[str] = None) -> Optional[SubBoxTrack]:
+        tracks = await self.query_tracks_by(user, title, artist, album)
+        if len(tracks) == 1:
+            return tracks[0]
+        elif len(tracks) > 1:
+            logger.info(f'found multiple matches for {title} by {artist} in subsonic: {tracks}')
+            match = await self._find_best_match(title, tracks)
+            return match
+        elif len(tracks) == 0:
+            logger.info(f'no matches querying by {title} and {artist}. Querying on title only...')
+            match = await self.query_track_by_name(user, title)
+            if match:
+                return match
+            else:
+                for token in title.split():
+                    match = await self.query_track_by_name(user, token, full_name=title)
+                    if match:
+                        return match
+            logger.error(f'failed to find match on {title} or any of its tokens')
+
+    async def query_tracks_by(self, user: dict, title: str, artist: str, album: Optional[str] = None) -> List[SubBoxTrack]:
         username = user['username']
         password = user['password']
         port = 4533 # since we're inside the same docker network, can call the private port
@@ -218,19 +238,16 @@ class SubsonicClient(BaseAPIClient):
         except Exception as ex:
             raise KeyError(f'unable to parse tracks from url query {url}') from ex
         logger.info(f'got tracks: {tracks}')
-        track_matches = []
-        for track in tracks:
-            if artist.lower() in track.artist.lower() and title.lower() in track.name.lower():
-                track_matches.append(track)
-        if len(track_matches) > 1:
-            for t in track_matches:
-                if t.album.lower() == album.lower():
-                    return [t]
-        return track_matches
+        if len(tracks) > 1 and album:
+            track_matches = []
+            for t in tracks:
+                if album and t.album.lower() == album.lower():
+                    track_matches.append(t)
+            return track_matches
+        return tracks
 
 
-
-    async def query_track_by_name(self, user: dict, name: str) -> SubBoxTrack:
+    async def query_track_by_name(self, user: dict, name: str, full_name=None) -> SubBoxTrack:
         """
         Given a name of a track, query subsonic and return matches. Throws an error if no match is found.
         """
@@ -246,6 +263,12 @@ class SubsonicClient(BaseAPIClient):
             tracks = self._parse_query(response)
         except Exception as ex:
             raise KeyError(f'unable to parse tracks from url query {url}') from ex
+        if full_name:
+            return await self._find_best_match(full_name, tracks)
+        else:
+            return await self._find_best_match(name, tracks)
+
+    async def _find_best_match(self, name, tracks):
         results = {}
         for track in tracks:
             name_clean = re.sub(r'\W+', '', name.lower())
@@ -271,8 +294,9 @@ class SubsonicClient(BaseAPIClient):
             # however can have genuine duplicates here since beets is conifugred to merge duplicates (for example same
             # track appears on multiple compilations). I think the right thing to do here is to keep all of them and
             # then let user delete later if they want.
-            logger.error(f'found more than 1 track matching query {name}: {results}')
-        assert len(results), f'failed to find {name} in {tracks}'
+            logger.error(f'expected to find 1 track but found {len(results)} matching query {name}: {results}')
+        if not results:
+            return None
         max_similarity = max(results.keys())
         result = results[max_similarity]
         if int(max_similarity) != 1:
@@ -315,5 +339,6 @@ class SubsonicClient(BaseAPIClient):
                 params=[('id', song_id), ('rating', rating)]
             )
             response = await self.get(url)
-            assert response['subsonic-response']['status'] == 'ok', response
+            if response['subsonic-response']['status'] != 'ok':
+                logger.error(f'failed to set status on song id {song_id} with response: {response}')
             await asyncio.sleep(1)

@@ -18,13 +18,9 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-class RBImportRequest(BaseModel):
-    username: Optional[str] = None
-
 @router.post("/rekordbox/import", tags=["import"])
 @inject
 async def rekordbox_import(
-    request: RBImportRequest,
     background_tasks: BackgroundTasks,
     session_id: str | None = Cookie(None),
     beets_client: BeetsClient = Depends(Provide[Container.beets_client]),
@@ -33,14 +29,15 @@ async def rekordbox_import(
     db_controller: DbController = Depends(Provide[Container.db_controller]),
     config: Dict = Depends(Provide[Container.config]),
 )-> dict:
-
     job_id = ""
     username = None
+    success = False
+    user = None
+    reason = ""
     total_n_tracks_for_import = 0
-    if not request.username and not session_id:
-        success = False
-        reason = "must have a username or session id to identify user"
-    if not request.username and session_id:
+    if not session_id:
+        reason = "must have a session id to identify user"
+    if session_id:
         try:
             user = db_controller.get_user_by_session_id(session_id)
         except Exception as ex:
@@ -48,45 +45,45 @@ async def rekordbox_import(
             reason = repr(ex)
         else:
             username = user['username']
-    elif request.username:
-        username = request.username
-        user = db_controller.get_user(username)
+
     if username:
-        total_n_tracks_for_import = fb_file_handler.get_number_of_tracks_for_import(username)
-        total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
-        if total_n_tracks_for_import + total_n_imported_tracks > config["max_number_of_tracks"]:
-            logger.error(
-                f"user {username} has exceeded max number of tracks that can be uploaded of {config['max_number_of_tracks']}."
-            )
+        size = fb_file_handler.get_size_of_import(username)
+        size_import_bytes = size['size_tracks']
+        total_n_tracks_for_import = size['n_tracks']
+        if db_controller.user_library_size_exceeded(username, size_import_bytes):
             return {
                 'success': False,
-                'imported_tracks': 0,
+                'job_id': job_id,
                 'n_tracks_for_import': total_n_tracks_for_import,
-                'beets_output': "",
-                'reason': f"user {username} has exceeded max number of tracks that can be uploaded."
+                'max_library_size_exceeded': True,
+                'reason': f"user {username} has exceeded max library size."
             }
         if total_n_tracks_for_import == 0:
-            logger.error(
+            logger.info(
                 f"user {username} has attempted to import before uploading any tracks"
             )
             return {
                 'success': False,
-                'imported_tracks': 0,
+                'job_id': job_id,
+                'max_library_size_exceeded': False,
                 'n_tracks_for_import': total_n_tracks_for_import,
-                'beets_output': "",
-                'reason': f"user {username} has attempted to import before uploading any tracks."
+                'reason': f"user {username} has not uploaded any files to import."
             }
 
+        total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
         job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
         logger.info(f'RB importing {total_n_tracks_for_import} tracks for user {username}')
         background_tasks.add_task(run_import_task, rekordbox_xml_controller, username, job_id, db_controller,
                                   fb_file_handler, total_n_tracks_for_import, user)
+        success = True
+        reason = ""
 
     return {
-        'success': True,
+        'success': success,
         'job_id': job_id,
+        'max_library_size_exceeded': False,
         'n_tracks_for_import': total_n_tracks_for_import,
-        'reason': ""
+        'reason': reason
     }
 
 

@@ -2,7 +2,7 @@ import logging
 from typing import Dict, Annotated, List, Tuple
 
 from dependency_injector.wiring import Provide, inject
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Cookie
 from anyio import to_process
 from pydantic import BaseModel
 
@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 
 class ClientTracks(BaseModel):
     tracks: list[Dict[str, str]]
-
 
 
 @router.post("/sync", tags=["sync"])
@@ -77,16 +76,81 @@ async def sync(
             for server_track in server_tracks:
                 logger.debug(f'adding server track {server_track}')
                 server_tracks_dict[server_track.sub_track_id] = server_track
+
+        client_tracks_to_remove = []
+        for client_track in client_sub_tracks:
+            if client_track.sub_track_id not in server_tracks_dict:
+                client_tracks_to_remove.append(client_track)
+            else:
+                server_tracks_dict.pop(client_track.sub_track_id)
+
         n_tracks_zipped, zip_path = fb_file_handler.sync(
             username=username,
-            client_tracks=client_sub_tracks,
-            server_tracks=server_tracks_dict
+            tracks_to_zip=list(server_tracks_dict.values())
         )
         success = True
 
     return {
         'success': success,
         'filesNotOnServer': client_tracks_to_remove,
+        'nTracksExported': len(server_tracks_dict),
+        'zipPath': zip_path,
+        'reason': reason
+    }
+
+
+
+class SyncPlaylistArgs(BaseModel):
+    ids: list[str]
+    tracks: list[Dict[str, str]] = None
+
+
+@router.post("/sync/playlists", tags=["sync"])
+@inject
+async def sync(
+        args: SyncPlaylistArgs,
+        session_id: str | None = Cookie(None),
+        username: str | None = None,
+        db_controller: DbController = Depends(Provide[Container.db_controller]),
+        fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
+        subsonic_client: SubsonicClient = Depends(Provide[Container.subsonic_client])
+) -> dict:
+    success = False
+    reason = ""
+    user = None
+    server_tracks_dict = {}
+    zip_path = None
+    if not username and not session_id:
+        success = False
+        reason = "must have a username or session id to identify user"
+    if username:
+        try:
+            user = db_controller.get_user(username)
+        except Exception as ex:
+            logger.error(f'error occurred getting user for {username}', exc_info=True)
+            reason = repr(ex)
+    if session_id:
+        try:
+            user = db_controller.get_user_by_session_id(session_id)
+        except Exception as ex:
+            logger.error(f'error occurred getting user for session id {session_id}', exc_info=True)
+            reason = repr(ex)
+        else:
+            username = user['username']
+    if user:
+        all_tracks = []
+        for playlist_id in args.ids:
+            tracks = await subsonic_client.get_playlist_tracks(user, playlist_id)
+            all_tracks.extend(tracks)
+
+        n_tracks_zipped, zip_path = fb_file_handler.sync(
+            username=username,
+            tracks_to_zip=all_tracks
+        )
+        success = True
+
+    return {
+        'success': success,
         'nTracksExported': len(server_tracks_dict),
         'zipPath': zip_path,
         'reason': reason
