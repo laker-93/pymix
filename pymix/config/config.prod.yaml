@@ -28,7 +28,7 @@ logs_directory: logs
 user_root: /subbox/{user}
 db:
   path: /pymix/db/user_db.json
-max_library_size: 10*1024*1024*1024 # 10GB
+max_library_size: 10737418240 # 10GB
 max_number_of_users: 10
 max_number_of_tracks: 1000
 # number of seconds after which the export job will be updated with number of files written to zip during export job

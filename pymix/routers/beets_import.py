@@ -178,16 +178,14 @@ async def beets_import(
 
 async def run_import_task(rekordbox_xml_controller, username, public, job_id, db_controller):
     success = True
-    beets_output = ""
     try:
         logger.info(f'starting import for user {username}')
-        beets_output = await rekordbox_xml_controller.consume_from_filebrowser(username, public)
+        await rekordbox_xml_controller.consume_from_filebrowser(username, public)
     except Exception as ex:
         success = False
         msg = f'error occurred importing the following path in to beets for user {username} {repr(ex)}'
         logger.error(msg, exc_info=True)
     finally:
-        logger.info(f"beets output {beets_output}")
         logger.info(f'marking import job for user {username} as {success}')
         db_controller.job_completed(job_id, success)
 

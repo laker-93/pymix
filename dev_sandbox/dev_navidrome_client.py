@@ -15,9 +15,9 @@ async def get_track_by_name(
     #await get_playlist_api(navidrome_client)
     resp = await navidrome_client.query_track_by_name(
         {
-            'username': 'test110125',
-            'password': 'test110125',
-            'subsonic_port': 4533,
+            'username': 'test220225',
+            'password': 'test220225',
+            'subsonic_port': 51235,
         },
         name)
     print(resp)

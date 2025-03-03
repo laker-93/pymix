@@ -249,10 +249,10 @@ class DbController:
         self._db.clear_cache()
         total_size = sum(file.stat().st_size for file in Path(f'/private-music/{username}').rglob('*'))
         user = self.get_user(username)
-        if total_size + size_import > user['max_library_size']:
-            return True
-        else:
+        if int(total_size + size_import) > int(user['max_library_size']):
             logger.error(
                 f"user {username} has exceeded max size of library of {user['max_library_size']} with current size: {total_size} and attempted import {size_import}"
             )
+            return True
+        else:
             return False

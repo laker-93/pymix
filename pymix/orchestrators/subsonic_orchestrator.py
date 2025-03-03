@@ -75,11 +75,14 @@ class SubsonicOrchestrator:
         for track in tracks_to_update:
             name = track.name
             try:
-                subsonic_track = await self._subsonic_client.query_track_by_name(user, name)
+                matched_track = await self._subsonic_client.get_track_match(user, title=name, artist=track.artist)
             except (KeyError, AssertionError) as ex:
                 logger.warning(f'unable to find track in navidrome {track}. This track will not be imported properly. Please ensure name of track in rekordbox is correct. Exception {ex}')
             else:
-                track.sub_track_id = subsonic_track.sub_track_id
+                if matched_track:
+                    track.sub_track_id = matched_track.sub_track_id
+                else:
+                    logger.warning(f'unable to find track in navidrome {track}. This track will not be imported properly. Please ensure name of track in rekordbox is correct.')
 
     async def get_all_tracks(self, user: dict) -> AsyncIterator[List[SubBoxTrack]]:
         return self._subsonic_client.get_all_tracks(user, 50)
