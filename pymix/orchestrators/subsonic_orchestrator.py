@@ -49,8 +49,17 @@ class SubsonicOrchestrator:
     async def create_playlists(self, user: dict, subbox_playlists: List[SubBoxPlaylist]):
         """
         Given list of subbox playlists (e.g. formed from parsing XML), create the playlist structure in navidrome.
+        If a playlist already exists, it will be deleted and recreated.
         """
+        all_playlists = await self._subsonic_client.get_playlists(user)
+        existing_playlist_map = dict()
+        if all_playlists:
+            for playlist in all_playlists:
+                existing_playlist_map[playlist.name] = playlist
         for playlist in subbox_playlists:
+            if playlist.name in existing_playlist_map:
+                # delete the existing playlist
+                await self._subsonic_client.delete_playlist(user, existing_playlist_map[playlist.name].subsonic_id)
             await self._subsonic_client.create_playlist(user, playlist.name, playlist.tracks)
 
     async def set_ratings(self, user: dict, tracks: List[SubBoxTrack]):

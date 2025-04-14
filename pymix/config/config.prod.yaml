@@ -13,6 +13,8 @@ containers:
     docker_compose_file: /subbox/docker-compose/navidrome/docker-compose.yml
     env_file: /subbox/docker-compose/navidrome/env
   filebrowser:
+    user_root: /user-updownloads
+    data_watch: /user-updownloads/{user}/watch
     data_uploads: /user-updownloads/{user}/uploads
     data_downloads: /user-updownloads/{user}/downloads
     docker_compose_file: /subbox/docker-compose/filebrowser/docker-compose.yml

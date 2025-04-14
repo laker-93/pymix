@@ -13,8 +13,8 @@ logger = logging.getLogger(__name__)
 
 
 @inject
-async def main(loop, app_config: Dict = Provide[Container.config]):
-    app = create_app()
+async def main(loop, container, app_config: Dict = Provide[Container.config]):
+    app = create_app(container)
     config = Config(app=app, loop=loop,
                     host=app_config["application_settings"]["app_host"],
                     port=app_config["application_settings"]["app_port"],
@@ -33,7 +33,7 @@ if __name__ == '__main__':
     container.wire(modules=[__name__])
     loop = asyncio.get_event_loop()
     try:
-        loop.run_until_complete(main(loop))
+        loop.run_until_complete(main(loop, container))
     except Exception as ex:
         logger.warning(f"loop unexpectedly closed with error {repr(ex)}")
         loop.close()

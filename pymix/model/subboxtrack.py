@@ -9,12 +9,13 @@ import dataclasses
 class SubBoxTrack:
     name: str
     artist: str
-    path: Path
     album: str
+    path: Optional[Path] = None
     rating: int = 0
     genre: Optional[str] = None
     # the Rekordbox XML TrackID.
     track_id: Optional[int] = None
+    track_number: Optional[str] = None
     # the subsonic TrackID.
     sub_track_id: Optional[int] = None
 

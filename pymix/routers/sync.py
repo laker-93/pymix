@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Annotated, List, Tuple
+from typing import Dict, Annotated, List, Tuple, Optional
 
 from dependency_injector.wiring import Provide, inject
 from fastapi import APIRouter, Depends, Query, Cookie
@@ -20,6 +20,76 @@ logger = logging.getLogger(__name__)
 class ClientTracks(BaseModel):
     tracks: list[Dict[str, str]]
 
+class Track(BaseModel):
+    title: str
+    artist: str
+    album: Optional[str] = None
+
+class MatchedTrack(BaseModel):
+    title: str
+    artist: str
+    matched: bool
+
+class Tracks(BaseModel):
+    tracks: List[Track]
+
+class MatchedTracksResponse(BaseModel):
+    success: bool
+    reason: str
+    tracks: List[MatchedTrack]
+
+
+@router.post("/sync/match_tracks", tags=["sync"])
+@inject
+async def match_tracks(
+        tracks: Tracks,
+        session_id: str | None = Cookie(None),
+        username: str | None = None,
+        db_controller: DbController = Depends(Provide[Container.db_controller]),
+        subsonic_client: SubsonicClient = Depends(Provide[Container.subsonic_client])
+) -> MatchedTracksResponse:
+
+    success = False
+    reason = ""
+    matched_tracks = []
+    user = None
+    if not username and not session_id:
+        reason = "must have a session id to identify user"
+    if username:
+        try:
+            user = db_controller.get_user(username)
+        except Exception as ex:
+            logger.error(f'error occurred getting user for {username}', exc_info=True)
+            reason = repr(ex)
+    if session_id:
+        try:
+            user = db_controller.get_user_by_session_id(session_id)
+        except Exception as ex:
+            logger.error(f'error occurred getting user for session id {session_id}', exc_info=True)
+            reason = repr(ex)
+    if user:
+        for track in tracks.tracks:
+            match = await subsonic_client.get_track_match(user, track.title, track.artist, track.album)
+
+            if match:
+                logger.info(f'matched track {track} with {match}')
+                matched_tracks.append(MatchedTrack(
+                    title=match.name,
+                    artist=match.artist,
+                    matched=True
+                ))
+            else:
+                matched_tracks.append(MatchedTrack(
+                    title=track.title,
+                    artist=track.artist,
+                    matched=False
+                ))
+        success = True
+    return MatchedTracksResponse(
+        success=success,
+        reason=reason,
+        tracks=matched_tracks
+    )
 
 @router.post("/sync", tags=["sync"])
 @inject
