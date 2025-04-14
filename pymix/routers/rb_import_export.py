@@ -92,13 +92,14 @@ async def run_import_task(rekordbox_xml_controller, username, job_id, db_control
     success = True
     beets_output = ""
     try:
-        logger.info(f'starting RB import track staging for user {username}')
-        xml_path, audio_path = fb_file_handler.get_xml_audio_path(username)
+        xml_path, zip_path, audio_path = fb_file_handler.get_xml_data_path(username)
+        logger.info(f'starting RB import track staging for user {username} on {xml_path} and {audio_path}')
         logger.info(f'finished RB import track staging for user {username}')
         beets_output = await rekordbox_xml_controller.create_subsonic_playlists_from_xml(
             user=user,
             xml_path=xml_path,
-            audio_files_to_import=audio_path
+            zip_path=zip_path,
+            audio_path=audio_path
         )
         logger.info(f'finished RB import for user {username}')
     except Exception as ex:

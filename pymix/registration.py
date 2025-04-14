@@ -1,19 +1,44 @@
+from contextlib import asynccontextmanager
+
+import anyio
 import yaml
 import sys
 from pathlib import Path
 
+from anyio import create_memory_object_stream
 from toredocore.logger import initialise_logger
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from pymix import constants
 from pymix.containers import Container
+from pymix.handlers.filebrowser_file_handler import poll_watchdir, trigger_processing
 from pymix.routers import maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, match_tracks
 
 
-def create_app():
+
+@asynccontextmanager
+async def lifespan(app: FastAPI, container):
+    # todo create anyio mem obj stream
+    send_stream, receive_stream = create_memory_object_stream[tuple[str, list[Path]]]()
+
+    db_controller = container.db_controller()
+    rb_xml_controller = await container.rekordbox_xml_controller()
+    directory = Path(container.config()['containers']['filebrowser']['user_root'])
+    users = [subdir.name for subdir in directory.iterdir() if subdir.is_dir()]
+    watchdir = container.config()['containers']['filebrowser']['data_watch']
+    watchpaths = [Path(watchdir.format(user=user)) for user in users]
+    for p in watchpaths:
+        p.mkdir(parents=True, exist_ok=True)
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(poll_watchdir, watchpaths, send_stream, db_controller)
+        tg.start_soon(trigger_processing, receive_stream, rb_xml_controller)
+        yield
+
+def create_app(container):
     app = FastAPI(
         title=constants.title, version=constants.version, description=constants.description,
+        lifespan=lambda app: lifespan(app, container),
         # required for dev testing
         root_path="/pymix"
     )

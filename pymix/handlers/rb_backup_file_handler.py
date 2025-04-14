@@ -1,12 +1,14 @@
 import logging
 import zipfile
 
+import filetype
 import music_tag
 import shutil
 from pathlib import Path
 
 from pyrekordbox.xml import Track
 
+from pymix.model.subboxtrack import SubBoxTrack
 from pymix.orchestrators.rekordbox_xml_orchestrator import RekordboxXMLOrchestrator
 
 logger = logging.getLogger(__name__)
@@ -96,12 +98,44 @@ class RBBackupFileHandler:
         n_updated_tracks = self.restore_track_meta(username, audio_files_zip)
         return n_updated_tracks
 
+    def stage_for_import(self, username: str, audio_files: Path):
+        """
+        Move the audio file to the beets docker shared directory that is used for import in to beets.
+        """
+        beets_data_path = self._beets_data_path.format(user=username)
+        beets_data_path = Path(beets_data_path)
+        for item in audio_files.rglob('*'):
+            if item.is_file():
+                mime_type = filetype.guess_mime(item)
+                if mime_type and mime_type.split('/')[0] == 'audio':
+                    self._restore_title_if_not_present(item)
+                    relative_path = item.relative_to(audio_files)
+                    suffix = item.suffix
+                    destination = beets_data_path / relative_path
+                    if not suffix:
+                        extension = filetype.guess_extension(item)
+                        if extension:
+                            destination = destination.with_suffix(f'.{extension}')
+                        else:
+                            logger.error(f'unknown file type for {item}')
+
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    logger.info(f'staging {item} to {destination}')
+                    shutil.move(str(item), str(destination))
 
     @staticmethod
-    def _restore_tags(audio_file: Path, track: Track):
+    def _restore_tags(audio_file: Path, track: SubBoxTrack):
         f = music_tag.load_file(str(audio_file))
-        f['album'] = track.Album
-        f['artist'] = track.Artist
-        f['tracktitle'] = track.Name
-        f['tracknumber'] = track.TrackNumber
+        f['album'] = track.album
+        f['artist'] = track.artist
+        f['tracktitle'] = track.name
+        if track.track_number:
+            f['tracknumber'] = track.track_number
+        f.save()
+
+    @staticmethod
+    def _restore_title_if_not_present(audio_file: Path):
+        f = music_tag.load_file(str(audio_file))
+        if not f['tracktitle']:
+            f['tracktitle'] = audio_file.name
         f.save()

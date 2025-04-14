@@ -21,8 +21,15 @@ class RekordboxXMLOrchestrator:
     def create_xml(self, xml_path: Optional[Path] = None):
         self._rekordbox_xml = self._rekordbox_xml_factory.create_rekordbox_xml(xml_path)
 
-    def get_track_by_id(self, track_id: int) -> Track:
-        return self._rekordbox_xml.get_track(TrackID=track_id)
+    def get_track_by_id(self, track_id: int) -> SubBoxTrack:
+        rb_track = self._rekordbox_xml.get_track(TrackID=track_id)
+        return SubBoxTrack(
+            name=rb_track.Name,
+            artist=rb_track.Artist,
+            album=rb_track.Album,
+            path=Path(rb_track.Location),
+            track_number=rb_track.TrackNumber,
+        )
 
     @staticmethod
     def _get_folders_playlist_from_name(playlist_name: str) -> (List[str], str):

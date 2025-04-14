@@ -71,9 +71,9 @@ async def query(navidrome_client, query):
     print(resp)
 
 async def main():
-    app = create_app()
     container = create_container()
     container.wire(modules=[__name__])
+    app = create_app(container)
     loop = asyncio.get_event_loop()
     subsonic_client = await container.subsonic_client()
     await get_track_by_name(subsonic_client, 'B. C. - Stronghold')

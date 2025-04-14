@@ -104,10 +104,10 @@ class RekordboxXMLController:
         return duplicates_paths
 
     # todo this controller is overloaded; this method has nothing to do with rekordbox xml and should live elsewhere.
-    async def consume_from_filebrowser(self, username: str, public: bool) -> str:
-        return await anyio.to_thread.run_sync(self._consume_from_filebrowser, username, public)
+    async def consume_from_filebrowser(self, username: str, public: bool, watch: bool = False) -> str:
+        return await anyio.to_thread.run_sync(self._consume_from_filebrowser, username, public, watch)
 
-    def _consume_from_filebrowser(self, username: str, public: bool) -> str:
+    def _consume_from_filebrowser(self, username: str, public: bool, watch) -> str:
         """
         # steps:
         # 1. user uploads to filebrowser
@@ -115,7 +115,7 @@ class RekordboxXMLController:
         # 3. do beet import
         """
 
-        self._file_browser_file_handler.stage_for_import(username, public)
+        self._file_browser_file_handler.stage_for_import(username, public, watch)
         # 1. invoke beets import on the audio files to import
         # can set to interactive with tty to pipe docker stdin input/output to terminal for user feedback.
         # beets config set to quiet mode and fallback of 'asis'. If user needs to correct later, they will have to
@@ -140,7 +140,7 @@ class RekordboxXMLController:
                 logger.info(f'{log_type}: {log.decode()}')
             logger.info("finished beet write command")
 
-        self._file_browser_file_handler.remove_fb_data_path(username)
+        self._file_browser_file_handler.remove_fb_data_path(username, watch)
         self._rb_backup_file_handler.clean_up_beets_import_tree(username, public)
         # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
         self._get_duplicates(username, public)
@@ -191,15 +191,17 @@ class RekordboxXMLController:
         # todo remove any playlists that have no tracks
         self._rekordbox_xml_orchestrator.save_xml(xml_output_path)
 
-    def _import_to_beets(self, username: str, audio_files_to_import: Path):
+    def _import_to_beets(self, username: str, zip_path: Optional[Path], audio_path: Optional[Path]):
         """
         Import into beets in quiet mode. Any exceptions will interrupt the process.
         beets should import in to the directory navidrome is working off.
         Users can use APIs after import to correct any mistakes from the beets quiet import.
         """
-        self._rb_backup_file_handler.restore_track_meta_and_stage_for_import(username, audio_files_to_import)
+        if zip_path:
+            self._rb_backup_file_handler.restore_track_meta_and_stage_for_import(username, zip_path)
+        if audio_path:
+            self._rb_backup_file_handler.stage_for_import(username, audio_path)
         # 1. invoke beets import on the audio files to import
-
         # set a custom field of the username that uploaded the track. This allows to query tracks that a username has uploaded.
         # group-albums to allow importing correctly tracks with different album tags.
         beets_command = f"beet import --group-albums --set user={username} -q /downloads"
@@ -220,12 +222,12 @@ class RekordboxXMLController:
         # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
         self._get_duplicates(username, False)
 
-    async def create_subsonic_playlists_from_xml(self, user: dict, xml_path: Path, audio_files_to_import: Optional[Path]):
+    async def create_subsonic_playlists_from_xml(self, user: dict, xml_path: Path, zip_path: Optional[Path], audio_path: Optional[Path]):
         username = user['username']
         self._rekordbox_xml_orchestrator.create_xml(xml_path)
 
-        if audio_files_to_import:
-            await anyio.to_thread.run_sync(self._import_to_beets, username, audio_files_to_import)
+        if zip_path or audio_path:
+            await anyio.to_thread.run_sync(self._import_to_beets, username, zip_path, audio_path)
         # must trigger a navidrome scan so the tracks will be queryable when creating and moving in to playlists in the
         # next step
         await self._subsonic_orchestrator.scan(user)

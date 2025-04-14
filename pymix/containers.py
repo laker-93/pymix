@@ -107,6 +107,7 @@ class Container(containers.DeclarativeContainer):
         config.rekordbox.zip_name,
         config.containers.subsonic.serving_music_path_base,
         config.containers.filebrowser.data_uploads,
+        config.containers.filebrowser.data_watch,
         config.containers.filebrowser.data_downloads,
         config.containers.beets.data,
         config.containers.beets.data_public,
