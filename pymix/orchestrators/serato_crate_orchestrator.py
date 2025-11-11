@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import List, Iterable
 
 import music_tag
-from pyserato.crate import Crate, Builder
+from pyserato.builder import Builder
+from pyserato.model.crate import Crate
 from pyserato.util import DuplicateTrackError
 
 from pymix.model.subboxplaylist import SubBoxPlaylist

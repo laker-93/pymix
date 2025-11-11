@@ -50,6 +50,10 @@ class ServicesOrchestrator:
             user_dir = Path(user_dir)
             user_dir.mkdir(parents=True, exist_ok=True)  # todo change to false when launch
 
+            user_dir = self._config['containers']['subsonic']['music_backup_path'].format(user=username)
+            user_dir = Path(user_dir)
+            user_dir.mkdir(parents=True, exist_ok=True)  # todo change to false when launch
+
             user_dir = self._config['containers']['beets']['data'].format(user=username)
             user_dir = Path(user_dir)
             user_dir.mkdir(parents=True, exist_ok=True)  # todo change to false when launch

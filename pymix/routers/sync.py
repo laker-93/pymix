@@ -72,6 +72,7 @@ async def match_tracks(
             match = await subsonic_client.get_track_match(user, track.title, track.artist, track.album)
 
             if match:
+                match = match[0]
                 logger.info(f'matched track {track} with {match}')
                 matched_tracks.append(MatchedTrack(
                     title=match.name,
@@ -125,35 +126,46 @@ async def sync(
         else:
             username = user['username']
     if user:
-        client_sub_tracks = []
+        client_sub_tracks = {}
+        match_similarities = {}
         for client_track in client_tracks.tracks:
-            sub_tracks = await subsonic_client.query_tracks_by(
+            sub_track = await subsonic_client.get_track_match(
                 user=user,
                 title=client_track['title'],
                 artist=client_track['artist'],
-                album=client_track['album'],
+                album=client_track.get('album'),
             )
             # if have an exact match then can exclude it as the client already having it.
-            if len(sub_tracks) == 1:
-                client_sub_tracks.append(
-                    sub_tracks[0]
-                )
-            else:
-                logger.info(f'no track found matching {client_track}. Adding track to tracks to be deleted on client.')
-                client_tracks_to_remove.append(client_track)
+            if sub_track:
+                sub_track, similarity = sub_track
+                assert sub_track.sub_track_id is not None
+                if sub_track.sub_track_id in client_sub_tracks:
+                    if similarity > match_similarities.get(sub_track.sub_track_id, 0):
+                        client_sub_tracks[sub_track.sub_track_id] = sub_track
+                        match_similarities[sub_track.sub_track_id] = similarity
+                else:
+                    client_sub_tracks[sub_track.sub_track_id] = sub_track
+                    match_similarities[sub_track.sub_track_id] = similarity
+
 
         async for server_tracks in subsonic_client.get_all_tracks(user, 200):
             for server_track in server_tracks:
-                logger.debug(f'adding server track {server_track}')
                 server_tracks_dict[server_track.sub_track_id] = server_track
 
-        client_tracks_to_remove = []
-        for client_track in client_sub_tracks:
+        logger.info(f'got {len(client_tracks.tracks)} raw client tracks')
+        logger.info(f'got {len(server_tracks_dict)} from the server')
+        logger.info(f'got {len(client_sub_tracks)} client matches')
+
+
+        for client_track in client_sub_tracks.values():
             if client_track.sub_track_id not in server_tracks_dict:
+                logger.debug(f'client match {client_track} not present in server tracks')
                 client_tracks_to_remove.append(client_track)
             else:
+                logger.debug(f'track {client_track} is present on both server and client')
                 server_tracks_dict.pop(client_track.sub_track_id)
 
+        logger.info(f'missing server tracks {list(server_tracks_dict.values())}')
         n_tracks_zipped, zip_path = fb_file_handler.sync(
             username=username,
             tracks_to_zip=list(server_tracks_dict.values())

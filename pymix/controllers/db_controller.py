@@ -1,7 +1,10 @@
+import json
 import uuid
 import logging
+import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
+from zoneinfo import ZoneInfo
 
 from tinydb import TinyDB, Query
 from tinydb.table import Document
@@ -18,11 +21,136 @@ class DbController:
         self._app_env = app_env
         self._session_to_user_schema = ('session_id', 'user_id')
         self._user_schema = ('username', 'password', 'email', 'user_id', 'beets_port', 'subsonic_port', 'max_library_size')
+        self._library_schema = (
+            'user_id',  # FK -> users.user_id
+            'subbox_id',  # unique per user (primary identifier for track)
+            'beet_id',
+            'cuedata',
+            'source_app',
+            'updated_at',
+            'version'
+        )
+        self._meta_history_schema = (
+            'user_id',  # FK -> users.user_id
+            'subbox_id',  # FK -> library.subbox_id
+            'version',  # int
+            'hash',  # checksum for diff
+            'cuedata',  # the JSON snapshot of that version
+            'source_app',  # where update came from
+            'change_type',  # 'upload', 'edit', 'sync', 'merge'
+            'changed_at',  # ISO timestamp
+        )
         self._user_jobs_schema = ('user_id', 'job_id')
         self._import_job_schema = ('job_id', 'name', 'n_tracks_to_import', 'total_n_imported_tracks', 'in_progress', 'result')
         self._export_job_schema = ('job_id', 'name', 'total_n_tracks_to_export', 'n_exported_tracks', 'in_progress', 'result')
         self._user_token_schema = ('user_id', 'token')
         self._max_library_size = max_library_size
+
+
+    def get_library_entry(
+        self,
+        username: str,
+        subbox_id: str,
+        version: Optional[int] = None
+    ) -> Optional[Dict[str, any]]:
+        """
+        Retrieve metadata for a given user's track.
+        If version is provided, look for that specific version (if stored).
+        Otherwise, return the latest record for that track.
+        """
+
+        try:
+            # --- 1️⃣ Resolve user_id ---
+            user = self.get_user(username)
+            user_id = user["user_id"]
+
+            # --- 2️⃣ Build query ---
+            Library = Query()
+            query = (Library.user_id == user_id) & (Library.subbox_id == subbox_id)
+
+            if version is not None:
+                query = query & (Library.version == version)
+                logger.info(f"Fetching metadata v{version} for subbox_id={subbox_id}, user={username}")
+            else:
+                logger.info(f"Fetching latest metadata for subbox_id={subbox_id}, user={username}")
+
+            library_table = self._db.table('library_table')
+            results = library_table.search(query)
+            if not results:
+                logger.warning(f"No metadata found for subbox_id={subbox_id}, user={username}")
+                return None
+            record = results.pop()
+            # --- 3️⃣ Parse JSON if needed ---
+            cuedata = record.get("cuedata")
+            if isinstance(cuedata, str):
+                try:
+                    cuedata = json.loads(cuedata)
+                except json.JSONDecodeError:
+                    logger.error(f"Invalid cuedata JSON for {subbox_id}, user={username}")
+                    cuedata = {}
+
+            # --- 4️⃣ Return normalized record ---
+            return {
+                "subbox_id": record.get("subbox_id"),
+                "username": username,
+                "version": record.get("version"),
+                "source_app": record.get("source_app"),
+                "updated_at": record.get("updated_at"),
+                "cuedata": cuedata,
+            }
+
+        except Exception as ex:
+            logger.error(
+                f"Error retrieving metadata for subbox_id={subbox_id}, user={username}: {repr(ex)}",
+                exc_info=True
+            )
+            raise
+
+    def update_metadata(
+            self,
+            username: str,
+            subbox_id: str,
+            cuedata: dict[str, any],
+            source_app: str,
+            change_type: str = "edit"  # upload, edit, sync, merge
+    ):
+        user = self.get_user(username)
+        user_id = user["user_id"]
+        now = datetime.datetime.now().timestamp()
+
+        # Fetch existing track
+        library_table = self._db.table('library_table')
+        Track = Query()
+        track_query = (Track.user_id == user_id) & (Track.subbox_id == subbox_id)
+        results = library_table.search(track_query)
+        if results:
+            existing = results.pop()
+            version = existing["version"] + 1
+        else:
+            version = 1
+
+        # Update or insert in library
+        new_entry = {
+            "user_id": user_id,
+            "subbox_id": subbox_id,
+            "cuedata": cuedata,
+            "source_app": source_app,
+            "updated_at": now,
+            "version": version,
+        }
+        library_table.upsert(new_entry, track_query)
+
+        # Log in meta_history
+        meta_history_table = self._db.table('meta_history_table')
+        meta_history_table.insert({
+            "user_id": user_id,
+            "subbox_id": subbox_id,
+            "version": version,
+            "cuedata": cuedata,
+            "source_app": source_app,
+            "change_type": change_type,
+            "changed_at": now
+        })
 
     def set_token(self, token: str):
         user_token_table = self._db.table('user_token_table')

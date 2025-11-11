@@ -1,10 +1,10 @@
 import logging
-import os
+import os.path
 from pathlib import Path
 from typing import List, Optional
+from xml.etree.ElementTree import ElementTree, indent
 
-from pyrekordbox import RekordboxXml
-from pyrekordbox.xml import Node, Track, RATING_MAPPING, XmlDuplicateError
+from pyrekordbox.rbxml import Node, RATING_MAPPING, XmlDuplicateError
 
 from pymix.factories.rekordbox_xml_factory import RekordboxXMLFactory
 from pymix.model.subboxplaylist import SubBoxPlaylist
@@ -73,14 +73,15 @@ class RekordboxXMLOrchestrator:
                 )
             )
 
-    def create_rekordbox_xml_playlist(self, playlist_name: str) -> Node:
+    def create_rekordbox_xml_playlist(self, name: str) -> Node:
         """
         :param playlist_name: Of the custom navidrome format <genre-subgenre-playlist>
         :return:
         """
-        folders, playlist_name = self._get_folders_playlist_from_name(playlist_name)
+        folders, playlist_name = self._get_folders_playlist_from_name(name)
         playlist_root = self._create_playlist_folders(folders) if folders else self._rekordbox_xml
         new_playlist = playlist_root.add_playlist(playlist_name)
+        logger.info(f'created playlist with name {playlist_name}')
         return new_playlist
 
     def add_track_to_rekordbox_playlist(self, user_root: str, track: SubBoxTrack, playlist: Node, force: bool = True):
@@ -88,6 +89,8 @@ class RekordboxXMLOrchestrator:
         Add track in playlist. Optionally force the track in to playlist even if the track is already in the XML.
         """
         rekordbox_track = None
+        logger.info(track.name)
+        logger.info(f'attempting to add track {track} to playlist {playlist}')
         try:
             rekordbox_track = self._rekordbox_xml.add_track(
                 f'{user_root}/{track.path}',
@@ -97,6 +100,7 @@ class RekordboxXMLOrchestrator:
                 Rating=RATING_MAPPING.inverse[track.rating],
                 Genre=track.genre
             )
+            logger.info(f'got track {rekordbox_track}')
             logger.debug(f"added track {str(track.path)}")
         except XmlDuplicateError:
             if force:
@@ -106,10 +110,11 @@ class RekordboxXMLOrchestrator:
                 if track_id:
                     rekordbox_track = self._rekordbox_xml.get_track(TrackID=track_id)
                 else:
+                    #rekordbox_track = self._rekordbox_xml.get_track(Location=os.path.normpath(f'{user_root}/{track.path}'))
                     # the rekord box get_track api is stupid so do some very inefficient work around
                     #rekordbox_track = self._rekordbox_xml.get_track(index=1, Location=os.path.normpath(str(track.path)))
                     for other in self._rekordbox_xml.get_tracks():
-                        if user_root + '/' + str(track.path) == other.Location:
+                        if os.path.normpath(f'{user_root}/{track.path}') == other.Location:
                             rekordbox_track = other
                             break
                 assert rekordbox_track
@@ -120,7 +125,7 @@ class RekordboxXMLOrchestrator:
                 logger.info(f"track {track} is already present. Not forcefully adding to playlist {playlist}.")
         else:
             playlist.add_track(rekordbox_track.TrackID)
-            logger.info(f"track {rekordbox_track} added to {playlist}")
+            logger.info(f"track {rekordbox_track} from {track} added to {playlist}")
 
 
     def _get_playlist_folder(self, playlist_folder_name: str, parent_folder: Optional[Node] = None) -> Optional[Node]:
@@ -154,10 +159,19 @@ class RekordboxXMLOrchestrator:
                 playlist_folder
             )
 
-
     def get_all_xml_playlists(self) -> List[Node]:
         all_playlists: List[Node] = self._rekordbox_xml.root_playlist_folder.get_playlists()
         return all_playlists
+
+    def get_playlist(self, name: str) -> Optional[Node]:
+        try:
+            playlist = self._rekordbox_xml.get_playlist(name)
+            # force an exception if the playlist does not exist
+            str(playlist)
+            assert playlist.is_playlist
+        except Exception:
+            playlist = None
+        return playlist
 
     def get_all_xml_tracks(self) -> List[SubBoxTrack]:
         all_tracks = []
@@ -176,5 +190,7 @@ class RekordboxXMLOrchestrator:
         return all_tracks
 
     def save_xml(self, xml_output_path: Path):
-        self._rekordbox_xml.save(str(xml_output_path))
-
+        tree = ElementTree(self._rekordbox_xml._root)
+        indent(tree, space="\t", level=0)
+        tree.write(xml_output_path, encoding='utf-8', xml_declaration=True)
+        logger.info(f'saved xml to {xml_output_path}')

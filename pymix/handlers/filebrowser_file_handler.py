@@ -186,12 +186,13 @@ class FileBrowserFileHandler:
         output_path = str(dst_dir.with_suffix('.zip'))
         n_files_written = 0
         src_dir = self._serving_music_path_base.format(user=username)
-        with zipfile.ZipFile(output_path,'w', zipfile.ZIP_DEFLATED) as zip_file:
-            for entry in tracks_to_zip:
-                entry_dir = str(entry.path).removeprefix('/' + self._zip_name)
-                p = Path(src_dir + entry_dir)
-                zip_file.write(p, Path(self._zip_name) / p.relative_to(src_dir))
-                n_files_written += 1
+        if len(tracks_to_zip) > 0:
+            with zipfile.ZipFile(output_path,'w', zipfile.ZIP_DEFLATED) as zip_file:
+                for entry in tracks_to_zip:
+                    entry_dir = str(entry.path).removeprefix('/' + self._zip_name)
+                    p = Path(src_dir + entry_dir)
+                    zip_file.write(p, Path(self._zip_name) / p.relative_to(src_dir))
+                    n_files_written += 1
         return n_files_written, dst_dir
 
     def export_subsonic_music(self, db_path: str, app_env: str, username: str, job_id: str) -> int:

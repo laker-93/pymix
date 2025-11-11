@@ -52,20 +52,15 @@ async def match_tracks(
             username = user['username']
     if user:
         for client_track in client_tracks.tracks:
-            sub_tracks = await subsonic_client.query_tracks_by(
+            sub_track = await subsonic_client.get_track_match(
                 user=user,
                 title=client_track['title'],
                 artist=client_track['artist'],
             )
             # if have an exact match then can exclude it as the client already having it.
-            if len(sub_tracks) == 1:
+            if sub_track:
                 matched_tracks.append(
-                    sub_tracks[0]
-                )
-            elif len(sub_tracks) > 1:
-                # todo match on similarity
-                matched_tracks.append(
-                    sub_tracks[0]
+                    sub_track[0]
                 )
             else:
                 missing_tracks.append(client_track)

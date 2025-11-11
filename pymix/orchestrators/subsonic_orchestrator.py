@@ -89,7 +89,8 @@ class SubsonicOrchestrator:
                 logger.warning(f'unable to find track in navidrome {track}. This track will not be imported properly. Please ensure name of track in rekordbox is correct. Exception {ex}')
             else:
                 if matched_track:
-                    track.sub_track_id = matched_track.sub_track_id
+                    match = matched_track[0]
+                    track.sub_track_id = match.sub_track_id
                 else:
                     logger.warning(f'unable to find track in navidrome {track}. This track will not be imported properly. Please ensure name of track in rekordbox is correct.')
 

@@ -1,10 +1,10 @@
 from pathlib import Path
 import aiohttp
+from pyserato.builder import Builder
 
 from toredocore.providers.healthcheck.async_healthcheck_provider import AsyncHealthcheckProvider
 from toredocore.providers.healthcheck.healthcheck_dependency import HealthcheckDependency
 from dependency_injector import containers, providers
-from pyserato.crate import Builder
 
 from pymix.clients.beets_client import BeetsClient
 from pymix.clients.navidrome_client import NavidromeClient
@@ -120,7 +120,10 @@ class Container(containers.DeclarativeContainer):
         rekordbox_xml_orchestrator,
         rb_backup_file_handler,
         file_browser_file_handler,
-        config.rekordbox.restored_rb_output_root
+        subsonic_client,
+        config.rekordbox.restored_rb_output_root,
+        config.rekordbox.zip_name,
+        config.containers.subsonic.serving_music_path_base,
     )
 
     serato_crate_orchestrator = providers.Singleton(

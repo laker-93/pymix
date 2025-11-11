@@ -5,13 +5,20 @@ from typing import List, Optional
 import mediafile
 from beets.plugins import BeetsPlugin
 from beets.library import Item
+from mutagen.id3 import ID3, TBPM
 from python_on_whales import docker
 
+from pymix.clients.subsonic_client import SubsonicClient
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.handlers.rb_backup_file_handler import RBBackupFileHandler
 from pymix.model.subboxplaylist import SubBoxPlaylist
 from pymix.orchestrators.rekordbox_xml_orchestrator import RekordboxXMLOrchestrator
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
+from pyserato.encoders.serato_tags import clear_all_tags
+from pyserato.encoders.v2_mp3_encoder import V2Mp3Encoder
+from pyserato.model.hot_cue import HotCue
+from pyserato.model.track import Track
+from pyserato.model.hot_cue_type import HotCueType
 
 logger = logging.getLogger(__name__)
 
@@ -38,13 +45,19 @@ class RekordboxXMLController:
             rekordbox_xml_orchestrator: RekordboxXMLOrchestrator,
             rb_backup_file_handler: RBBackupFileHandler,
             file_browser_file_handler: FileBrowserFileHandler,
-            restored_db_output_root: str
+            subsonic_client: SubsonicClient,
+            restored_db_output_root: str,
+            zip_name: str,
+            serving_music_path_base: str
     ):
         self._subsonic_orchestrator = subsonic_orchestrator
         self._rekordbox_xml_orchestrator = rekordbox_xml_orchestrator
         self._rb_backup_file_handler = rb_backup_file_handler
         self._file_browser_file_handler = file_browser_file_handler
         self._restored_db_output_root = restored_db_output_root
+        self._subsonic_client = subsonic_client
+        self._zip_name = zip_name
+        self._serving_music_path_base = serving_music_path_base
 
     def _create_rekordbox_xml_playlist(self, user_root: str, subsonic_playlist: SubBoxPlaylist):
         """
@@ -152,19 +165,6 @@ class RekordboxXMLController:
         subsonic_playlists = await self._subsonic_orchestrator.get_subsonic_playlists(user)
         if not subsonic_playlists:
             logger.info(f'no subsonic playlists found for user')
-        subsonic_tracks = await self._subsonic_orchestrator.get_subsonic_tracks(user)
-
-        rekordbox_tracks = self._rekordbox_xml_orchestrator.get_all_xml_tracks()
-
-        # If a track in the subsonic set is already present in rekordbox then must remove it before its playlist can be
-        # updated. Need the rekordbox TrackID to do this. Therefore, for those subsonic tracks that are already in
-        # rekordbox, take the TrackID from the rekordbox set so they can be dealt with.
-        for subsonic_track in subsonic_tracks:
-            for rekordbox_track in rekordbox_tracks:
-                if subsonic_track == rekordbox_track:
-                    logger.info(
-                        f"found subsonic track {subsonic_track} in rekordbox. Setting track id to {rekordbox_track.track_id}")
-                    subsonic_track.track_id = rekordbox_track.track_id
 
         if subsonic_playlists:
             # sort the playlists by name so duplicate folders of the same name are not created
@@ -173,12 +173,14 @@ class RekordboxXMLController:
             for subsonic_playlist in subsonic_playlists:
                 self._create_rekordbox_xml_playlist(user_root, subsonic_playlist)
         # add subsonic tracks that do not belong to a playlist to a default playlist.
-        default_playlist = self._rekordbox_xml_orchestrator.create_rekordbox_xml_playlist('NOPLAYLIST')
+        default_playlist = self._rekordbox_xml_orchestrator.get_playlist('NOPLAYLIST')
+        if not default_playlist:
+            default_playlist = self._rekordbox_xml_orchestrator.create_rekordbox_xml_playlist('NOPLAYLIST')
         # suppress the exception that would be raised due to attempting to add a track that is already present.
         import asyncio
         # todo figure this out - seem to need to pause to avoid getting disconnected from server
         await asyncio.sleep(2)
-        async for tracks in self._subsonic_orchestrator._subsonic_client.get_all_tracks(user, 400):
+        async for tracks in self._subsonic_client.get_all_tracks(user, 200):
             for track in tracks:
                 self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(
                     user_root,
@@ -232,10 +234,48 @@ class RekordboxXMLController:
         # next step
         await self._subsonic_orchestrator.scan(user)
         await anyio.sleep(2)
-        await self.create_subsonic_playlists(user, xml_path)
+        await self.set_data_from_xml(user)
 
-    async def create_subsonic_playlists(self, user: dict, xml_path: Path):
+    async def set_data_from_xml(self, user: dict):
 
+        await self._create_playlists_from_xml(user)
+        await self._set_metadata_from_xml(user)
+
+    async def _set_metadata_from_xml(self, user):
+        rated_tracks = list(filter(lambda t: t.rating > 0, self._rekordbox_xml_orchestrator.get_all_xml_tracks()))
+        await self._subsonic_orchestrator.update_tracks_with_subid(user, tracks=rated_tracks)
+        await self._subsonic_orchestrator.set_ratings(user, rated_tracks)
+        encoder = V2Mp3Encoder()
+        for track in self._rekordbox_xml_orchestrator._rekordbox_xml.get_tracks():
+            marks = track.marks
+            cues = list(filter(lambda m: m.Type == 'cue', marks))
+            # todo extract colors of cues
+            album = track.Album if track.Album else None
+            # the path on the server could be quite different to the path on the user side xml
+            track_match = await self._subsonic_client.get_track_match(user, track.Name, track.Artist, album)
+            assert track_match is not None, f"unable to get track match for {track}"
+            track_match = track_match[0]
+            entry_dir = str(track_match.path).removeprefix('/' + self._zip_name)
+            src_dir = self._serving_music_path_base.format(user=user['username'])
+            p = Path(src_dir + entry_dir)
+            clear_all_tags(p)
+            serato_track = Track.from_path(p)
+            for i, cue in enumerate(cues):
+                serato_track.add_hot_cue(
+                    HotCue(
+                        name=cue.Name,
+                        index=i,
+                        start=int(cue.Start * 1000),
+                        type=HotCueType.CUE
+                    )
+                )
+            encoder.write(serato_track)
+            tags = ID3(p)
+            bpm = track.AverageBpm
+            tags.add(TBPM(encoding=3, text=str(bpm)))
+            tags.save()
+
+    async def _create_playlists_from_xml(self, user: dict):
         # 4. create internal subbox playlist and tracks as below
         rekordbox_xml_playlists = self._rekordbox_xml_orchestrator.get_all_xml_playlists()
         subbox_playlists: List[SubBoxPlaylist] = []
@@ -248,10 +288,6 @@ class RekordboxXMLController:
         res = await self._subsonic_orchestrator.update_tracks_with_subid(user, subbox_playlists=subbox_playlists)
         # 8. create the playlists and set the rating of the track in navidrome from the rating taken from xml
         await self._subsonic_orchestrator.create_playlists(user, subbox_playlists)
-        rated_tracks = list(filter(lambda t: t.rating > 0, self._rekordbox_xml_orchestrator.get_all_xml_tracks()))
-        await self._subsonic_orchestrator.update_tracks_with_subid(user, tracks=rated_tracks)
-
-        await self._subsonic_orchestrator.set_ratings(user, rated_tracks)
 
     async def get_healthcheck(self) -> dict:
         return {

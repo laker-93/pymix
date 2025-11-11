@@ -1,11 +1,6 @@
 import asyncio
 
 from pathlib import Path
-from dependency_injector.wiring import inject, Provide
-from pyserato.crate import DEFAULT_SERATO_FOLDER
-
-from pymix.containers import Container
-from pymix.clients.subsonic_client import SubsonicClient
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.controllers.serato_controller import SeratoController
 from pymix.orchestrators.serato_crate_orchestrator import SeratoCrateOrchestrator

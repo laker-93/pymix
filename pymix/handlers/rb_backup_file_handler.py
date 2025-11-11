@@ -6,7 +6,7 @@ import music_tag
 import shutil
 from pathlib import Path
 
-from pyrekordbox.xml import Track
+from pyrekordbox.rbxml import Track
 
 from pymix.model.subboxtrack import SubBoxTrack
 from pymix.orchestrators.rekordbox_xml_orchestrator import RekordboxXMLOrchestrator

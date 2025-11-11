@@ -57,7 +57,7 @@ class SeratoController:
         import asyncio
         # todo figure this out - seem to need to pause to avoid getting disconnected from server
         await asyncio.sleep(2)
-        async for tracks in self._subsonic_orchestrator._subsonic_client.get_all_tracks(user, 400):
+        async for tracks in self._subsonic_orchestrator._subsonic_client.get_all_tracks(user, 200):
             for track in tracks:
                 self._serato_crate_orchestrator.add_track_to_crate(
                     user_root,
