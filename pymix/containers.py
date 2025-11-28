@@ -121,6 +121,7 @@ class Container(containers.DeclarativeContainer):
         rb_backup_file_handler,
         file_browser_file_handler,
         subsonic_client,
+        db_controller,
         config.rekordbox.restored_rb_output_root,
         config.rekordbox.zip_name,
         config.containers.subsonic.serving_music_path_base,

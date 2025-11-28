@@ -6,6 +6,7 @@ import logging
 
 from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
+from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -50,7 +51,7 @@ cue_schema = {
     "additionalProperties": False
 }
 
-@router.post("/metadata/update", tags=["metadata"])
+@router.post("/track/metadata/update", tags=["metadata"])
 @inject
 async def update_metadata(
     cuedata: Dict[str, Any] = Body(..., description="Cue and loop metadata in JSON form"),
@@ -122,7 +123,7 @@ async def update_metadata(
         "source_app": source_app,
     }
 
-@router.get("/metadata/{track_id}", tags=["metadata"])
+@router.get("/track/metadata/{track_id}", tags=["metadata"])
 @inject
 async def get_metadata(
     track_id: str = Path(..., description="Subbox track ID"),
@@ -182,4 +183,50 @@ async def get_metadata(
         "username": username,
         "track_id": track_id,
         "metadata": cuedata if success else None
+    }
+
+@router.delete("/track/{subbox_id}", tags=["metadata"])
+@inject
+async def get_metadata(
+        subbox_id: str = Path(..., description="Subbox track ID"),
+        session_id: str | None = Query(None, description="Session ID for authentication"),
+        username: str | None = Query(None, description="Username for authentication"),
+        db_controller: DbController = Depends(Provide[Container.db_controller]),
+        rekordbox_xml_controller: RekordboxXMLController = Depends(Provide[Container.rekordbox_xml_controller]),
+) -> Dict[str, Any]:
+    success = True
+    reason = ""
+    try:
+        if not username and session_id:
+            user = db_controller.get_user_by_session_id(session_id)
+            username = user["username"]
+            logger.info(f"Resolved session_id '{session_id}' to username '{username}'")
+    except Exception as ex:
+        success = False
+        reason = f"Error resolving user: {repr(ex)}"
+        logger.error(reason, exc_info=True)
+        return {"success": success, "reason": reason}
+    try:
+        deleted = db_controller.delete_track(username=username, subbox_id=subbox_id)
+        if not deleted:
+            success = False
+            reason = f"Delete failed for subbox_id={subbox_id} user {username}"
+            logger.warning(reason)
+        else:
+            await rekordbox_xml_controller.remove_track(
+                username=username,
+                subbox_id=subbox_id,
+                public=False
+            )
+    except Exception as ex:
+        success = False
+        reason = f"Error removing for {subbox_id} for user {username}: {repr(ex)}"
+        logger.error(reason, exc_info=True)
+
+    # --- 3️⃣ Return response ---
+    return {
+        "success": success,
+        "reason": reason,
+        "username": username,
+        "subbox_id": subbox_id,
     }

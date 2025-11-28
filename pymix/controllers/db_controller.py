@@ -21,10 +21,15 @@ class DbController:
         self._app_env = app_env
         self._session_to_user_schema = ('session_id', 'user_id')
         self._user_schema = ('username', 'password', 'email', 'user_id', 'beets_port', 'subsonic_port', 'max_library_size')
+        self._subbox_beets_map_schema = (
+            'user_id',  # FK -> users.user_id
+            'subbox_id',  # unique per user (primary identifier for track)
+            'beet_id',  # unique per user
+            "created_at"
+        )
         self._library_schema = (
             'user_id',  # FK -> users.user_id
             'subbox_id',  # unique per user (primary identifier for track)
-            'beet_id',
             'cuedata',
             'source_app',
             'updated_at',
@@ -46,6 +51,44 @@ class DbController:
         self._user_token_schema = ('user_id', 'token')
         self._max_library_size = max_library_size
 
+    def add_subbox_beet_map(self, username: str, subbox_id: str, beet_id: int) -> dict:
+        """
+        Adds or updates a mapping between subbox_id and beet_id for a specific user.
+        If the mapping already exists, it will be updated.
+        Returns the inserted or updated record.
+        """
+        try:
+            # 1️⃣ Get user_id
+            user = self.get_user(username)
+            user_id = user["user_id"]
+
+            Map = Query()
+            query = (Map.user_id == user_id) & (Map.subbox_id == subbox_id)
+
+            table = self._db.table('subbox_beets_map_table')
+            results = table.search(query)
+
+            if results:
+                raise ValueError(f"already got entry {results} with subbox id {subbox_id}")
+            else:
+                # 3️⃣ Insert new mapping
+                new_record = {
+                    "user_id": user_id,
+                    "subbox_id": subbox_id,
+                    "beet_id": beet_id,
+                    "created_at": datetime.datetime.now().isoformat()
+                }
+                table.insert(new_record)
+                logger.info(f"Inserted new beet mapping for {username}: {subbox_id} → {beet_id}")
+                result = new_record
+            return result
+
+        except Exception as ex:
+            logger.error(
+                f"Error adding beet mapping for {username} (subbox_id={subbox_id}, beet_id={beet_id}): {repr(ex)}",
+                exc_info=True
+            )
+            raise
 
     def get_library_entry(
         self,
@@ -79,6 +122,7 @@ class DbController:
             if not results:
                 logger.warning(f"No metadata found for subbox_id={subbox_id}, user={username}")
                 return None
+            assert len(results) == 1, f"have multiple entries with subbox id {subbox_id}. results: {results}."
             record = results.pop()
             # --- 3️⃣ Parse JSON if needed ---
             cuedata = record.get("cuedata")
@@ -98,6 +142,41 @@ class DbController:
                 "updated_at": record.get("updated_at"),
                 "cuedata": cuedata,
             }
+
+        except Exception as ex:
+            logger.error(
+                f"Error retrieving metadata for subbox_id={subbox_id}, user={username}: {repr(ex)}",
+                exc_info=True
+            )
+            raise
+
+    def delete_track(
+            self,
+            username: str,
+            subbox_id: str,
+    ) -> Optional[bool]:
+        """
+        Delete metadata for a track in the db.
+        TODO - set an is_active flag to false instead of deleting permanently.
+        """
+
+        try:
+            user = self.get_user(username)
+            user_id = user["user_id"]
+
+            Map = Query()
+            query = (Map.user_id == user_id) & (Map.subbox_id == subbox_id)
+
+            table = self._db.table('subbox_beets_map_table')
+            results = table.search(query)
+
+            if not results:
+                logger.info(f"no entry found for user {username} with subbox id {subbox_id}")
+                return None
+            assert len(results) == 1, f"got {len(results)} for {username} with subbox id {subbox_id}. Results: {results}"
+            result = results[0]
+            table.remove(doc_ids=[result.doc_id])
+            return True
 
         except Exception as ex:
             logger.error(
@@ -138,6 +217,7 @@ class DbController:
             "updated_at": now,
             "version": version,
         }
+
         library_table.upsert(new_entry, track_query)
 
         # Log in meta_history

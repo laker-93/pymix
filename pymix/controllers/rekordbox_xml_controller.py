@@ -1,14 +1,18 @@
 import logging
+import re
+
 import anyio
 from pathlib import Path
 from typing import List, Optional
 import mediafile
+import music_tag
 from beets.plugins import BeetsPlugin
 from beets.library import Item
 from mutagen.id3 import ID3, TBPM
 from python_on_whales import docker
 
 from pymix.clients.subsonic_client import SubsonicClient
+from pymix.controllers.db_controller import DbController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.handlers.rb_backup_file_handler import RBBackupFileHandler
 from pymix.model.subboxplaylist import SubBoxPlaylist
@@ -46,6 +50,7 @@ class RekordboxXMLController:
             rb_backup_file_handler: RBBackupFileHandler,
             file_browser_file_handler: FileBrowserFileHandler,
             subsonic_client: SubsonicClient,
+            db_controller: DbController,
             restored_db_output_root: str,
             zip_name: str,
             serving_music_path_base: str
@@ -54,6 +59,7 @@ class RekordboxXMLController:
         self._rekordbox_xml_orchestrator = rekordbox_xml_orchestrator
         self._rb_backup_file_handler = rb_backup_file_handler
         self._file_browser_file_handler = file_browser_file_handler
+        self._db_controller = db_controller
         self._restored_db_output_root = restored_db_output_root
         self._subsonic_client = subsonic_client
         self._zip_name = zip_name
@@ -85,9 +91,16 @@ class RekordboxXMLController:
         logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
         return result.split('\n')
 
-    # todo this controller is overloaded; this method has nothing to do with rekordbox xml and should live elsewhere.
+    # todo this controller is overloaded; the beets method has nothing to do with rekordbox xml and should live elsewhere.
     async def get_duplicates(self, username: str, public: bool) -> List[str]:
         return await anyio.to_thread.run_sync(self._get_duplicates, username, public)
+
+    async def remove_track(self, username: str, subbox_id: str, public: bool):
+        container_name = "beets" if public else f"beets{username}"
+        beets_command = f"beet rm -df subbox_id::{subbox_id}"
+        logger.info(f'running beet duplicates command {beets_command}')
+        result = docker.execute(container_name, beets_command.split())
+        logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
 
 
     def _get_duplicates(self, username: str, public: bool) -> Optional[List[str]]:
@@ -115,6 +128,73 @@ class RekordboxXMLController:
             item['dup'] = '1'
             item.write()
         return duplicates_paths
+
+    def _map_subbox_id_beet_id(self, username: str, public: bool):
+        """
+        After import, link beets track IDs to subbox IDs by reading the subbox_id
+        tag from each track using the music-tag package.
+        """
+        container_name = "beets" if public else f"beets{username}"
+
+        # 1️⃣ Run beets command to get all tracks missing subbox_id
+        beets_command = f"beet list -f $id:$path subbox_id::^$"
+        logger.info(f'running beet command {beets_command}')
+        # detach to avoid returning potentially large stdout from the docker logs.
+        # Instead logs are streamed incrementally
+        log_iter = docker.execute(container_name, beets_command.split(), stream=True)
+        beet_entries: List[tuple[int, str]] = []
+        # 2️⃣ Parse beet_id:path pairs from command output
+        for log_type, log in log_iter:
+            line = log.decode()
+            logger.info(f'{log_type}: {line}')
+            try:
+                beet_id, path = line.split(":", 1)
+            except ValueError:
+                logger.warning(f"Skipping malformed line in beets output: {line}")
+            else:
+                beet_entries.append((int(beet_id.strip()), path.strip()))
+
+        logger.info(f"Found {len(beet_entries)} tracks with unset subbox_id.")
+
+        # 3️⃣ Read subbox_id tag using music-tag for each path
+        for beet_id, path in beet_entries:
+            entry_dir = path.removeprefix('/music')
+            src_dir = self._serving_music_path_base.format(user=username)
+            p = Path(src_dir + entry_dir)
+            f = music_tag.load_file(p)
+            subbox_id = None
+            try:
+                # get not supported so use try/except
+                comment = f["comment"]
+            except KeyError:
+                pass
+            else:
+                match = re.search(r"subbox_id:(\d+)", comment.value)
+                if match:
+                    subbox_id = int(match.group(1))
+
+            if subbox_id is None:
+                logger.debug(f"No subbox_id tag found for {p}, skipping.")
+                continue
+
+            # 4️⃣ Add mapping to DB
+            self._db_controller.add_subbox_beet_map(
+                username=username,
+                subbox_id=subbox_id,
+                beet_id=beet_id
+            )
+
+            # 5 Run beets command to write subbox_id tag to track
+            beets_command = f"beet modify -y id:{beet_id} subbox_id={subbox_id}"
+            logger.info(f'running beet command {beets_command}')
+            # detach to avoid returning potentially large stdout from the docker logs.
+            # Instead logs are streamed incrementally
+            log_iter = docker.execute(container_name, beets_command.split(), stream=True)
+            for log_type, log in log_iter:
+                line = log.decode()
+                logger.info(f'{log_type}: {line}')
+            logger.info(f"Mapped subbox_id={subbox_id} → beet_id={beet_id}")
+
 
     # todo this controller is overloaded; this method has nothing to do with rekordbox xml and should live elsewhere.
     async def consume_from_filebrowser(self, username: str, public: bool, watch: bool = False) -> str:
@@ -157,6 +237,7 @@ class RekordboxXMLController:
         self._rb_backup_file_handler.clean_up_beets_import_tree(username, public)
         # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
         self._get_duplicates(username, public)
+        self._map_subbox_id_beet_id(username, public)
 
     async def create_rekordbox_xml_from_subsonic_playlists(self, user_root: str, user: dict, xml_path: Optional[Path], xml_output_path: Path):
         # todo this could be made a context manager to create, update then save the xml
@@ -223,6 +304,7 @@ class RekordboxXMLController:
         logger.info(f'finished post import clean up for {username}')
         # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
         self._get_duplicates(username, False)
+        self._map_subbox_id_beet_id(username, False)
 
     async def create_subsonic_playlists_from_xml(self, user: dict, xml_path: Path, zip_path: Optional[Path], audio_path: Optional[Path]):
         username = user['username']
