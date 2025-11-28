@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Body, Path, Query
 from jsonschema import validate, ValidationError
 from dependency_injector.wiring import inject, Provide
-from typing import Dict, Any
+from typing import Dict, Any, List
 import logging
 
 from pymix.containers import Container
@@ -185,48 +185,52 @@ async def get_metadata(
         "metadata": cuedata if success else None
     }
 
-@router.delete("/track/{subbox_id}", tags=["metadata"])
+@router.delete("/track", tags=["metadata"])
 @inject
-async def get_metadata(
-        subbox_id: str = Path(..., description="Subbox track ID"),
+async def delete_track(
+        subbox_ids: List[str] = Query(description="subbox ids of tracks to delete"),
         session_id: str | None = Query(None, description="Session ID for authentication"),
         username: str | None = Query(None, description="Username for authentication"),
         db_controller: DbController = Depends(Provide[Container.db_controller]),
         rekordbox_xml_controller: RekordboxXMLController = Depends(Provide[Container.rekordbox_xml_controller]),
 ) -> Dict[str, Any]:
-    success = True
-    reason = ""
+    all_success = True
+    results = []
     try:
         if not username and session_id:
             user = db_controller.get_user_by_session_id(session_id)
             username = user["username"]
             logger.info(f"Resolved session_id '{session_id}' to username '{username}'")
     except Exception as ex:
-        success = False
+        all_success = False
         reason = f"Error resolving user: {repr(ex)}"
         logger.error(reason, exc_info=True)
-        return {"success": success, "reason": reason}
-    try:
-        deleted = db_controller.delete_track(username=username, subbox_id=subbox_id)
-        if not deleted:
+        return {"success": all_success, "reason": reason, "results": results}
+    for subbox_id in subbox_ids:
+        reason = ""
+        success = True
+        try:
+            deleted = db_controller.delete_track(username=username, subbox_id=subbox_id)
+            if not deleted:
+                success = False
+                all_success = False
+                reason = f"Delete failed for subbox_id={subbox_id} user {username}"
+                logger.warning(reason)
+            else:
+                await rekordbox_xml_controller.remove_track(
+                    username=username,
+                    subbox_id=subbox_id,
+                    public=False
+                )
+        except Exception as ex:
             success = False
-            reason = f"Delete failed for subbox_id={subbox_id} user {username}"
-            logger.warning(reason)
-        else:
-            await rekordbox_xml_controller.remove_track(
-                username=username,
-                subbox_id=subbox_id,
-                public=False
-            )
-    except Exception as ex:
-        success = False
-        reason = f"Error removing for {subbox_id} for user {username}: {repr(ex)}"
-        logger.error(reason, exc_info=True)
+            all_success = False
+            reason = f"Error removing for {subbox_id} for user {username}: {repr(ex)}"
+            logger.error(reason, exc_info=True)
+        results.append({"subbox_id": subbox_id, "reason": reason, "success": success})
 
-    # --- 3️⃣ Return response ---
     return {
-        "success": success,
-        "reason": reason,
         "username": username,
-        "subbox_id": subbox_id,
+        "success": all_success,
+        "results": results
     }
