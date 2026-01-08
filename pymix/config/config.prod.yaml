@@ -7,7 +7,7 @@ containers:
   subsonic:
     #host: http://localhost:4533/navidrome
     host: http://navidrome{user}:4533/navidrome{user}
-    version: 1.16.1
+    version: 1.161
     music_path_base_to_remove: /music/private
     serving_music_path_base: /private-music/{user}
     music_backup_path: /private-music/backup/{user}

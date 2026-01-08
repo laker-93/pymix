@@ -88,11 +88,12 @@ def extract_track_name(full_string: str, artist: str, album=None) -> None | str:
 
 class SubsonicClient(BaseAPIClient):
     def __init__(self, host: str, session: aiohttp.ClientSession, version: str,
-                 music_path_base_to_remove: str, zip_name: Optional[str], app_env: str):
+                 music_path_base_to_remove: str, serving_music_path_base: str, zip_name: Optional[str], app_env: str):
         super().__init__(host, session)
         self._zip_name = '/' + zip_name + '/' if zip_name else ''
         self._version = version
         self._music_path_base_to_remove = music_path_base_to_remove
+        self._serving_music_path_base = serving_music_path_base
         self._app_env = app_env
 
     @staticmethod
@@ -145,7 +146,8 @@ class SubsonicClient(BaseAPIClient):
             ) for playlist in resp_playlists
         ]
 
-    def _parse_query(self, response: dict, search_result: str = 'searchResult2') -> Tuple[List[SubBoxTrack], int]:
+    def _parse_query(self, response: dict, username: str, search_result: str = 'searchResult2') -> Tuple[List[SubBoxTrack], int]:
+        src_dir = self._serving_music_path_base.format(user=username)
         try:
             resp = response['subsonic-response'][search_result]['song']
         except KeyError:
@@ -157,6 +159,7 @@ class SubsonicClient(BaseAPIClient):
                 name=entry['title'],
                 artist=entry['artist'],
                 path=Path(f"{self._zip_name}{entry['path'].removeprefix(self._music_path_base_to_remove)}"),
+                pymix_path=Path(src_dir + (entry['path'].removeprefix(self._music_path_base_to_remove))),
                 album=entry['album'],
                 rating=entry.get('userRating', 0),
                 genre=None if entry.get('genre') == '\x1a' else entry.get('genre'),
@@ -164,13 +167,15 @@ class SubsonicClient(BaseAPIClient):
             ) for entry in resp if 'private' in entry['path']
         ], n_items
 
-    def _parse_tracks(self, response: dict) -> List[SubBoxTrack]:
+    def _parse_tracks(self, response: dict, username: str) -> List[SubBoxTrack]:
         resp_playlist = response['subsonic-response']['playlist'].get('entry', [])
+        src_dir = self._serving_music_path_base.format(user=username)
         return [
             SubBoxTrack(
                 name=entry['title'],
                 artist=entry['artist'],
                 path=Path(f"{self._zip_name}{entry['path'].removeprefix(self._music_path_base_to_remove)}"),
+                pymix_path=Path(src_dir + (entry['path'].removeprefix(self._music_path_base_to_remove))),
                 album=entry['album'],
                 rating=entry.get('userRating', 0),
                 genre=entry.get('genre')
@@ -228,7 +233,7 @@ class SubsonicClient(BaseAPIClient):
         )
         response = await self.get(url)
         assert response
-        tracks = self._parse_tracks(response)
+        tracks = self._parse_tracks(response, username=username)
         return tracks
 
     async def get_track(self, user: dict, track_id: str):
@@ -263,7 +268,7 @@ class SubsonicClient(BaseAPIClient):
                 ]
             )
             response = await self.get(url)
-            tracks, n_items = self._parse_query(response, search_result='searchResult3')
+            tracks, n_items = self._parse_query(response, username=username, search_result='searchResult3')
             logger.info(f'yielding {len(tracks)} tracks from subsonic out of total of {n_items}')
             if len(tracks) == 0:
                 break
@@ -327,7 +332,7 @@ class SubsonicClient(BaseAPIClient):
         response = await self.get(url)
         logger.info(f'got response {response}')
         try:
-            tracks, _ = self._parse_query(response)
+            tracks, _ = self._parse_query(response, username=username)
         except Exception as ex:
             raise KeyError(f'unable to parse tracks from url query {url}') from ex
         return tracks
@@ -346,7 +351,7 @@ class SubsonicClient(BaseAPIClient):
         )
         response = await self.get(url)
         try:
-            tracks, _ = self._parse_query(response)
+            tracks, _ = self._parse_query(response, username=username)
         except Exception as ex:
             raise KeyError(f'unable to parse tracks from url query {url}') from ex
         return tracks

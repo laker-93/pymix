@@ -12,6 +12,7 @@ from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
+from pymix.model.original_track_meta import OriginalTracks
 
 router = APIRouter()
 
@@ -39,6 +40,44 @@ class MatchedTracksResponse(BaseModel):
     tracks: List[MatchedTrack]
 
 
+
+@router.post("/sync/map_meta", tags=["sync"])
+@inject
+async def map_meta(
+        tracks: OriginalTracks,
+        session_id: str | None = Cookie(None),
+        username: str | None = None,
+        db_controller: DbController = Depends(Provide[Container.db_controller]),
+        fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler])
+) -> dict:
+
+    success = False
+    reason = ""
+    user = None
+    if not username and not session_id:
+        reason = "must have a session id to identify user"
+    if username:
+        try:
+            user = db_controller.get_user(username)
+        except Exception as ex:
+            logger.error(f'error occurred getting user for {username}', exc_info=True)
+            reason = repr(ex)
+    if session_id:
+        try:
+            user = db_controller.get_user_by_session_id(session_id)
+        except Exception as ex:
+            logger.error(f'error occurred getting user for session id {session_id}', exc_info=True)
+            reason = repr(ex)
+    if user:
+        await fb_file_handler.tag_staging_with_subbox_id(user['username'], tracks)
+        untagged_tracks = list(filter(lambda t: t.subbox_id is None, tracks.tracks))
+        assert len(untagged_tracks) == 0, f"untagged tracks for {untagged_tracks}"
+        db_controller.save_original_track_meta(user['username'], tracks)
+
+
+    return {
+        'success': success
+    }
 @router.post("/sync/match_tracks", tags=["sync"])
 @inject
 async def match_tracks(

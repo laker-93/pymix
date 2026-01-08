@@ -41,6 +41,7 @@ class Container(containers.DeclarativeContainer):
         session=aiohttp_session,
         version=config.containers.subsonic.version,
         music_path_base_to_remove=config.containers.subsonic.music_path_base_to_remove,
+        serving_music_path_base=config.containers.subsonic.serving_music_path_base,
         zip_name=config.rekordbox.zip_name,
         app_env=config.app_env
     )
@@ -94,7 +95,8 @@ class Container(containers.DeclarativeContainer):
 
     rekordbox_xml_orchestrator = providers.Singleton(
         RekordboxXMLOrchestrator,
-        rekordbox_xml_factory
+        rekordbox_xml_factory,
+        db_controller
     )
     rb_backup_file_handler = providers.Singleton(
         RBBackupFileHandler,

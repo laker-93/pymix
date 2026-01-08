@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from tinydb import TinyDB, Query
 from tinydb.table import Document
 
+from pymix.model.original_track_meta import OriginalTracks
 from pymix.utils.get_available_port import get_available_port
 
 
@@ -49,6 +50,16 @@ class DbController:
         self._import_job_schema = ('job_id', 'name', 'n_tracks_to_import', 'total_n_imported_tracks', 'in_progress', 'result')
         self._export_job_schema = ('job_id', 'name', 'total_n_tracks_to_export', 'n_exported_tracks', 'in_progress', 'result')
         self._user_token_schema = ('user_id', 'token')
+        self._original_track_meta = (
+            'user_id',
+            'subbox_id',
+            'user_location',
+            'staging_location',
+            'original_name',
+            'original_artist',
+            'original_album'
+
+        )
         self._max_library_size = max_library_size
 
     def add_subbox_beet_map(self, username: str, subbox_id: str, beet_id: int) -> dict:
@@ -176,6 +187,20 @@ class DbController:
             assert len(results) == 1, f"got {len(results)} for {username} with subbox id {subbox_id}. Results: {results}"
             result = results[0]
             table.remove(doc_ids=[result.doc_id])
+
+            OriginalMetaMap = Query()
+            query = (OriginalMetaMap.user_id == user_id) & (OriginalMetaMap.subbox_id == subbox_id)
+
+            table = self._db.table('original_track_meta_map_table')
+            results = table.search(query)
+
+            if not results:
+                logger.info(f"no entry found in original track meta for user {username} with subbox id {subbox_id}")
+                return None
+            assert len(results) == 1, f"got {len(results)} for {username} with subbox id {subbox_id}. Results: {results}"
+            result = results[0]
+            table.remove(doc_ids=[result.doc_id])
+
             return True
 
         except Exception as ex:
@@ -184,6 +209,53 @@ class DbController:
                 exc_info=True
             )
             raise
+
+    def save_original_track_meta(
+            self,
+            username: str,
+            tracks: OriginalTracks,
+    ):
+        user = self.get_user(username)
+        user_id = user["user_id"]
+
+        # Check no existing meta
+        table = self._db.table('original_track_meta_map_table')
+        for track in tracks.tracks:
+            Track = Query()
+            assert track.subbox_id, f"no subbox id for track {track}"
+            track_query = (Track.user_id == user_id) & (Track.subbox_id == track.subbox_id)
+            results = table.search(track_query)
+            if results:
+                existing = results.pop()
+                raise AssertionError(f"have matching track for {track} in db with: {existing}")
+
+            # Update or insert in library
+            new_entry = {
+                "user_id": user_id,
+                "user_location": track.userLocation,
+                "staging_location": track.stagingLocation,
+                "original_name": track.originalName,
+                "original_artist": track.originalArtist,
+                "original_album": track.originalAlbum,
+                "subbox_id": track.subbox_id,
+            }
+
+            table.insert(new_entry)
+
+    def get_meta_by_user_location(self, username: str, user_location: str) -> Optional[Dict]:
+        user = self.get_user(username)
+        user_id = user["user_id"]
+        self._db.clear_cache()
+        table = self._db.table('original_track_meta_map_table')
+        query = Query()
+        results = table.search((query.user_id == user_id) & (query.user_location == user_location))
+        if results:
+            assert len(results) == 1, f"got multiple results for {username} {user_location}: {results}"
+            result = results.pop()
+        else:
+            result = None
+        return result
+
 
     def update_metadata(
             self,

@@ -6,16 +6,20 @@ from xml.etree.ElementTree import ElementTree, indent
 
 from pyrekordbox.rbxml import Node, RATING_MAPPING, XmlDuplicateError
 
+from pymix.controllers.db_controller import DbController
 from pymix.factories.rekordbox_xml_factory import RekordboxXMLFactory
 from pymix.model.subboxplaylist import SubBoxPlaylist
 from pymix.model.subboxtrack import SubBoxTrack
+from pymix.utils.get_duration import get_duration
+from pymix.utils.tag_subbox_id import get_subbox_id
 
 logger = logging.getLogger(__name__)
 
 
 class RekordboxXMLOrchestrator:
-    def __init__(self, rekordbox_xml_factory: RekordboxXMLFactory):
+    def __init__(self, rekordbox_xml_factory: RekordboxXMLFactory, db_controller: DbController):
         self._rekordbox_xml_factory = rekordbox_xml_factory
+        self._db_controller = db_controller
         self._rekordbox_xml = None
 
     def create_xml(self, xml_path: Optional[Path] = None):
@@ -84,13 +88,23 @@ class RekordboxXMLOrchestrator:
         logger.info(f'created playlist with name {playlist_name}')
         return new_playlist
 
-    def add_track_to_rekordbox_playlist(self, user_root: str, track: SubBoxTrack, playlist: Node, force: bool = True):
+
+    def _get_cue_data(self, user: dict, track: SubBoxTrack):
+        subbox_id = get_subbox_id(track.pymix_path)
+        assert subbox_id is not None, f"no subbox id found for {track}"
+        lib_entry = self._db_controller.get_library_entry(user['username'], subbox_id)
+        cue_data = lib_entry["cuedata"]
+        return cue_data
+
+    def add_track_to_rekordbox_playlist(self, user_root: str, user: dict, track: SubBoxTrack, playlist: Node, force: bool = True):
         """
         Add track in playlist. Optionally force the track in to playlist even if the track is already in the XML.
         """
         rekordbox_track = None
         logger.info(track.name)
         logger.info(f'attempting to add track {track} to playlist {playlist}')
+        cue_data = self._get_cue_data(user, track)
+        duration = get_duration(track.pymix_path)
         try:
             rekordbox_track = self._rekordbox_xml.add_track(
                 f'{user_root}/{track.path}',
@@ -103,21 +117,21 @@ class RekordboxXMLOrchestrator:
             logger.info(f'got track {rekordbox_track}')
             logger.debug(f"added track {str(track.path)}")
         except XmlDuplicateError:
+            track_id = track.track_id
+            # if the track_id is set then the subsonic track is already present in the rekordbox xml,
+            # otherwise the track has yet to be added to rekordbox xml and appears in multiple playlists.
+            if track_id:
+                rekordbox_track = self._rekordbox_xml.get_track(TrackID=track_id)
+            else:
+                #rekordbox_track = self._rekordbox_xml.get_track(Location=os.path.normpath(f'{user_root}/{track.path}'))
+                # the rekord box get_track api is stupid so do some very inefficient work around
+                #rekordbox_track = self._rekordbox_xml.get_track(index=1, Location=os.path.normpath(str(track.path)))
+                for other in self._rekordbox_xml.get_tracks():
+                    if os.path.normpath(f'{user_root}/{track.path}') == other.Location:
+                        rekordbox_track = other
+                        break
+            assert rekordbox_track
             if force:
-                track_id = track.track_id
-                # if the track_id is set then the subsonic track is already present in the rekordbox xml,
-                # otherwise the track has yet to be added to rekordbox xml and appears in multiple playlists.
-                if track_id:
-                    rekordbox_track = self._rekordbox_xml.get_track(TrackID=track_id)
-                else:
-                    #rekordbox_track = self._rekordbox_xml.get_track(Location=os.path.normpath(f'{user_root}/{track.path}'))
-                    # the rekord box get_track api is stupid so do some very inefficient work around
-                    #rekordbox_track = self._rekordbox_xml.get_track(index=1, Location=os.path.normpath(str(track.path)))
-                    for other in self._rekordbox_xml.get_tracks():
-                        if os.path.normpath(f'{user_root}/{track.path}') == other.Location:
-                            rekordbox_track = other
-                            break
-                assert rekordbox_track
                 logger.info(f"track already present, found at {str(rekordbox_track)}")
                 playlist.add_track(rekordbox_track.TrackID)
                 logger.info(f"track {rekordbox_track} added to {playlist}")
@@ -126,6 +140,16 @@ class RekordboxXMLOrchestrator:
         else:
             playlist.add_track(rekordbox_track.TrackID)
             logger.info(f"track {rekordbox_track} from {track} added to {playlist}")
+        assert rekordbox_track
+        rekordbox_track["TotalTime"] = duration
+        for cue in cue_data["cues"]:
+            rekordbox_track.add_mark(
+                Name=cue["name"], Type="cue", Start=cue["position"]/1000, Num=cue["index"]
+            )
+        for cue in cue_data["loops"]:
+            rekordbox_track.add_mark(
+                Name=cue.get("name", ""), Type="loop", Start=cue["start"]/1000, End=cue["end"]/1000, Num=cue["index"]
+            )
 
 
     def _get_playlist_folder(self, playlist_folder_name: str, parent_folder: Optional[Node] = None) -> Optional[Node]:

@@ -17,6 +17,8 @@ RUN apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docke
 RUN add-apt-repository ppa:deadsnakes/ppa
 RUN apt install python3.11 python3-pip python3.11-dev python3.11-venv -y
 RUN apt-get install -y vim
+RUN apt-get install -y libtag1-dev
+#RUN apt-get install -y python-dev
 #RUN apt install docker.io -y
 #RUN apt install docker-compose-plugin -y
 #FROM tiangolo/uvicorn-gunicorn-fastapi:python3.11

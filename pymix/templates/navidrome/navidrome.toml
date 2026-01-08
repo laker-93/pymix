@@ -1,0 +1,2 @@
+Tags.subboxiD.Aliases = ["subbox_id", "subboxid"]
+Tags.subboxiD.Split = ["; ", " / "]

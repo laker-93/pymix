@@ -6,9 +6,9 @@ from pathlib import Path
 from typing import List, Optional
 import mediafile
 import music_tag
+import taglib
 from beets.plugins import BeetsPlugin
 from beets.library import Item
-from mutagen.id3 import ID3, TBPM
 from python_on_whales import docker
 
 from pymix.clients.subsonic_client import SubsonicClient
@@ -23,6 +23,8 @@ from pyserato.encoders.v2_mp3_encoder import V2Mp3Encoder
 from pyserato.model.hot_cue import HotCue
 from pyserato.model.track import Track
 from pyserato.model.hot_cue_type import HotCueType
+
+from pymix.utils.tag_subbox_id import get_subbox_id
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +67,7 @@ class RekordboxXMLController:
         self._zip_name = zip_name
         self._serving_music_path_base = serving_music_path_base
 
-    def _create_rekordbox_xml_playlist(self, user_root: str, subsonic_playlist: SubBoxPlaylist):
+    def _create_rekordbox_xml_playlist(self, user_root: str, user: dict, subsonic_playlist: SubBoxPlaylist):
         """
         From the playlist given, create the rekordbox folders and playlists.
         Add the tracks to the playlist.
@@ -74,7 +76,7 @@ class RekordboxXMLController:
         """
         playlist = self._rekordbox_xml_orchestrator.create_rekordbox_xml_playlist(subsonic_playlist.name)
         for track in subsonic_playlist.tracks:
-            self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(user_root, track, playlist)
+            self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(user_root, user, track, playlist)
 
 
     # todo this controller is overloaded; this method has nothing to do with rekordbox xml and should live elsewhere.
@@ -161,22 +163,13 @@ class RekordboxXMLController:
             entry_dir = path.removeprefix('/music')
             src_dir = self._serving_music_path_base.format(user=username)
             p = Path(src_dir + entry_dir)
-            f = music_tag.load_file(p)
-            subbox_id = None
-            try:
-                # get not supported so use try/except
-                comment = f["comment"]
-            except KeyError:
-                pass
+            with taglib.File(p) as song:
+                subbox_tag = song.tags.get("SUBBOX_ID")
+            if subbox_tag:
+                subbox_id = subbox_tag[0]
             else:
-                match = re.search(r"subbox_id:(\d+)", comment.value)
-                if match:
-                    subbox_id = int(match.group(1))
-
-            if subbox_id is None:
                 logger.debug(f"No subbox_id tag found for {p}, skipping.")
                 continue
-
             # 4️⃣ Add mapping to DB
             self._db_controller.add_subbox_beet_map(
                 username=username,
@@ -252,7 +245,7 @@ class RekordboxXMLController:
             subsonic_playlists.sort(key=lambda playlist: playlist.name)
             # Given the Playlist data from Subsonic create the playlist directory structure in Rekordbox.
             for subsonic_playlist in subsonic_playlists:
-                self._create_rekordbox_xml_playlist(user_root, subsonic_playlist)
+                self._create_rekordbox_xml_playlist(user_root, user, subsonic_playlist)
         # add subsonic tracks that do not belong to a playlist to a default playlist.
         default_playlist = self._rekordbox_xml_orchestrator.get_playlist('NOPLAYLIST')
         if not default_playlist:
@@ -265,6 +258,7 @@ class RekordboxXMLController:
             for track in tracks:
                 self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(
                     user_root,
+                    user,
                     track,
                     default_playlist,
                     force=False
@@ -327,10 +321,11 @@ class RekordboxXMLController:
         rated_tracks = list(filter(lambda t: t.rating > 0, self._rekordbox_xml_orchestrator.get_all_xml_tracks()))
         await self._subsonic_orchestrator.update_tracks_with_subid(user, tracks=rated_tracks)
         await self._subsonic_orchestrator.set_ratings(user, rated_tracks)
-        encoder = V2Mp3Encoder()
+        #encoder = V2Mp3Encoder()
         for track in self._rekordbox_xml_orchestrator._rekordbox_xml.get_tracks():
             marks = track.marks
             cues = list(filter(lambda m: m.Type == 'cue', marks))
+            loops = list(filter(lambda m: m.Type == 'loop', marks))
             # todo extract colors of cues
             album = track.Album if track.Album else None
             # the path on the server could be quite different to the path on the user side xml
@@ -340,22 +335,49 @@ class RekordboxXMLController:
             entry_dir = str(track_match.path).removeprefix('/' + self._zip_name)
             src_dir = self._serving_music_path_base.format(user=user['username'])
             p = Path(src_dir + entry_dir)
-            clear_all_tags(p)
-            serato_track = Track.from_path(p)
-            for i, cue in enumerate(cues):
-                serato_track.add_hot_cue(
-                    HotCue(
-                        name=cue.Name,
-                        index=i,
-                        start=int(cue.Start * 1000),
-                        type=HotCueType.CUE
-                    )
-                )
-            encoder.write(serato_track)
-            tags = ID3(p)
-            bpm = track.AverageBpm
-            tags.add(TBPM(encoding=3, text=str(bpm)))
-            tags.save()
+            subbox_id = get_subbox_id(p)
+            assert subbox_id is not None, f"subbox id tag not present on {p}"
+            self._db_controller.update_metadata(
+                username=user['username'],
+                subbox_id=subbox_id,
+                cuedata={
+                    "cues": [
+                        {
+                            "index": cue.Num,
+                            "position": int(cue.Start * 1000),
+                            "name": cue.Name
+                            # "color": cue.color todo
+                        } for i, cue in enumerate(cues)
+                    ],
+                    "loops": [
+                        {
+                            "index": cue.Num,
+                            "start": int(cue.Start * 1000),
+                            "end": int(cue.End * 1000),
+                            "active": False
+                            # "color": cue.color todo
+                        } for i, cue in enumerate(loops)
+                    ],
+                },
+                source_app="rekordbox",
+                change_type="upload"
+            )
+            #clear_all_tags(p)
+            #serato_track = Track.from_path(p)
+            #for i, cue in enumerate(cues):
+            #    serato_track.add_hot_cue(
+            #        HotCue(
+            #            name=cue.Name,
+            #            index=i,
+            #            start=int(cue.Start * 1000),
+            #            type=HotCueType.CUE
+            #        )
+            #    )
+            #encoder.write(serato_track)
+            #tags = ID3(p)
+            #bpm = track.AverageBpm
+            #tags.add(TBPM(encoding=3, text=str(bpm)))
+            #tags.save()
 
     async def _create_playlists_from_xml(self, user: dict):
         # 4. create internal subbox playlist and tracks as below

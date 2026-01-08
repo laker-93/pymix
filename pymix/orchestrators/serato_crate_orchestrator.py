@@ -21,7 +21,7 @@ class SeratoCrateOrchestrator:
 
     def _build_subbox_playlists(self, crate: Crate, parent: str, subbox_playlists: List[SubBoxPlaylist]):
         name = crate.name if not parent else parent + '-' + crate.name
-        if crate.song_paths:
+        if crate.tracks:
             tracks = []
             for song in crate.song_paths:
                 tags = music_tag.load_file(str(song))

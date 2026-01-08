@@ -1,8 +1,10 @@
-from fastapi import APIRouter, Depends, Body, Path, Query
+from fastapi import APIRouter, Depends, Body, Path, Query, Cookie
 from jsonschema import validate, ValidationError
 from dependency_injector.wiring import inject, Provide
 from typing import Dict, Any, List
 import logging
+
+from pydantic import BaseModel
 
 from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
@@ -55,7 +57,7 @@ cue_schema = {
 @inject
 async def update_metadata(
     cuedata: Dict[str, Any] = Body(..., description="Cue and loop metadata in JSON form"),
-    subbox_id: str = Body(..., description="Unique Subbox ID for the track"),
+    subbox_id: str | None = Cookie(None),
     source_app: str = Body(..., description="Source application (serato or rekordbox)"),
     change_type: str = Body(..., description="Type of change ('upload', 'edit', 'sync', 'merge')"),
     session_id: str | None = None,
@@ -127,7 +129,7 @@ async def update_metadata(
 @inject
 async def get_metadata(
     track_id: str = Path(..., description="Subbox track ID"),
-    session_id: str | None = Query(None, description="Session ID for authentication"),
+    session_id: str | None = Cookie(None),
     username: str | None = Query(None, description="Username for authentication"),
     db_controller: DbController = Depends(Provide[Container.db_controller])
 ) -> Dict[str, Any]:
@@ -185,28 +187,33 @@ async def get_metadata(
         "metadata": cuedata if success else None
     }
 
+
+class DeleteTrackRequest(BaseModel):
+    ids: List[str]
+    username: str | None = None
 @router.delete("/track", tags=["metadata"])
 @inject
 async def delete_track(
-        subbox_ids: List[str] = Query(description="subbox ids of tracks to delete"),
-        session_id: str | None = Query(None, description="Session ID for authentication"),
-        username: str | None = Query(None, description="Username for authentication"),
+        req: DeleteTrackRequest = Body(...),
+        session_id: str | None = Cookie(None),
         db_controller: DbController = Depends(Provide[Container.db_controller]),
         rekordbox_xml_controller: RekordboxXMLController = Depends(Provide[Container.rekordbox_xml_controller]),
 ) -> Dict[str, Any]:
     all_success = True
     results = []
+    username = req.username
     try:
         if not username and session_id:
             user = db_controller.get_user_by_session_id(session_id)
             username = user["username"]
             logger.info(f"Resolved session_id '{session_id}' to username '{username}'")
+        assert username is not None
     except Exception as ex:
         all_success = False
         reason = f"Error resolving user: {repr(ex)}"
         logger.error(reason, exc_info=True)
         return {"success": all_success, "reason": reason, "results": results}
-    for subbox_id in subbox_ids:
+    for subbox_id in req.ids:
         reason = ""
         success = True
         try:

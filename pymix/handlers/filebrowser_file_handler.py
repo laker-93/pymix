@@ -3,21 +3,26 @@ import logging
 
 import mimetypes
 import shutil
+import uuid
 import zipfile
 from collections import defaultdict
 from pathlib import Path
 from typing import Tuple, Optional, Dict
 from zipfile import ZipFile
 
+import taglib
 from filetype import filetype
 from watchfiles import awatch, Change
 
 from tinydb import TinyDB
 
 from pymix.controllers.db_controller import DbController
+from pymix.model.original_track_meta import OriginalTracks
 from pymix.model.subboxtrack import SubBoxTrack
+from pymix.utils.tag_subbox_id import tag_subbox_id
 
 logger = logging.getLogger(__name__)
+
 
 
 async def trigger_processing(recv_stream, rekordbox_xml_controller):
@@ -102,7 +107,6 @@ class FileBrowserFileHandler:
         path = src_path
         return path
 
-
     def get_subcrate_audio_path(self, user: str) -> tuple[Path, Path]:
         src_path = Path(
             self._filebrowser_data_path_uploads.format(user=user)
@@ -110,15 +114,44 @@ class FileBrowserFileHandler:
         subcrate_path = None
         audio_path = None
         for f in src_path.iterdir():
-            if f.name.lower() == 'audio_files.zip':
-                audio_path = f
-            elif f.name.lower() == 'subcrates.zip':
+            mime_type = filetype.guess_mime(f)
+            if mime_type is None:
+                mime_type = mimetypes.guess_type(str(f))[0]
+            if mime_type is None:
+                logger.error(f'skipping file {f}')
+                continue
+            if f.name.lower() == 'subcrates.zip':
                 subcrate_path = f
+            elif mime_type.split('/')[0] == 'audio':
+                audio_path = src_path
             if audio_path and subcrate_path:
                 break
         assert subcrate_path
         assert audio_path
         return subcrate_path, audio_path
+
+    def tag_staging_with_subbox_id(self, user: str, tracks: OriginalTracks):
+        src_path = Path(
+            self._filebrowser_data_path_uploads.format(user=user)
+        )
+
+        for f in src_path.rglob('*'):
+            if f.is_file():
+                if mime_type is None:
+                    mime_type = mimetypes.guess_type(str(f))[0]
+                if mime_type is None:
+                    logger.error(f'skipping file {f}')
+                    continue
+                if mime_type.split('/')[0] == 'audio':
+                    for track in tracks.tracks:
+                        if track.stagingLocation in str(f):
+                            subbox_id = tag_subbox_id(f)
+                            if subbox_id:
+                                track.subbox_id = subbox_id
+
+
+
+
 
 
     def get_xml_data_path(self, user: str) -> tuple[Path, Optional[Path], Optional[Path]]:

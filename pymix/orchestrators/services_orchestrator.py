@@ -15,7 +15,8 @@ from pymix.handlers.env_file_handler import DockerEnvFileHandler
 logger = logging.getLogger(__name__)
 
 environment = Environment(loader=FileSystemLoader("/app/pymix/templates/"))
-template = environment.get_template("beets/config.yaml")
+beets_template = environment.get_template("beets/config.yaml")
+navidrome_template = environment.get_template("navidrome/navidrome.toml")
 
 class ServicesOrchestrator:
     def __init__(
@@ -106,6 +107,13 @@ class ServicesOrchestrator:
         )
         docker.compose.up(detach=True)
 
+        config_dst = self._config['containers']['subsonic']['config_file_dst'].format(user=username)
+
+        content = navidrome_template.render()
+        with open(config_dst, 'w') as f:
+            f.write(content)
+
+
     async def _create_beets(self, user: dict):
         port = user['beets_port']
         username = user['username']
@@ -126,7 +134,7 @@ class ServicesOrchestrator:
         # overwrite the default beets config with subbox specific beets config
         config_dst = self._config['containers']['beets']['config_file_dst'].format(user=username)
 
-        content = template.render(username=username, password=user['password'], user_navidrome=f'navidrome{username}')
+        content = beets_template.render(username=username, password=user['password'], user_navidrome=f'navidrome{username}')
         with open(config_dst, 'w') as f:
             f.write(content)
 

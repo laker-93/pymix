@@ -10,7 +10,9 @@ class SubBoxTrack:
     name: str
     artist: str
     album: str
+    # the child path relatively to a root
     path: Optional[Path] = None
+    pymix_path: Optional[Path] = None
     rating: int = 0
     genre: Optional[str] = None
     # the Rekordbox XML TrackID.
