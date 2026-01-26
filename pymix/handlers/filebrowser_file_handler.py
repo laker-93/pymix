@@ -107,28 +107,32 @@ class FileBrowserFileHandler:
         path = src_path
         return path
 
-    def get_subcrate_audio_path(self, user: str) -> tuple[Path, Path]:
+    def get_subcrate_audio_path(self, user: str) -> tuple[Path, Optional[Path], Optional[Path]]:
         src_path = Path(
             self._filebrowser_data_path_uploads.format(user=user)
         )
         subcrate_path = None
         audio_path = None
-        for f in src_path.iterdir():
+        zip_path = None
+        for f in src_path.rglob('*'):
+            if not f.is_file():
+                continue
             mime_type = filetype.guess_mime(f)
             if mime_type is None:
                 mime_type = mimetypes.guess_type(str(f))[0]
             if mime_type is None:
                 logger.error(f'skipping file {f}')
                 continue
-            if f.name.lower() == 'subcrates.zip':
+            if f.name.lower() == 'all-crates.zip':
                 subcrate_path = f
+            elif f.name.endswith('.zip') and 'macosx' not in f.name.lower() and 'all-crates' not in f.name.lower():
+                zip_path = f
             elif mime_type.split('/')[0] == 'audio':
                 audio_path = src_path
             if audio_path and subcrate_path:
                 break
         assert subcrate_path
-        assert audio_path
-        return subcrate_path, audio_path
+        return subcrate_path, zip_path, audio_path
 
     def tag_staging_with_subbox_id(self, user: str, tracks: OriginalTracks):
         src_path = Path(
@@ -137,8 +141,7 @@ class FileBrowserFileHandler:
 
         for f in src_path.rglob('*'):
             if f.is_file():
-                if mime_type is None:
-                    mime_type = mimetypes.guess_type(str(f))[0]
+                mime_type = mimetypes.guess_type(str(f))[0]
                 if mime_type is None:
                     logger.error(f'skipping file {f}')
                     continue
@@ -189,12 +192,18 @@ class FileBrowserFileHandler:
 
         for f in src_path.iterdir():
             if f.is_file():
-                if f.name.endswith('.zip'):
+                if f.name.endswith('.zip') and f.name != 'all-crates.zip':
                     audio_files_zip = f
+                    logger.info(f'adding audio zip {f}')
                     break
-                # todo use filetype
-                n_files += 1
-                total_size += f.stat().st_size
+        for f in src_path.rglob('*'):
+            if f.is_file():
+                mimestart = mimetypes.guess_type(str(f))[0]
+                if mimestart:
+                    mimecategory = mimestart.split('/')[0]
+                    if mimecategory == 'audio':
+                        n_files += 1
+                        total_size += f.stat().st_size
 
         if audio_files_zip:
             with ZipFile(audio_files_zip) as zip:
@@ -202,6 +211,9 @@ class FileBrowserFileHandler:
                 for f in files:
                     if 'macosx' in str(f).lower():
                         # ignore meta info
+                        continue
+                    if f.endswith('.crate'):
+                        # ignore crate
                         continue
                     mimestart = mimetypes.guess_type(str(f))[0]
                     if mimestart:

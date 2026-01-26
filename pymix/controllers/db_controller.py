@@ -101,6 +101,40 @@ class DbController:
             )
             raise
 
+    def get_subbox_beet_map(self, username: str, subbox_id: str) -> dict | None:
+        """
+        Retrieves a mapping between subbox_id and beet_id for a specific user.
+        Returns the record if found, otherwise None.
+        """
+        try:
+            # 1️⃣ Get user_id
+            user = self.get_user(username)
+            user_id = user["user_id"]
+
+            Map = Query()
+            query = (Map.user_id == user_id) & (Map.subbox_id == subbox_id)
+
+            table = self._db.table('subbox_beets_map_table')
+            result = table.get(query)
+
+            if result:
+                logger.info(
+                    f"Retrieved beet mapping for {username}: subbox_id={subbox_id} → beet_id={result.get('beet_id')}"
+                )
+            else:
+                logger.info(
+                    f"No beet mapping found for {username} with subbox_id={subbox_id}"
+                )
+
+            return result
+
+        except Exception as ex:
+            logger.error(
+                f"Error retrieving beet mapping for {username} (subbox_id={subbox_id}): {repr(ex)}",
+                exc_info=True
+            )
+            raise
+
     def get_library_entry(
         self,
         username: str,
@@ -227,7 +261,9 @@ class DbController:
             results = table.search(track_query)
             if results:
                 existing = results.pop()
-                raise AssertionError(f"have matching track for {track} in db with: {existing}")
+                # this can happen if a previous attempt failed to import successfully.
+                logger.info(f"have matching track for {track} in db with: {existing}")
+                continue
 
             # Update or insert in library
             new_entry = {

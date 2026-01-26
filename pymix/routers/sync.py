@@ -69,14 +69,15 @@ async def map_meta(
             logger.error(f'error occurred getting user for session id {session_id}', exc_info=True)
             reason = repr(ex)
     if user:
-        await fb_file_handler.tag_staging_with_subbox_id(user['username'], tracks)
+        fb_file_handler.tag_staging_with_subbox_id(user['username'], tracks)
         untagged_tracks = list(filter(lambda t: t.subbox_id is None, tracks.tracks))
         assert len(untagged_tracks) == 0, f"untagged tracks for {untagged_tracks}"
         db_controller.save_original_track_meta(user['username'], tracks)
-
+        success = True
 
     return {
-        'success': success
+        'success': success,
+        'reason': reason
     }
 @router.post("/sync/match_tracks", tags=["sync"])
 @inject

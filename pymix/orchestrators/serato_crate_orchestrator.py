@@ -6,9 +6,12 @@ from typing import List, Iterable
 
 import music_tag
 from pyserato.builder import Builder
+from pyserato.encoders.v2_mp3_encoder import V2Mp3Encoder
 from pyserato.model.crate import Crate
 from pyserato.util import DuplicateTrackError
 
+from pymix.controllers.db_controller import DbController
+from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.model.subboxplaylist import SubBoxPlaylist
 from pymix.model.subboxtrack import SubBoxTrack
 
@@ -16,24 +19,58 @@ logger = logging.getLogger(__name__)
 
 
 class SeratoCrateOrchestrator:
-    def __init__(self, crate_builder: Builder):
-        self._crate_builder = crate_builder
+    def __init__(
+        self,
+        crate_builder: Builder,
+        db_controller: DbController,
+        rb_xml_controller: RekordboxXMLController,
+        filebrowser_data_path_uploads: str,
+        serving_music_path_base: str
 
-    def _build_subbox_playlists(self, crate: Crate, parent: str, subbox_playlists: List[SubBoxPlaylist]):
+    ):
+        self._crate_builder = crate_builder
+        self._db_controller = db_controller
+        self._rb_xml_controller = rb_xml_controller
+        self._filebrowser_data_path_uploads = filebrowser_data_path_uploads
+        self._serving_music_path_base = serving_music_path_base
+        self._mp3_encoder = V2Mp3Encoder()
+
+    def _build_subbox_playlists(self, user: dict, crate: Crate, parent: str, subbox_playlists: List[SubBoxPlaylist]):
         name = crate.name if not parent else parent + '-' + crate.name
+
         if crate.tracks:
             tracks = []
-            for song in crate.song_paths:
-                tags = music_tag.load_file(str(song))
+            for song in crate.tracks:
+                original_meta = self._db_controller.get_meta_by_user_location(user['username'], str(song.path))
+                # original meta can be none if for example the track was uploaded from a standalone zip upload as this
+                # method by passes the map_metadata step. However in this case, user should have not used the original
+                # track in their serato/rekordbox instead upload the zip of tracks to subbox, then download them to their
+                # local subbox folder and then add them to serato/rekordbox
+                assert original_meta, f"no original meta found for {song.path}"
+                subbox_id = original_meta['subbox_id']
+                beets_path = self._rb_xml_controller.get_path_by_subbox_id(user['username'], subbox_id, False)
+                entry_dir = str(beets_path).removeprefix('/music')
+                src_dir = self._serving_music_path_base.format(user=user['username'])
+                p = Path(src_dir + entry_dir)
+                assert p.exists(), f"path {p} does not exist"
+                tags = music_tag.load_file(p)
+                song.path = p
+                try:
+                    cues = self._mp3_encoder.read_cues(song)
+                except KeyError:
+                    cues = None
+
                 rating = tags.get('composer').value.count('⭐')
                 tracks.append(
                     SubBoxTrack(
                         name=tags['tracktitle'].value,
                         artist=tags['artist'].value,
-                        path=song,
+                        path=p,
                         album=tags['album'].value,
                         rating=rating,
-                        genre=tags.get('genre').value
+                        genre=tags.get('genre').value,
+                        subbox_id=subbox_id,
+                        serato_hot_cues=cues
                     )
                 )
             subbox_playlists.append(
@@ -44,10 +81,10 @@ class SeratoCrateOrchestrator:
             )
         if crate.children:
             parent = name
-            for child in crate.children:
-                self._build_subbox_playlists(child, parent, subbox_playlists)
+            for child in crate.children.values():
+                self._build_subbox_playlists(user, child, parent, subbox_playlists)
 
-    def get_subbox_playlists_from_crates(self, zip_crate_path: Path) -> List[SubBoxPlaylist]:
+    def get_subbox_playlists_from_crates(self, user: dict, zip_crate_path: Path) -> List[SubBoxPlaylist]:
         """
         From the serato crates, create the internal Playlist datastructure
         """
@@ -55,9 +92,9 @@ class SeratoCrateOrchestrator:
 
         with zipfile.ZipFile(zip_crate_path, 'r') as zip_ref:
             zip_ref.extractall(zip_crate_path.parent)
-        crates = self._crate_builder.parse_crates_from_root_path(zip_crate_path.parent / 'SubCrates')
+        crates = self._crate_builder.parse_crates_from_root_path(zip_crate_path.parent)
         for top_level_crate in crates.values():
-            self._build_subbox_playlists(top_level_crate, "", subbox_playlists)
+            self._build_subbox_playlists(user, top_level_crate, "", subbox_playlists)
         assert subbox_playlists
         return subbox_playlists
 

@@ -97,6 +97,16 @@ class RekordboxXMLController:
     async def get_duplicates(self, username: str, public: bool) -> List[str]:
         return await anyio.to_thread.run_sync(self._get_duplicates, username, public)
 
+
+    def get_path_by_subbox_id(self, username: str, subbox_id: str, public: bool) -> Path:
+        container_name = "beets" if public else f"beets{username}"
+        beets_command = f" beet ls -p subbox_id::{subbox_id}"
+        logger.info(f'running beet duplicates command {beets_command}')
+        result = docker.execute(container_name, beets_command.split())
+        logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
+        path = Path(result)
+        return path
+
     async def remove_track(self, username: str, subbox_id: str, public: bool):
         container_name = "beets" if public else f"beets{username}"
         beets_command = f"beet rm -df subbox_id::{subbox_id}"
@@ -268,6 +278,7 @@ class RekordboxXMLController:
         # todo remove any playlists that have no tracks
         self._rekordbox_xml_orchestrator.save_xml(xml_output_path)
 
+    # todo this function should be part of the beets client or beets controller class and removed from here and rekordbox_xml_controller.py
     def _import_to_beets(self, username: str, zip_path: Optional[Path], audio_path: Optional[Path]):
         """
         Import into beets in quiet mode. Any exceptions will interrupt the process.
@@ -310,16 +321,17 @@ class RekordboxXMLController:
         # next step
         await self._subsonic_orchestrator.scan(user)
         await anyio.sleep(2)
-        await self.set_data_from_xml(user)
+        await self._set_data_from_xml(user)
 
-    async def set_data_from_xml(self, user: dict):
-
+    async def _set_data_from_xml(self, user: dict):
+        # todo make this logic more similar to serato_controller where subbox_id is used for look up
         await self._create_playlists_from_xml(user)
         await self._set_metadata_from_xml(user)
 
     async def _set_metadata_from_xml(self, user):
         rated_tracks = list(filter(lambda t: t.rating > 0, self._rekordbox_xml_orchestrator.get_all_xml_tracks()))
         await self._subsonic_orchestrator.update_tracks_with_subid(user, tracks=rated_tracks)
+        #  and set the rating of the track in navidrome from the rating taken from xml
         await self._subsonic_orchestrator.set_ratings(user, rated_tracks)
         #encoder = V2Mp3Encoder()
         for track in self._rekordbox_xml_orchestrator._rekordbox_xml.get_tracks():
@@ -337,6 +349,7 @@ class RekordboxXMLController:
             p = Path(src_dir + entry_dir)
             subbox_id = get_subbox_id(p)
             assert subbox_id is not None, f"subbox id tag not present on {p}"
+            # todo create pydantic model for cues and attack to subbox track and pass this to the db controller
             self._db_controller.update_metadata(
                 username=user['username'],
                 subbox_id=subbox_id,
@@ -362,22 +375,7 @@ class RekordboxXMLController:
                 source_app="rekordbox",
                 change_type="upload"
             )
-            #clear_all_tags(p)
-            #serato_track = Track.from_path(p)
-            #for i, cue in enumerate(cues):
-            #    serato_track.add_hot_cue(
-            #        HotCue(
-            #            name=cue.Name,
-            #            index=i,
-            #            start=int(cue.Start * 1000),
-            #            type=HotCueType.CUE
-            #        )
-            #    )
-            #encoder.write(serato_track)
-            #tags = ID3(p)
-            #bpm = track.AverageBpm
-            #tags.add(TBPM(encoding=3, text=str(bpm)))
-            #tags.save()
+
 
     async def _create_playlists_from_xml(self, user: dict):
         # 4. create internal subbox playlist and tracks as below
@@ -390,7 +388,7 @@ class RekordboxXMLController:
         # this sets the subsonic id found from querying navidrome. This can then be used to create the playlist and place
         # the track in the playlist
         res = await self._subsonic_orchestrator.update_tracks_with_subid(user, subbox_playlists=subbox_playlists)
-        # 8. create the playlists and set the rating of the track in navidrome from the rating taken from xml
+        # 8. create the playlists
         await self._subsonic_orchestrator.create_playlists(user, subbox_playlists)
 
     async def get_healthcheck(self) -> dict:

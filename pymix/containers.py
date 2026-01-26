@@ -101,6 +101,7 @@ class Container(containers.DeclarativeContainer):
     rb_backup_file_handler = providers.Singleton(
         RBBackupFileHandler,
         rekordbox_xml_orchestrator,
+        db_controller,
         config.containers.beets.data,
         config.containers.beets.data_public,
     )
@@ -131,7 +132,11 @@ class Container(containers.DeclarativeContainer):
 
     serato_crate_orchestrator = providers.Singleton(
         SeratoCrateOrchestrator,
-        providers.Singleton(Builder)
+        providers.Singleton(Builder),
+        db_controller,
+        rekordbox_xml_controller,
+        config.containers.filebrowser.data_uploads,
+        config.containers.subsonic.serving_music_path_base,
     )
     serato_controller = providers.Singleton(
         SeratoController,
@@ -143,6 +148,9 @@ class Container(containers.DeclarativeContainer):
 
         ),
         file_browser_file_handler,
+        rb_backup_file_handler,
+        rekordbox_xml_controller,
+        db_controller
     )
 
     beets_client = providers.Singleton(

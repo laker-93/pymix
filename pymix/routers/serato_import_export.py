@@ -2,7 +2,7 @@ import logging
 from typing import Dict
 
 from dependency_injector.wiring import Provide, inject
-from fastapi import APIRouter, Depends, Cookie
+from fastapi import APIRouter, Depends, Cookie, BackgroundTasks
 
 from pymix.clients.beets_client import BeetsClient
 from pymix.containers import Container
@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 @router.post("/serato/import", tags=["import"])
 @inject
 async def serato_import(
-    session_id: str | None = None,
+    background_tasks: BackgroundTasks,
+    session_id: str | None = Cookie(None),
     username: str | None = None,
     beets_client: BeetsClient = Depends(Provide[Container.beets_client]),
     fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
@@ -28,9 +29,9 @@ async def serato_import(
     config: Dict = Depends(Provide[Container.config])
 )-> dict:
     success = True
+    job_id = ""
     reason = ""
-    beets_output = ""
-    total_n_imported_tracks = 0
+    user = None
     total_n_tracks_for_import = 0
     if not username and not session_id:
         success = False
@@ -66,35 +67,48 @@ async def serato_import(
                 'beets_output': "",
                 'reason': f"user {username} has attempted to import before uploading any tracks."
             }
+
+        total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
         job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
         logger.info(f'Serato importing {total_n_tracks_for_import} tracks for user {username}')
-        try:
-            logger.info(f'starting serato import track staging for user {username}')
-            subcrate_path, audio_path = fb_file_handler.get_subcrate_audio_path(username)
-            beets_output = await serato_controller.create_subsonic_playlists_from_crates(
-                user=user,
-                serato_crate_path=subcrate_path,
-                audio_files_to_import=audio_path
-            )
-            logger.info(f'finished serato import for user {username}')
-        except Exception as ex:
-            success = False
-            msg = f'error occurred importing the following path in to beets for user {username} {repr(ex)}'
-            logger.error(msg, exc_info=True)
-            reason = msg
-        else:
-            total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
-            logger.info(f'successfully serato imported {total_n_tracks_for_import} for user {username}')
-        finally:
-            logger.info(f'marking serato import job for user {username} as {success}')
-            db_controller.job_completed(job_id, success)
+        background_tasks.add_task(run_import_task, serato_controller, username, job_id, db_controller,
+                                  fb_file_handler, total_n_tracks_for_import, user)
+        success = True
+        reason = ""
     return {
         'success': success,
-        'imported_tracks': total_n_imported_tracks,
+        'job_id': job_id,
+        'max_library_size_exceeded': False,
         'n_tracks_for_import': total_n_tracks_for_import,
-        'beets_output': beets_output,
         'reason': reason
     }
+
+
+async def run_import_task(serato_controller, username, job_id, db_controller, fb_file_handler,
+                          total_n_tracks_for_import, user):
+    success = True
+    beets_output = ""
+    try:
+        logger.info(f'starting serato import track staging for user {username}')
+        subcrate_path, zip_path, audio_path = fb_file_handler.get_subcrate_audio_path(username)
+        beets_output = await serato_controller.create_subsonic_playlists_from_crates(
+            user=user,
+            serato_crate_path=subcrate_path,
+            zip_path=zip_path,
+            audio_path=audio_path
+        )
+        logger.info(f'finished serato import for user {username}')
+    except Exception as ex:
+        success = False
+        msg = f'error occurred importing the following path in to beets for user {username} {repr(ex)}'
+        logger.error(msg, exc_info=True)
+    else:
+        logger.info(f'successfully serato imported {total_n_tracks_for_import} for user {username}')
+    finally:
+        logger.info(f"beets output {beets_output}")
+        logger.info(f'marking serato import job for user {username} as {success}')
+        db_controller.job_completed(job_id, success)
+
 
 
 @router.post("/serato/export", tags=["import"])
