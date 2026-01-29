@@ -22,6 +22,8 @@ class SeratoBackupFileHandler:
         beets_data_path = self._beets_data_path.format(user=username)
         logger.info(f'removing contents of {beets_data_path}')
         for filepath in Path(beets_data_path).iterdir():
+            # maybe this shouldn't be a warning as files that were successfully imported on a previously failed import
+            # would remain?
             logger.warning(f'file {filepath} remains after import - this should have been moved by beets on import')
             if filepath.is_dir():
                 shutil.rmtree(filepath)

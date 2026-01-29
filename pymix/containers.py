@@ -150,7 +150,8 @@ class Container(containers.DeclarativeContainer):
         file_browser_file_handler,
         rb_backup_file_handler,
         rekordbox_xml_controller,
-        db_controller
+        db_controller,
+        config.containers.subsonic.serving_music_path_base,
     )
 
     beets_client = providers.Singleton(

@@ -14,6 +14,7 @@ from pymix.handlers.serato_backup_file_handler import SeratoBackupFileHandler
 from pymix.model.subboxplaylist import SubBoxPlaylist
 from pymix.orchestrators.serato_crate_orchestrator import SeratoCrateOrchestrator
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
+from pymix.utils.make_readable import make_readable
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,8 @@ class SeratoController:
         file_browser_file_handler: FileBrowserFileHandler,
         rb_backup_file_handler: RBBackupFileHandler,
         rb_xml_controller: RekordboxXMLController,
-        db_controller: DbController
+        db_controller: DbController,
+        serving_music_path_base: str
     ):
         self._subsonic_orchestrator = subsonic_orchestrator
         self._serato_crate_orchestrator = serato_crate_orchestrator
@@ -36,6 +38,7 @@ class SeratoController:
         self._rb_backup_file_handler = rb_backup_file_handler
         self._rb_xml_controller = rb_xml_controller
         self._db_controller = db_controller
+        self._serving_music_path_base = serving_music_path_base
 
 
     def _create_serato_crates(self, user_root: str, subsonic_playlist: SubBoxPlaylist, output_path: Path):
@@ -99,17 +102,28 @@ class SeratoController:
         # specify a musicbrainz id and re import with a specific query. This will need a separate API to be implemented.
         logger.info(f'starting beets import for {username}')
         beets_command = f"beet import --group-albums --set user={username} -q /downloads"
-        log_iter = docker.execute(f"beets{username}", beets_command.split(), stream=True)
-        for log_type, log in log_iter:
-            logger.info(f'{log_type}: {log.decode()}')
-        logger.info(f'finished beets import for {username}')
-        # 9. on success, remove the directory of the beets import
-        logger.info(f'starting post import clean up for {username}')
-        self._serato_backup_file_handler.clean_up_beets_import_tree(username)
-        # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
-        # todo move this logic out of the rb xml controller
-        self._rb_xml_controller._get_duplicates(username, False)
-        self._rb_xml_controller._map_subbox_id_beet_id(username, False)
+        try:
+            log_iter = docker.execute(f"beets{username}", beets_command.split(), stream=True)
+            for log_type, log in log_iter:
+                logger.info(f'{log_type}: {log.decode()}')
+        except Exception:
+            logger.exception('beets import failed')
+            raise
+        else:
+            logger.info(f'finished beets import for {username}')
+            # 9. on success, remove the directory of the beets import
+            logger.info(f'starting post import clean up for {username}')
+            self._serato_backup_file_handler.clean_up_beets_import_tree(username)
+        finally:
+            # we want to handle the meta data regardless as we could have had some files that were successfully imported
+            # in those cases, we want to handle the meta data so they are skipped on next import attempt
+            # set permissions so navidrome can read - todo: remove this by running pymix as non root
+            src_dir = self._serving_music_path_base.format(user=username)
+            make_readable(Path(src_dir))
+            # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
+            # todo move this logic out of the rb xml controller
+            self._rb_xml_controller._get_duplicates(username, False)
+            self._rb_xml_controller._map_subbox_id_beet_id(username, False)
 
     async def create_subsonic_playlists_from_crates(self, user: dict, serato_crate_path: Path, zip_path: Optional[Path], audio_path: Optional[Path]):
         username = user['username']

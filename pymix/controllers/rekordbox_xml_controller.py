@@ -24,6 +24,7 @@ from pyserato.model.hot_cue import HotCue
 from pyserato.model.track import Track
 from pyserato.model.hot_cue_type import HotCueType
 
+from pymix.utils.make_readable import make_readable
 from pymix.utils.tag_subbox_id import get_subbox_id
 
 logger = logging.getLogger(__name__)
@@ -228,7 +229,10 @@ class RekordboxXMLController:
         log_iter = docker.execute(container_name, beets_command.split(), stream=True)
         for log_type, log in log_iter:
             logger.info(f'{log_type}: {log.decode()}')
+
         logger.info(f"finished beets command {beets_command} on container {container_name}")
+        # set permissions so navidrome can read - todo: remove this by running pymix as non root
+        make_readable(self._serving_music_path_base)
         if public:
             # must write the user tag set above to the audio file
             log_iter = docker.execute(container_name, "beet write".split())
@@ -300,7 +304,8 @@ class RekordboxXMLController:
         for log_type, log in log_iter:
             logger.info(f'{log_type}: {log.decode()}')
         logger.info(f"finished beets command {beets_command} for {username}")
-
+        # set permissions so navidrome can read - todo: remove this by running pymix as non root
+        make_readable(self._serving_music_path_base)
         # 9. on success, remove the directory of the beets import
         logger.info(f'starting post import clean up for {username}')
         self._file_browser_file_handler.remove_fb_data_path(username)
