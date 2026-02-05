@@ -136,7 +136,8 @@ class SeratoController:
         await anyio.sleep(2)
         await self._set_data_from_crates(user, serato_crate_path)
         # the fb path is removed here as it's needed for processing the .crate files so can't be removed in
-        # import_to_beets stage.
+        # import_to_beets stage. Also we only want to remove data in fb once import is successful to avoid
+        # unnecessarily having to reupload data from the client after a beets import failure
         self._file_browser_file_handler.remove_fb_data_path(username)
 
     async def _set_data_from_crates(self, user: dict, serato_crate_path: Path):
@@ -177,7 +178,7 @@ class SeratoController:
                         "cues": [
                             {
                                 "index": cue.index,
-                                "position": int(cue.start * 1000),
+                                "position": int(cue.start),
                                 "name": cue.name
                                 # "color": cue.color todo
                             } for i, cue in enumerate(cues)
@@ -185,8 +186,8 @@ class SeratoController:
                         "loops": [
                             {
                                 "index": cue.index,
-                                "start": int(cue.start * 1000),
-                                "end": int(cue.end * 1000),
+                                "start": int(cue.start),
+                                "end": int(cue.end),
                                 "active": False
                                 # "color": cue.color todo
                             } for i, cue in enumerate(loops)

@@ -1,7 +1,7 @@
 import logging
 import os.path
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict
 from xml.etree.ElementTree import ElementTree, indent
 
 from pyrekordbox.rbxml import Node, RATING_MAPPING, XmlDuplicateError
@@ -89,12 +89,13 @@ class RekordboxXMLOrchestrator:
         return new_playlist
 
 
-    def _get_cue_data(self, user: dict, track: SubBoxTrack):
+    def _get_cue_data(self, user: dict, track: SubBoxTrack) -> Optional[Dict]:
         subbox_id = get_subbox_id(track.pymix_path)
         assert subbox_id is not None, f"no subbox id found for {track}"
         lib_entry = self._db_controller.get_library_entry(user['username'], subbox_id)
-        cue_data = lib_entry["cuedata"]
-        return cue_data
+        if lib_entry:
+            cue_data = lib_entry["cuedata"]
+            return cue_data
 
     def add_track_to_rekordbox_playlist(self, user_root: str, user: dict, track: SubBoxTrack, playlist: Node, force: bool = True):
         """
@@ -140,16 +141,36 @@ class RekordboxXMLOrchestrator:
         else:
             playlist.add_track(rekordbox_track.TrackID)
             logger.info(f"track {rekordbox_track} from {track} added to {playlist}")
+            rekordbox_track["TotalTime"] = duration
+            if cue_data:
+                cues = cue_data.get("cues", [])
+                loops = cue_data.get("loops", [])
+
+                # Limits from Serato
+                num_loops = min(len(loops), 4)
+                num_cues = min(len(cues), 8)
+
+                # Add cues first (starting from slot 0)
+                for i, cue in enumerate(cues[:num_cues]):
+                    rekordbox_track.add_mark(
+                        Name=cue["name"],
+                        Type="cue",
+                        Start=cue["position"] / 1000,
+                        Num=i
+                    )
+
+                # Add loops at the end
+                loop_start_num = 8 - num_loops
+                for i, loop in enumerate(loops[:num_loops]):
+                    rekordbox_track.add_mark(
+                        Name=loop.get("name", ""),
+                        Type="loop",
+                        Start=loop["start"] / 1000,
+                        End=loop["end"] / 1000,
+                        Num=loop_start_num + i
+                    )
+
         assert rekordbox_track
-        rekordbox_track["TotalTime"] = duration
-        for cue in cue_data["cues"]:
-            rekordbox_track.add_mark(
-                Name=cue["name"], Type="cue", Start=cue["position"]/1000, Num=cue["index"]
-            )
-        for cue in cue_data["loops"]:
-            rekordbox_track.add_mark(
-                Name=cue.get("name", ""), Type="loop", Start=cue["start"]/1000, End=cue["end"]/1000, Num=cue["index"]
-            )
 
 
     def _get_playlist_folder(self, playlist_folder_name: str, parent_folder: Optional[Node] = None) -> Optional[Node]:

@@ -217,10 +217,11 @@ class DbController:
 
             if not results:
                 logger.info(f"no entry found for user {username} with subbox id {subbox_id}")
-                return None
-            assert len(results) == 1, f"got {len(results)} for {username} with subbox id {subbox_id}. Results: {results}"
-            result = results[0]
-            table.remove(doc_ids=[result.doc_id])
+            else:
+                assert len(results) == 1, f"got {len(results)} for {username} with subbox id {subbox_id}. Results: {results}"
+                result = results[0]
+                table.remove(doc_ids=[result.doc_id])
+                logger.info(f"removed {subbox_id} from subbox_beets_map_table")
 
             OriginalMetaMap = Query()
             query = (OriginalMetaMap.user_id == user_id) & (OriginalMetaMap.subbox_id == subbox_id)
@@ -230,10 +231,23 @@ class DbController:
 
             if not results:
                 logger.info(f"no entry found in original track meta for user {username} with subbox id {subbox_id}")
-                return None
-            assert len(results) == 1, f"got {len(results)} for {username} with subbox id {subbox_id}. Results: {results}"
-            result = results[0]
-            table.remove(doc_ids=[result.doc_id])
+            else:
+                assert len(results) == 1, f"got {len(results)} for {username} with subbox id {subbox_id}. Results: {results}"
+                result = results[0]
+                table.remove(doc_ids=[result.doc_id])
+                logger.info(f"removed {subbox_id} from original_track_meta_map_table")
+
+            table = self._db.table('library_table')
+            Track = Query()
+            track_query = (Track.user_id == user_id) & (Track.subbox_id == subbox_id)
+            results = table.search(track_query)
+            if not results:
+                logger.info(f"no entry found in library table for user {username} with subbox id {subbox_id}")
+            else:
+                assert len(results) == 1, f"got {len(results)} for {username} with subbox id {subbox_id}. Results: {results}"
+                result = results[0]
+                table.remove(doc_ids=[result.doc_id])
+                logger.info(f"removed {subbox_id} from library_table")
 
             return True
 

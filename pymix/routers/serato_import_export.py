@@ -60,13 +60,14 @@ async def serato_import(
             logger.error(
                 f"user {username} has attempted to import before uploading any tracks"
             )
-            return {
-                'success': False,
-                'imported_tracks': 0,
-                'n_tracks_for_import': total_n_tracks_for_import,
-                'beets_output': "",
-                'reason': f"user {username} has attempted to import before uploading any tracks."
-            }
+            # this path is ok for meta changes only
+            #return {
+            #    'success': False,
+            #    'imported_tracks': 0,
+            #    'n_tracks_for_import': total_n_tracks_for_import,
+            #    'beets_output': "",
+            #    'reason': f"user {username} has attempted to import before uploading any tracks."
+            #}
 
         total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
         job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
