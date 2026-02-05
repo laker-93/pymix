@@ -62,13 +62,14 @@ async def rekordbox_import(
             logger.info(
                 f"user {username} has attempted to import before uploading any tracks"
             )
-            return {
-                'success': False,
-                'job_id': job_id,
-                'max_library_size_exceeded': False,
-                'n_tracks_for_import': total_n_tracks_for_import,
-                'reason': f"user {username} has not uploaded any files to import."
-            }
+            # this path is ok e.g. for meta changes only
+            #return {
+            #    'success': False,
+            #    'job_id': job_id,
+            #    'max_library_size_exceeded': False,
+            #    'n_tracks_for_import': total_n_tracks_for_import,
+            #    'reason': f"user {username} has not uploaded any files to import."
+            #}
 
         total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
         job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)

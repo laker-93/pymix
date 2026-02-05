@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Optional
 
-from pyrekordbox import RekordboxXml
+from pyrekordbox.rbxml import RekordboxXml
 
 
 class RekordboxXMLFactory:

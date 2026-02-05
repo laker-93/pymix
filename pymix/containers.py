@@ -1,10 +1,10 @@
 from pathlib import Path
 import aiohttp
+from pyserato.builder import Builder
 
 from toredocore.providers.healthcheck.async_healthcheck_provider import AsyncHealthcheckProvider
 from toredocore.providers.healthcheck.healthcheck_dependency import HealthcheckDependency
 from dependency_injector import containers, providers
-from pyserato.crate import Builder
 
 from pymix.clients.beets_client import BeetsClient
 from pymix.clients.navidrome_client import NavidromeClient
@@ -41,6 +41,7 @@ class Container(containers.DeclarativeContainer):
         session=aiohttp_session,
         version=config.containers.subsonic.version,
         music_path_base_to_remove=config.containers.subsonic.music_path_base_to_remove,
+        serving_music_path_base=config.containers.subsonic.serving_music_path_base,
         zip_name=config.rekordbox.zip_name,
         app_env=config.app_env
     )
@@ -94,11 +95,13 @@ class Container(containers.DeclarativeContainer):
 
     rekordbox_xml_orchestrator = providers.Singleton(
         RekordboxXMLOrchestrator,
-        rekordbox_xml_factory
+        rekordbox_xml_factory,
+        db_controller
     )
     rb_backup_file_handler = providers.Singleton(
         RBBackupFileHandler,
         rekordbox_xml_orchestrator,
+        db_controller,
         config.containers.beets.data,
         config.containers.beets.data_public,
     )
@@ -120,12 +123,20 @@ class Container(containers.DeclarativeContainer):
         rekordbox_xml_orchestrator,
         rb_backup_file_handler,
         file_browser_file_handler,
-        config.rekordbox.restored_rb_output_root
+        subsonic_client,
+        db_controller,
+        config.rekordbox.restored_rb_output_root,
+        config.rekordbox.zip_name,
+        config.containers.subsonic.serving_music_path_base,
     )
 
     serato_crate_orchestrator = providers.Singleton(
         SeratoCrateOrchestrator,
-        providers.Singleton(Builder)
+        providers.Singleton(Builder),
+        db_controller,
+        rekordbox_xml_controller,
+        config.containers.filebrowser.data_uploads,
+        config.containers.subsonic.serving_music_path_base,
     )
     serato_controller = providers.Singleton(
         SeratoController,
@@ -137,6 +148,10 @@ class Container(containers.DeclarativeContainer):
 
         ),
         file_browser_file_handler,
+        rb_backup_file_handler,
+        rekordbox_xml_controller,
+        db_controller,
+        config.containers.subsonic.serving_music_path_base,
     )
 
     beets_client = providers.Singleton(

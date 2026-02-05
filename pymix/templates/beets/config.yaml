@@ -36,10 +36,10 @@ paths:
         
 import:
     write: yes
-    # we copy so pymix can remove the import src dir when the
-    # process has completed successfully.
-    copy: yes
-    move: no
+    copy: no
+    # move so successfully imported files are moved out of the incoming staging directory for beets
+    # then on partial import, can retry and attempt to complete the rest
+    move: yes
     resume: ask
     incremental: no
     incremental_skip_later: no

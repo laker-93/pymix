@@ -6,10 +6,12 @@ import music_tag
 import shutil
 from pathlib import Path
 
-from pyrekordbox.xml import Track
+from pyrekordbox.rbxml import Track
 
+from pymix.controllers.db_controller import DbController
 from pymix.model.subboxtrack import SubBoxTrack
 from pymix.orchestrators.rekordbox_xml_orchestrator import RekordboxXMLOrchestrator
+from pymix.utils.tag_subbox_id import tag_subbox_id, get_subbox_id
 
 logger = logging.getLogger(__name__)
 
@@ -18,10 +20,12 @@ class RBBackupFileHandler:
     def __init__(
             self,
             rekordbox_xml_orchestrator: RekordboxXMLOrchestrator,
+            db_controller: DbController,
             beets_data_path: str,
             beets_data_path_public: str
     ):
         self._rekordbox_xml_orchestrator = rekordbox_xml_orchestrator
+        self._db_controller = db_controller
         self._beets_data_path = beets_data_path
         self._beets_data_path_public = beets_data_path_public
 
@@ -84,6 +88,7 @@ class RBBackupFileHandler:
 
         logger.info(f'removing contents of {beets_data_path}')
         for filepath in Path(beets_data_path).iterdir():
+            logger.warning(f'file {filepath} remains after import - this should have been moved by beets on import')
             if filepath.is_dir():
                 shutil.rmtree(filepath)
             else:
@@ -98,6 +103,7 @@ class RBBackupFileHandler:
         n_updated_tracks = self.restore_track_meta(username, audio_files_zip)
         return n_updated_tracks
 
+    # todo: move from rb handler as logic is generic to serato and rb
     def stage_for_import(self, username: str, audio_files: Path):
         """
         Move the audio file to the beets docker shared directory that is used for import in to beets.
@@ -108,6 +114,13 @@ class RBBackupFileHandler:
             if item.is_file():
                 mime_type = filetype.guess_mime(item)
                 if mime_type and mime_type.split('/')[0] == 'audio':
+                    subbox_id = get_subbox_id(item)
+                    if subbox_id:
+                        subbox_id_beet_id = self._db_controller.get_subbox_beet_map(username, subbox_id)
+                        if subbox_id_beet_id:
+                            logger.info(f'already have track {item} imported: {subbox_id_beet_id}.'
+                                        ' Skipping to avoid duplication.')
+                            continue
                     self._restore_title_if_not_present(item)
                     relative_path = item.relative_to(audio_files)
                     suffix = item.suffix
@@ -121,7 +134,8 @@ class RBBackupFileHandler:
 
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     logger.info(f'staging {item} to {destination}')
-                    shutil.move(str(item), str(destination))
+                    # leave the file in the filebrowser location so it is not reuploaded on retry in case of failure
+                    shutil.copy(str(item), str(destination))
 
     @staticmethod
     def _restore_tags(audio_file: Path, track: SubBoxTrack):

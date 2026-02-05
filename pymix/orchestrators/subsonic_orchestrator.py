@@ -74,6 +74,8 @@ class SubsonicOrchestrator:
         Given list of subbox playlists (e.g. formed from parsing XML), update the playlist
         track with the id of the subsonic track.
         """
+        # todo can use the db here to get the original user location from xml and look up subbox id from original meta data
+        # then use subbox id and beets query to find new path
         tracks_to_update = []
         if not tracks:
             for playlist in subbox_playlists:
@@ -83,13 +85,16 @@ class SubsonicOrchestrator:
             tracks_to_update = tracks
         for track in tracks_to_update:
             name = track.name
+            if track.sub_track_id is not None:
+                continue
             try:
                 matched_track = await self._subsonic_client.get_track_match(user, title=name, artist=track.artist)
             except (KeyError, AssertionError) as ex:
                 logger.warning(f'unable to find track in navidrome {track}. This track will not be imported properly. Please ensure name of track in rekordbox is correct. Exception {ex}')
             else:
                 if matched_track:
-                    track.sub_track_id = matched_track.sub_track_id
+                    match = matched_track[0]
+                    track.sub_track_id = match.sub_track_id
                 else:
                     logger.warning(f'unable to find track in navidrome {track}. This track will not be imported properly. Please ensure name of track in rekordbox is correct.')
 

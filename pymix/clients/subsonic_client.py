@@ -20,6 +20,28 @@ from pymix.utils.utility import add_url_params
 logger = logging.getLogger(__name__)
 
 
+IGNORED_TITLE_WORDS = {'remix'}
+
+def clean(text: str, is_title=False) -> str:
+    cleaned = re.sub(r'\W+', ' ', text.lower()) if text else ''
+    if is_title and len(cleaned) > max(map(len, IGNORED_TITLE_WORDS)):
+        tokens = [t for t in cleaned.split() if t not in IGNORED_TITLE_WORDS]
+        cleaned = ' '.join(tokens).strip()
+    return cleaned
+
+def compute_similarity(title_a: str, artist_a: str, album_a: Optional[str], title_b: str, artist_b: str, album_b: Optional[str]) -> float:
+    title_sim = SequenceMatcher(None, title_a, title_b).ratio()
+    artist_sim = SequenceMatcher(None, artist_a, artist_b).ratio()
+    total = title_sim + artist_sim
+    weight = 2.0
+
+    if album_a and album_b:
+        album_sim = SequenceMatcher(None, album_a, album_b).ratio()
+        total += album_sim * 0.5
+        weight += 0.5
+
+    return total / weight
+
 def extract_track_name(full_string: str, artist: str, album=None) -> None | str:
     """
     Extracts the track name from a string containing an artist, and optionally an album,
@@ -66,11 +88,12 @@ def extract_track_name(full_string: str, artist: str, album=None) -> None | str:
 
 class SubsonicClient(BaseAPIClient):
     def __init__(self, host: str, session: aiohttp.ClientSession, version: str,
-                 music_path_base_to_remove: str, zip_name: Optional[str], app_env: str):
+                 music_path_base_to_remove: str, serving_music_path_base: str, zip_name: Optional[str], app_env: str):
         super().__init__(host, session)
         self._zip_name = '/' + zip_name + '/' if zip_name else ''
         self._version = version
         self._music_path_base_to_remove = music_path_base_to_remove
+        self._serving_music_path_base = serving_music_path_base
         self._app_env = app_env
 
     @staticmethod
@@ -123,31 +146,36 @@ class SubsonicClient(BaseAPIClient):
             ) for playlist in resp_playlists
         ]
 
-    def _parse_query(self, response: dict, search_result: str = 'searchResult2') -> List[SubBoxTrack]:
+    def _parse_query(self, response: dict, username: str, search_result: str = 'searchResult2') -> Tuple[List[SubBoxTrack], int]:
+        src_dir = self._serving_music_path_base.format(user=username)
         try:
             resp = response['subsonic-response'][search_result]['song']
         except KeyError:
             logger.error(f'no songs found in response {response}')
             resp = []
+        n_items = len(resp)
         return [
             SubBoxTrack(
                 name=entry['title'],
                 artist=entry['artist'],
                 path=Path(f"{self._zip_name}{entry['path'].removeprefix(self._music_path_base_to_remove)}"),
+                pymix_path=Path(src_dir + (entry['path'].removeprefix(self._music_path_base_to_remove))),
                 album=entry['album'],
                 rating=entry.get('userRating', 0),
                 genre=None if entry.get('genre') == '\x1a' else entry.get('genre'),
                 sub_track_id=entry.get('id')
             ) for entry in resp if 'private' in entry['path']
-            ]
+        ], n_items
 
-    def _parse_tracks(self, response: dict) -> List[SubBoxTrack]:
+    def _parse_tracks(self, response: dict, username: str) -> List[SubBoxTrack]:
         resp_playlist = response['subsonic-response']['playlist'].get('entry', [])
+        src_dir = self._serving_music_path_base.format(user=username)
         return [
             SubBoxTrack(
                 name=entry['title'],
                 artist=entry['artist'],
                 path=Path(f"{self._zip_name}{entry['path'].removeprefix(self._music_path_base_to_remove)}"),
+                pymix_path=Path(src_dir + (entry['path'].removeprefix(self._music_path_base_to_remove))),
                 album=entry['album'],
                 rating=entry.get('userRating', 0),
                 genre=entry.get('genre')
@@ -205,7 +233,7 @@ class SubsonicClient(BaseAPIClient):
         )
         response = await self.get(url)
         assert response
-        tracks = self._parse_tracks(response)
+        tracks = self._parse_tracks(response, username=username)
         return tracks
 
     async def get_track(self, user: dict, track_id: str):
@@ -240,49 +268,54 @@ class SubsonicClient(BaseAPIClient):
                 ]
             )
             response = await self.get(url)
-            tracks = self._parse_query(response, search_result='searchResult3')
-            yield tracks
-            if len(tracks) < batch_size:
+            tracks, n_items = self._parse_query(response, username=username, search_result='searchResult3')
+            logger.info(f'yielding {len(tracks)} tracks from subsonic out of total of {n_items}')
+            if len(tracks) == 0:
                 break
+            yield tracks
             offset += batch_size
 
-    async def get_best_track_match(self, title: str, artist: str, album: Optional[str], query_func, similarity_threshold: float) -> \
-    Optional[SubBoxTrack]:
-        tracks = await query_func
-        if len(tracks) == 1:
+    async def _get_best_track_match(self, title: str, artist: str, album: Optional[str], tracks: List[SubBoxTrack], similarity_threshold: float) -> \
+    Optional[tuple[SubBoxTrack, float]]:
+        match = None
+        if len(tracks) > 1:
+            logger.info(f'found multiple matches for {title} by {artist} in subsonic')
+        if len(tracks) >= 1:
             match = await self._find_best_match(title, artist, tracks, album, similarity_threshold)
-            return match
-        elif len(tracks) > 1:
-            logger.info(f'found multiple matches for {title} by {artist} in subsonic: {tracks}')
-            match = await self._find_best_match(title, artist, tracks, album, similarity_threshold)
-            return match
-        elif len(tracks) == 0:
-            return None
+        return match
 
     async def get_track_match(self, user: dict, title: str, artist: str, album: Optional[str] = None) -> Optional[
-        SubBoxTrack]:
+        tuple[SubBoxTrack, float]]:
         clean_title = extract_track_name(title, artist, album)
         if clean_title is None:
             logger.error(f'failed to clean track name from {title} by {artist} and {album}')
         else:
             title = clean_title
 
-        match = await self.get_best_track_match(title, artist, album,
-                                                self.query_tracks_by(user, title, artist), 0.8)
+        candidate_tracks = await self.query_tracks_by(user, title, artist)
+        match = await self._get_best_track_match(title, artist, album,
+                                                candidate_tracks, 0.8)
         if match:
             return match
 
         logger.info(f'no matches querying by {title} and {artist}. Querying on title only...')
-        match = await self.get_best_track_match(title, artist, album, self.query_track_by_name(user, title), 0.6)
+        candidate_tracks = await self.query_track_by_name(user, title)
+        match = await self._get_best_track_match(title, artist, album, candidate_tracks, 0.6)
         if match:
             return match
 
         logger.info(f'no matches querying by {title}. Querying on tokens of title...')
+        candidate_tracks = []
         for token in title.split():
-            match = await self.get_best_track_match(title, artist, album,
-                                                    self.query_track_by_name(user, token), 0.4)
-            if match:
-                return match
+            # skip common words that will give false positives
+            if (token.lower() == "the" or token.lower() == "a") and len(title.split()) > 1:
+                continue
+            candidate_tracks.extend(
+                await self.query_track_by_name(user, token)
+            )
+        match = await self._get_best_track_match(title, artist, album, candidate_tracks, 0.4)
+        if match:
+            return match
 
         logger.error(f'failed to find match on {title} or any of its tokens')
         return None
@@ -299,7 +332,7 @@ class SubsonicClient(BaseAPIClient):
         response = await self.get(url)
         logger.info(f'got response {response}')
         try:
-            tracks = self._parse_query(response)
+            tracks, _ = self._parse_query(response, username=username)
         except Exception as ex:
             raise KeyError(f'unable to parse tracks from url query {url}') from ex
         return tracks
@@ -318,53 +351,58 @@ class SubsonicClient(BaseAPIClient):
         )
         response = await self.get(url)
         try:
-            tracks = self._parse_query(response)
+            tracks, _ = self._parse_query(response, username=username)
         except Exception as ex:
             raise KeyError(f'unable to parse tracks from url query {url}') from ex
         return tracks
 
     async def _find_best_match(self, title: str, artist: str, tracks: List[SubBoxTrack], album: Optional[str], similarity_threshold: float) -> \
-    Optional[SubBoxTrack]:
+    Optional[tuple[SubBoxTrack, float]]:
         results = {}
+
+        title_clean = clean(title, is_title=True)
+        artist_clean = clean(artist)
+        album_clean = clean(album) if album else None
+
         for track in tracks:
-            title_clean = re.sub(r'\W+', '', title.lower())
-            artist_clean = re.sub(r'\W+', '', artist.lower())
-            track_title_clean = re.sub(r'\W+', '', track.name.lower())
-            track_artist_clean = re.sub(r'\W+', '', track.artist.lower())
+            track_title_clean = clean(track.name, is_title=True)
+            track_artist_clean = clean(track.artist)
+            track_album_clean = clean(track.album) if track.album else None
 
-            title_similarity = SequenceMatcher(None, title_clean, track_title_clean).ratio()
-            artist_similarity = SequenceMatcher(None, artist_clean, track_artist_clean).ratio()
-            overall_similarity = (title_similarity + artist_similarity) / 2
+            # Primary similarity
+            similarity = compute_similarity(
+                title_clean, artist_clean, album_clean,
+                track_title_clean, track_artist_clean, track_album_clean
+            )
 
-            if album and track.album:
-                album_clean = re.sub(r'\W+', '', album.lower())
-                track_album_clean = re.sub(r'\W+', '', track.album.lower())
-                album_similarity = SequenceMatcher(None, album_clean, track_album_clean).ratio()
-                overall_similarity = (title_similarity + artist_similarity + (album_similarity / 2)) / 2.5
+            if similarity >= similarity_threshold:
+                results[similarity] = track
+                continue
 
-            if overall_similarity > similarity_threshold:
-                results[overall_similarity] = track
+            # Fallback: try again with bracketed text removed from titles only
+            title_no_brackets = re.sub(r"[\(\[].*?[\)\]]", "", title.lower())
+            track_title_no_brackets = re.sub(r"[\(\[].*?[\)\]]", "", track.name.lower())
+            title_no_brackets_clean = clean(title_no_brackets, is_title=True)
+            track_title_no_brackets_clean = clean(track_title_no_brackets, is_title=True)
+
+            fallback_similarity = compute_similarity(
+                title_no_brackets_clean, artist_clean, album_clean,
+                track_title_no_brackets_clean, track_artist_clean, track_album_clean
+            )
+
+            if fallback_similarity >= similarity_threshold:
+                results[fallback_similarity] = track
             else:
-                # if still don't have a good similarity, try removing any text inside the brackes
-                title_brackets_removed = re.sub(r"[\(\[].*?[\)\]]", "", title.lower())
-                track_title_brackets_removed = re.sub(r"[\(\[].*?[\)\]]", "", track.name.lower())
-                title_similarity = SequenceMatcher(None, title_brackets_removed, track_title_brackets_removed).ratio()
-                overall_similarity = (title_similarity + artist_similarity) / 2
-                if album and track.album:
-                    album_similarity = SequenceMatcher(None, album_clean, track_album_clean).ratio()
-                    overall_similarity = (title_similarity + artist_similarity + (album_similarity / 2)) / 2.5
-                if overall_similarity > similarity_threshold:
-                    results[overall_similarity] = track
-                else:
-                    logger.warning(f'did not find a good similarity ({overall_similarity}) for {title} by {artist} against {track}')
-
+                logger.warning(
+                    f"No good match ({fallback_similarity:.3f} < {similarity_threshold}) for '{title}' by '{artist}' against track '{track}'"
+                )
         if not results:
             return None
 
         max_similarity = max(results.keys())
         result = results[max_similarity]
         logger.info(f'matched query of {title} by {artist} to {result} with similarity {max_similarity} out of {len(results)} candidates')
-        return result
+        return result, max_similarity
 
 
 

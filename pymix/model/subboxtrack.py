@@ -4,13 +4,17 @@ from typing import Optional
 #from pydantic import dataclasses
 import dataclasses
 
+from pyserato.model.hot_cue import HotCue
+
 
 @dataclasses.dataclass
 class SubBoxTrack:
     name: str
     artist: str
     album: str
+    # the child path relatively to a root
     path: Optional[Path] = None
+    pymix_path: Optional[Path] = None
     rating: int = 0
     genre: Optional[str] = None
     # the Rekordbox XML TrackID.
@@ -18,6 +22,8 @@ class SubBoxTrack:
     track_number: Optional[str] = None
     # the subsonic TrackID.
     sub_track_id: Optional[int] = None
+    subbox_id: Optional[str] = None
+    serato_hot_cues: Optional[list[HotCue]] = None
 
     def __eq__(self, other):
         return self.name == other.name and self.artist == other.artist

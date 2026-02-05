@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pymix import constants
 from pymix.containers import Container
 from pymix.handlers.filebrowser_file_handler import poll_watchdir, trigger_processing
-from pymix.routers import maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, match_tracks
+from pymix.routers import maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, match_tracks, track
 
 
 
@@ -61,6 +61,7 @@ def create_app(container):
     app.include_router(export_progress.router)
     app.include_router(sync.router)
     app.include_router(match_tracks.router)
+    app.include_router(track.router)
     return app
 
 
@@ -78,7 +79,7 @@ def create_container(environment="dev"):
     container.init_resources()
     container.wire(
         modules=[
-            maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, sys.modules[__name__]
+            maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, sys.modules[__name__]
         ]
     )
     return container

@@ -1,11 +1,15 @@
+import json
 import uuid
 import logging
+import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
+from zoneinfo import ZoneInfo
 
 from tinydb import TinyDB, Query
 from tinydb.table import Document
 
+from pymix.model.original_track_meta import OriginalTracks
 from pymix.utils.get_available_port import get_available_port
 
 
@@ -18,11 +22,337 @@ class DbController:
         self._app_env = app_env
         self._session_to_user_schema = ('session_id', 'user_id')
         self._user_schema = ('username', 'password', 'email', 'user_id', 'beets_port', 'subsonic_port', 'max_library_size')
+        self._subbox_beets_map_schema = (
+            'user_id',  # FK -> users.user_id
+            'subbox_id',  # unique per user (primary identifier for track)
+            'beet_id',  # unique per user
+            "created_at"
+        )
+        self._library_schema = (
+            'user_id',  # FK -> users.user_id
+            'subbox_id',  # unique per user (primary identifier for track)
+            'cuedata',
+            'source_app',
+            'updated_at',
+            'version'
+        )
+        self._meta_history_schema = (
+            'user_id',  # FK -> users.user_id
+            'subbox_id',  # FK -> library.subbox_id
+            'version',  # int
+            'hash',  # checksum for diff
+            'cuedata',  # the JSON snapshot of that version
+            'source_app',  # where update came from
+            'change_type',  # 'upload', 'edit', 'sync', 'merge'
+            'changed_at',  # ISO timestamp
+        )
         self._user_jobs_schema = ('user_id', 'job_id')
         self._import_job_schema = ('job_id', 'name', 'n_tracks_to_import', 'total_n_imported_tracks', 'in_progress', 'result')
         self._export_job_schema = ('job_id', 'name', 'total_n_tracks_to_export', 'n_exported_tracks', 'in_progress', 'result')
         self._user_token_schema = ('user_id', 'token')
+        self._original_track_meta = (
+            'user_id',
+            'subbox_id',
+            'user_location',
+            'staging_location',
+            'original_name',
+            'original_artist',
+            'original_album'
+
+        )
         self._max_library_size = max_library_size
+
+    def add_subbox_beet_map(self, username: str, subbox_id: str, beet_id: int) -> dict:
+        """
+        Adds or updates a mapping between subbox_id and beet_id for a specific user.
+        If the mapping already exists, it will be updated.
+        Returns the inserted or updated record.
+        """
+        try:
+            # 1️⃣ Get user_id
+            user = self.get_user(username)
+            user_id = user["user_id"]
+
+            Map = Query()
+            query = (Map.user_id == user_id) & (Map.subbox_id == subbox_id)
+
+            table = self._db.table('subbox_beets_map_table')
+            results = table.search(query)
+
+            if results:
+                raise ValueError(f"already got entry {results} with subbox id {subbox_id}")
+            else:
+                # 3️⃣ Insert new mapping
+                new_record = {
+                    "user_id": user_id,
+                    "subbox_id": subbox_id,
+                    "beet_id": beet_id,
+                    "created_at": datetime.datetime.now().isoformat()
+                }
+                table.insert(new_record)
+                logger.info(f"Inserted new beet mapping for {username}: {subbox_id} → {beet_id}")
+                result = new_record
+            return result
+
+        except Exception as ex:
+            logger.error(
+                f"Error adding beet mapping for {username} (subbox_id={subbox_id}, beet_id={beet_id}): {repr(ex)}",
+                exc_info=True
+            )
+            raise
+
+    def get_subbox_beet_map(self, username: str, subbox_id: str) -> dict | None:
+        """
+        Retrieves a mapping between subbox_id and beet_id for a specific user.
+        Returns the record if found, otherwise None.
+        """
+        try:
+            # 1️⃣ Get user_id
+            user = self.get_user(username)
+            user_id = user["user_id"]
+
+            Map = Query()
+            query = (Map.user_id == user_id) & (Map.subbox_id == subbox_id)
+
+            table = self._db.table('subbox_beets_map_table')
+            result = table.get(query)
+
+            if result:
+                logger.info(
+                    f"Retrieved beet mapping for {username}: subbox_id={subbox_id} → beet_id={result.get('beet_id')}"
+                )
+            else:
+                logger.info(
+                    f"No beet mapping found for {username} with subbox_id={subbox_id}"
+                )
+
+            return result
+
+        except Exception as ex:
+            logger.error(
+                f"Error retrieving beet mapping for {username} (subbox_id={subbox_id}): {repr(ex)}",
+                exc_info=True
+            )
+            raise
+
+    def get_library_entry(
+        self,
+        username: str,
+        subbox_id: str,
+        version: Optional[int] = None
+    ) -> Optional[Dict[str, any]]:
+        """
+        Retrieve metadata for a given user's track.
+        If version is provided, look for that specific version (if stored).
+        Otherwise, return the latest record for that track.
+        """
+
+        try:
+            # --- 1️⃣ Resolve user_id ---
+            user = self.get_user(username)
+            user_id = user["user_id"]
+
+            # --- 2️⃣ Build query ---
+            Library = Query()
+            query = (Library.user_id == user_id) & (Library.subbox_id == subbox_id)
+
+            if version is not None:
+                query = query & (Library.version == version)
+                logger.info(f"Fetching metadata v{version} for subbox_id={subbox_id}, user={username}")
+            else:
+                logger.info(f"Fetching latest metadata for subbox_id={subbox_id}, user={username}")
+
+            library_table = self._db.table('library_table')
+            results = library_table.search(query)
+            if not results:
+                logger.warning(f"No metadata found for subbox_id={subbox_id}, user={username}")
+                return None
+            assert len(results) == 1, f"have multiple entries with subbox id {subbox_id}. results: {results}."
+            record = results.pop()
+            # --- 3️⃣ Parse JSON if needed ---
+            cuedata = record.get("cuedata")
+            if isinstance(cuedata, str):
+                try:
+                    cuedata = json.loads(cuedata)
+                except json.JSONDecodeError:
+                    logger.error(f"Invalid cuedata JSON for {subbox_id}, user={username}")
+                    cuedata = {}
+
+            # --- 4️⃣ Return normalized record ---
+            return {
+                "subbox_id": record.get("subbox_id"),
+                "username": username,
+                "version": record.get("version"),
+                "source_app": record.get("source_app"),
+                "updated_at": record.get("updated_at"),
+                "cuedata": cuedata,
+            }
+
+        except Exception as ex:
+            logger.error(
+                f"Error retrieving metadata for subbox_id={subbox_id}, user={username}: {repr(ex)}",
+                exc_info=True
+            )
+            raise
+
+    def delete_track(
+            self,
+            username: str,
+            subbox_id: str,
+    ) -> Optional[bool]:
+        """
+        Delete metadata for a track in the db.
+        TODO - set an is_active flag to false instead of deleting permanently.
+        """
+
+        try:
+            user = self.get_user(username)
+            user_id = user["user_id"]
+
+            Map = Query()
+            query = (Map.user_id == user_id) & (Map.subbox_id == subbox_id)
+
+            table = self._db.table('subbox_beets_map_table')
+            results = table.search(query)
+
+            if not results:
+                logger.info(f"no entry found for user {username} with subbox id {subbox_id}")
+            else:
+                assert len(results) == 1, f"got {len(results)} for {username} with subbox id {subbox_id}. Results: {results}"
+                result = results[0]
+                table.remove(doc_ids=[result.doc_id])
+                logger.info(f"removed {subbox_id} from subbox_beets_map_table")
+
+            OriginalMetaMap = Query()
+            query = (OriginalMetaMap.user_id == user_id) & (OriginalMetaMap.subbox_id == subbox_id)
+
+            table = self._db.table('original_track_meta_map_table')
+            results = table.search(query)
+
+            if not results:
+                logger.info(f"no entry found in original track meta for user {username} with subbox id {subbox_id}")
+            else:
+                assert len(results) == 1, f"got {len(results)} for {username} with subbox id {subbox_id}. Results: {results}"
+                result = results[0]
+                table.remove(doc_ids=[result.doc_id])
+                logger.info(f"removed {subbox_id} from original_track_meta_map_table")
+
+            table = self._db.table('library_table')
+            Track = Query()
+            track_query = (Track.user_id == user_id) & (Track.subbox_id == subbox_id)
+            results = table.search(track_query)
+            if not results:
+                logger.info(f"no entry found in library table for user {username} with subbox id {subbox_id}")
+            else:
+                assert len(results) == 1, f"got {len(results)} for {username} with subbox id {subbox_id}. Results: {results}"
+                result = results[0]
+                table.remove(doc_ids=[result.doc_id])
+                logger.info(f"removed {subbox_id} from library_table")
+
+            return True
+
+        except Exception as ex:
+            logger.error(
+                f"Error retrieving metadata for subbox_id={subbox_id}, user={username}: {repr(ex)}",
+                exc_info=True
+            )
+            raise
+
+    def save_original_track_meta(
+            self,
+            username: str,
+            tracks: OriginalTracks,
+    ):
+        user = self.get_user(username)
+        user_id = user["user_id"]
+
+        # Check no existing meta
+        table = self._db.table('original_track_meta_map_table')
+        for track in tracks.tracks:
+            Track = Query()
+            assert track.subbox_id, f"no subbox id for track {track}"
+            track_query = (Track.user_id == user_id) & (Track.subbox_id == track.subbox_id)
+            results = table.search(track_query)
+            if results:
+                existing = results.pop()
+                # this can happen if a previous attempt failed to import successfully.
+                logger.info(f"have matching track for {track} in db with: {existing}")
+                continue
+
+            # Update or insert in library
+            new_entry = {
+                "user_id": user_id,
+                "user_location": track.userLocation,
+                "staging_location": track.stagingLocation,
+                "original_name": track.originalName,
+                "original_artist": track.originalArtist,
+                "original_album": track.originalAlbum,
+                "subbox_id": track.subbox_id,
+            }
+
+            table.insert(new_entry)
+
+    def get_meta_by_user_location(self, username: str, user_location: str) -> Optional[Dict]:
+        user = self.get_user(username)
+        user_id = user["user_id"]
+        self._db.clear_cache()
+        table = self._db.table('original_track_meta_map_table')
+        query = Query()
+        results = table.search((query.user_id == user_id) & (query.user_location == user_location))
+        if results:
+            assert len(results) == 1, f"got multiple results for {username} {user_location}: {results}"
+            result = results.pop()
+        else:
+            result = None
+        return result
+
+
+    def update_metadata(
+            self,
+            username: str,
+            subbox_id: str,
+            cuedata: dict[str, any],
+            source_app: str,
+            change_type: str = "edit"  # upload, edit, sync, merge
+    ):
+        user = self.get_user(username)
+        user_id = user["user_id"]
+        now = datetime.datetime.now().timestamp()
+
+        # Fetch existing track
+        library_table = self._db.table('library_table')
+        Track = Query()
+        track_query = (Track.user_id == user_id) & (Track.subbox_id == subbox_id)
+        results = library_table.search(track_query)
+        if results:
+            existing = results.pop()
+            version = existing["version"] + 1
+        else:
+            version = 1
+
+        # Update or insert in library
+        new_entry = {
+            "user_id": user_id,
+            "subbox_id": subbox_id,
+            "cuedata": cuedata,
+            "source_app": source_app,
+            "updated_at": now,
+            "version": version,
+        }
+
+        library_table.upsert(new_entry, track_query)
+
+        # Log in meta_history
+        meta_history_table = self._db.table('meta_history_table')
+        meta_history_table.insert({
+            "user_id": user_id,
+            "subbox_id": subbox_id,
+            "version": version,
+            "cuedata": cuedata,
+            "source_app": source_app,
+            "change_type": change_type,
+            "changed_at": now
+        })
 
     def set_token(self, token: str):
         user_token_table = self._db.table('user_token_table')
