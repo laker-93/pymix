@@ -118,8 +118,8 @@ class SeratoController:
             # we want to handle the meta data regardless as we could have had some files that were successfully imported
             # in those cases, we want to handle the meta data so they are skipped on next import attempt
             # set permissions so navidrome can read - todo: remove this by running pymix as non root
-            src_dir = self._serving_music_path_base.format(user=username)
-            make_readable(Path(src_dir))
+            #src_dir = self._serving_music_path_base.format(user=username)
+            #make_readable(Path(src_dir))
             # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
             # todo move this logic out of the rb xml controller
             self._rb_xml_controller._get_duplicates(username, False)

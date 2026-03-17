@@ -1,7 +1,7 @@
 import logging
 import zipfile
+import mimetypes
 
-import filetype
 import music_tag
 import shutil
 from pathlib import Path
@@ -75,6 +75,7 @@ class RBBackupFileHandler:
                 restored_track.parent.mkdir(parents=True, exist_ok=True)
                 audio_file.rename(restored_track)
                 n_updated_tracks += 1
+                # todo tag with subbox_id and call db_controller.save_original_track_meta with original track info
         return n_updated_tracks
 
     def clean_up_beets_import_tree(self, username: str, public: bool):
@@ -112,7 +113,11 @@ class RBBackupFileHandler:
         beets_data_path = Path(beets_data_path)
         for item in audio_files.rglob('*'):
             if item.is_file():
-                mime_type = filetype.guess_mime(item)
+                mime_type_encoding = mimetypes.guess_type(item)
+                if mime_type_encoding is None:
+                    logger.error(f'could not guess mime type of {item}')
+                    continue
+                mime_type = mime_type_encoding[0]
                 if mime_type and mime_type.split('/')[0] == 'audio':
                     subbox_id = get_subbox_id(item)
                     if subbox_id:
@@ -126,9 +131,9 @@ class RBBackupFileHandler:
                     suffix = item.suffix
                     destination = beets_data_path / relative_path
                     if not suffix:
-                        extension = filetype.guess_extension(item)
+                        extension = mimetypes.guess_extension(mime_type)
                         if extension:
-                            destination = destination.with_suffix(f'.{extension}')
+                            destination = destination.with_suffix(f'{extension}')
                         else:
                             logger.error(f'unknown file type for {item}')
 

@@ -8,6 +8,7 @@ import music_tag
 from pyserato.builder import Builder
 from pyserato.encoders.v2_mp3_encoder import V2Mp3Encoder
 from pyserato.model.crate import Crate
+from pyserato.model.track import Track
 from pyserato.util import DuplicateTrackError
 
 from pymix.controllers.db_controller import DbController
@@ -114,10 +115,10 @@ class SeratoCrateOrchestrator:
         Add track to the leaf of a root crate. The crate tree must not have any branches.
         """
         while crate.children:
-            crate = crate.children[-1]
+            crate = list(crate.children.values())[-1]
         try:
-            crate.add_song(
-                Path(f'{user_root}/{track.path}')
+            crate.add_track(
+                Track.from_path(Path(f'{user_root}/{track.path}'))
             )
         except DuplicateTrackError:
             logger.info(f"track {track} is already present. Not adding to crate {crate}.")
@@ -136,7 +137,7 @@ class SeratoCrateOrchestrator:
         child_crate = None
         crate = None
         for crate_name in reversed(crate_names):
-            crate = Crate(crate_name, children=[child_crate] if child_crate else None)
+            crate = Crate(crate_name, children={child_crate.name: child_crate} if child_crate else None)
             child_crate = crate
         assert crate
         return crate

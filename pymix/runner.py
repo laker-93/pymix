@@ -27,7 +27,7 @@ async def main(loop, container, app_config: Dict = Provide[Container.config]):
 
 if __name__ == '__main__':
     arg_parser = ArgumentParser()
-    arg_parser.add_argument("-e", "--env", default="dev.old", help="The environment to run the app with")
+    arg_parser.add_argument("-e", "--env", default="dev", help="The environment to run the app with")
     args = arg_parser.parse_args()
     container = create_container(args.env)
     container.wire(modules=[__name__])

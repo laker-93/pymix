@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 
 class OriginalTrackMeta(BaseModel):
-    userLocation: str
+    userLocation: Optional[str]
     stagingLocation: str
     originalName: str
     originalArtist: str

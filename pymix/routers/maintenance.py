@@ -1,6 +1,5 @@
 import logging
 
-from toredocore.providers.healthcheck.async_healthcheck_provider import AsyncHealthcheckProvider
 from dependency_injector.wiring import Provide, inject
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -15,12 +14,14 @@ logger = logging.getLogger(__name__)
 @inject
 async def healthcheck(
         config: dict = Depends(Provide[Container.config]),
-        healthcheck_provider: AsyncHealthcheckProvider = Depends(Provide[Container.healthcheck_provider])
 )-> dict:
     logger.info(f'Getting healthcheck')
     config_to_return = config  # todo hide my secrets
     try:
-        resp = await healthcheck_provider.health_check()
+        # todo call out to modules to verify things are good
+        resp = {
+            "is_healthy": True
+        }
     except Exception as exc:
         logger.exception(exc)
         raise HTTPException(status_code=500, detail=str(exc))

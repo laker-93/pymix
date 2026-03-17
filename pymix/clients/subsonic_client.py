@@ -10,9 +10,9 @@ from typing import Tuple, List, Optional, AsyncIterator, Union
 
 import aiohttp
 
+from pymix.clients.base_api_client import BaseAPIClient
 from pymix.model.subboxplaylist import SubBoxPlaylist
 
-from toredocore.providers.base_api_client import BaseAPIClient
 
 from pymix.model.subboxtrack import SubBoxTrack
 from pymix.utils.utility import add_url_params

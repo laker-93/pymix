@@ -9,7 +9,6 @@ pyrekordbox~=0.4.3
 mutagen
 music-tag
 tinydb~=4.8.0
-toredocore~=1.0.0
 pyserato~=0.2
 mediafile~=0.13.0
 beets~=2.2.0

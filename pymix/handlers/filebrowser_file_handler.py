@@ -3,21 +3,19 @@ import logging
 
 import mimetypes
 import shutil
-import uuid
 import zipfile
 from collections import defaultdict
 from pathlib import Path
 from typing import Tuple, Optional, Dict
 from zipfile import ZipFile
 
-import taglib
-from filetype import filetype
+import music_tag
 from watchfiles import awatch, Change
 
 from tinydb import TinyDB
 
 from pymix.controllers.db_controller import DbController
-from pymix.model.original_track_meta import OriginalTracks
+from pymix.model.original_track_meta import OriginalTracks, OriginalTrackMeta
 from pymix.model.subboxtrack import SubBoxTrack
 from pymix.utils.tag_subbox_id import tag_subbox_id
 
@@ -77,6 +75,7 @@ class FileBrowserFileHandler:
             beets_data_path: str,
             beets_data_path_public: str,
             update_job_period_s: int,
+            db_controller: DbController
     ):
         self._zip_name = zip_name
         self._serving_music_path_base = serving_music_path_base.removesuffix('/')
@@ -87,6 +86,7 @@ class FileBrowserFileHandler:
         self._beets_data_path_public = beets_data_path_public
         self._update_job_period_s = update_job_period_s
         self._mimetypes = mimetypes.init()
+        self._db_controller = db_controller
 
     def get_xml_output_path(self, username: str) -> Path:
         src_path = Path(
@@ -117,12 +117,11 @@ class FileBrowserFileHandler:
         for f in src_path.rglob('*'):
             if not f.is_file():
                 continue
-            mime_type = filetype.guess_mime(f)
-            if mime_type is None:
-                mime_type = mimetypes.guess_type(str(f))[0]
-            if mime_type is None:
+            mime_type_encoding = mimetypes.guess_type(str(f))
+            if mime_type_encoding is None:
                 logger.error(f'skipping file {f}')
                 continue
+            mime_type = mime_type_encoding[0]
             if f.name.lower() == 'all-crates.zip':
                 subcrate_path = f
             elif f.name.endswith('.zip') and 'macosx' not in f.name.lower() and 'all-crates' not in f.name.lower():
@@ -164,23 +163,33 @@ class FileBrowserFileHandler:
         xml_path = None
         zip_path = None
         audio_path = None
+        counters = {
+            "n_file": 0,
+            "n_xml": 0,
+            "n_audio": 0,
+            "n_skipped_files": 0
+        }
         for f in src_path.rglob('*'):
             if f.is_file():
-                mime_type = filetype.guess_mime(f)
-                if mime_type is None:
-                    mime_type = mimetypes.guess_type(str(f))[0]
-                if mime_type is None:
+                counters["n_file"] += 1
+                mime_type_encoding = mimetypes.guess_type(str(f))
+                if mime_type_encoding is None:
                     logger.error(f'skipping file {f}')
+                    counters["n_skipped_files"] += 1
                     continue
-                if mime_type == 'application/xml':
+                mime_type = mime_type_encoding[0]
+                if mime_type == 'application/xml' or mime_type == 'text/xml':
                     xml_path = f
+                    counters["n_xml"] += 1
                 elif f.name.endswith('.zip') and 'macosx' not in f.name.lower():
                     zip_path = f
                 elif mime_type.split('/')[0] == 'audio':
                     audio_path = src_path
+                    counters["n_audio"] += 1
             if zip_path and xml_path:
                 break
 
+        logger.info(f'parsed {counters} from {src_path}')
         assert xml_path
         return xml_path, zip_path, audio_path
 
@@ -285,7 +294,32 @@ class FileBrowserFileHandler:
                     #entry.rename(Path(dest_dir) / file_name)
             elif entry.is_dir():
                 shutil.copytree(entry, Path(dst_dir) / entry.name, dirs_exist_ok=True)
-        logger.info(f'extracted {n_files} files to {dst_dir}')
+
+        tracks = OriginalTracks(tracks=[])
+
+        for file_path in Path(dst_dir).rglob("*"):
+            if not file_path.is_file():
+                continue
+
+            subbox_id = tag_subbox_id(file_path)
+            try:
+                f = music_tag.load_file(str(file_path))
+            except Exception:
+                logger.error(f'unable to parse {file_path}')
+            else:
+                track = OriginalTrackMeta(
+                    userLocation=None,
+                    stagingLocation=str(file_path),
+                    originalName=str(f.get('tracktitle', '')),
+                    originalArtist=str(f.get('artist', '')),
+                    originalAlbum=str(f.get('album', '')),
+                    subbox_id=subbox_id,
+                )
+                tracks.tracks.append(track)
+
+        logger.info(f"constructed metadata for {len(tracks.tracks)} audio files")
+        self._db_controller.save_original_track_meta(username, tracks)
+
 
     def remove_fb_data_path(self, username, watch: bool = False):
         if watch:

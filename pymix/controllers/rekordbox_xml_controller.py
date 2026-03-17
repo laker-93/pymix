@@ -179,7 +179,7 @@ class RekordboxXMLController:
             if subbox_tag:
                 subbox_id = subbox_tag[0]
             else:
-                logger.debug(f"No subbox_id tag found for {p}, skipping.")
+                logger.warning(f"No subbox_id tag found for {p}, skipping.")
                 continue
             # 4️⃣ Add mapping to DB
             self._db_controller.add_subbox_beet_map(
@@ -244,8 +244,8 @@ class RekordboxXMLController:
             # we want to handle the meta data regardless as we could have had some files that were successfully imported
             # in those cases, we want to handle the meta data so they are skipped on next import attempt
             # set permissions so navidrome can read - todo: remove this by running pymix as non root
-            src_dir = self._serving_music_path_base.format(user=username)
-            make_readable(Path(src_dir))
+            #src_dir = self._serving_music_path_base.format(user=username)
+            #make_readable(Path(src_dir))
             # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
             # todo move this logic out of the rb xml controller
             self._get_duplicates(username, False)
@@ -323,8 +323,8 @@ class RekordboxXMLController:
             # we want to handle the meta data regardless as we could have had some files that were successfully imported
             # in those cases, we want to handle the meta data so they are skipped on next import attempt
             # set permissions so navidrome can read - todo: remove this by running pymix as non root
-            src_dir = self._serving_music_path_base.format(user=username)
-            make_readable(Path(src_dir))
+            #src_dir = self._serving_music_path_base.format(user=username)
+            #make_readable(Path(src_dir))
             # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
             # todo move this logic out of the rb xml controller
             self._get_duplicates(username, False)
