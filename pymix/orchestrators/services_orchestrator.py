@@ -99,6 +99,9 @@ class ServicesOrchestrator:
         # have to create this drive first before running compose to ensure the drive is created with non root user
         config_dst = self._config['containers']['subsonic']['config_file_dst'].format(user=username)
         dir_path = Path(config_dst).parent
+        if dir_path.exists():
+            logger.info(f'navidrome container already exists for user. Skipping creation')
+            return
         dir_path.mkdir(parents=True, exist_ok=False)
 
         # --- Log permissions ---
@@ -155,6 +158,9 @@ class ServicesOrchestrator:
         # have to create this drive first before running compose to ensure the drive is created with non root user
         config_dst = self._config['containers']['beets']['config_file_dst'].format(user=username)
         dir_path = Path(config_dst).parent
+        if dir_path.exists():
+            logger.info(f'beets container already exists for user. Skipping creation')
+            return
         dir_path.mkdir(parents=True, exist_ok=False)
 
         self._env_file_handler.create_env_file(

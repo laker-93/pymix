@@ -1,8 +1,9 @@
 import logging
+import os
 from typing import Dict, Annotated, List, Tuple, Optional
 
 from dependency_injector.wiring import Provide, inject
-from fastapi import APIRouter, Depends, Query, Cookie
+from fastapi import APIRouter, Depends, Query, Cookie, HTTPException
 from anyio import to_process
 from pydantic import BaseModel
 
@@ -39,7 +40,17 @@ class MatchedTracksResponse(BaseModel):
     reason: str
     tracks: List[MatchedTrack]
 
+class SyncPlanResponse(BaseModel):
+    summary: Dict[str, int]
+    tracks: Dict[str, List[Dict[str, str]]]
+    metadata: Dict[str, List[Dict[str, str]]]
+    download: Dict[str, str]
 
+class SyncPlanRequest(BaseModel):
+    direction: str
+    playlists: List[Dict[str, str]]
+    localTracks: List[Track]
+    options: Optional[Dict[str, bool]] = None
 
 @router.post("/sync/map_meta", tags=["sync"])
 @inject
@@ -130,6 +141,85 @@ async def match_tracks(
         success=success,
         reason=reason,
         tracks=matched_tracks
+    )
+
+@router.post("/sync/plan", tags=["sync"])
+@inject
+async def sync_plan(
+        request: SyncPlanRequest,
+        session_id: str | None = Cookie(None),
+        username: str | None = None,
+        db_controller: DbController = Depends(Provide[Container.db_controller]),
+        subsonic_client: SubsonicClient = Depends(Provide[Container.subsonic_client])
+) -> SyncPlanResponse:
+    if not username and not session_id:
+        raise HTTPException(status_code=400, detail="Must have a username or session ID to identify user")
+
+    user = None
+    if username:
+        user = db_controller.get_user(username)
+    elif session_id:
+        user = db_controller.get_user_by_session_id(session_id)
+        username = user['username']
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    summary = {
+        "playlists": len(request.playlists),
+        "tracksRequested": 0,
+        "tracksAlreadyPresent": 0,
+        "tracksMissing": 0,
+        "metadataUpdates": 0,
+        "downloadSizeBytes": 0
+    }
+    tracks = {"missing": [], "existing": [], "conflicts": []}
+    metadata = {"updates": []}
+    download = {"strategy": "zip"}
+
+    for playlist in request.playlists:
+        playlist_tracks = await subsonic_client.get_playlist_tracks(user, playlist["id"])
+        summary["tracksRequested"] += len(playlist_tracks)
+
+        for track in playlist_tracks:
+            match = next((local for local in request.localTracks if
+                          local.title.lower().strip() == track.name.lower().strip() and
+                          local.artist.lower().strip() == track.artist.lower().strip() and
+                          (not local.album or local.album.lower().strip() == (track.album or "").lower().strip())), None)
+
+            if match:
+                tracks["existing"].append({
+                    "title": track.name,
+                    "artist": track.artist,
+                    "album": track.album,
+                    "status": "match"
+                })
+                summary["tracksAlreadyPresent"] += 1
+            else:
+                file_size = 0
+                if track.pymix_path and os.path.isfile(track.pymix_path):
+                    file_size = os.path.getsize(track.pymix_path)
+                tracks["missing"].append({
+                    "title": track.name,
+                    "artist": track.artist,
+                    "album": track.album,
+                })
+                summary["tracksMissing"] += 1
+                summary["downloadSizeBytes"] += file_size
+
+    if request.options and request.options.get("includeMetadata"):
+        for track in tracks["missing"]:
+            metadata["updates"].append({
+                "title": track["title"],
+                "artist": track["artist"],
+            })
+            summary["metadataUpdates"] += 1
+
+    return SyncPlanResponse(
+        summary=summary,
+        tracks=tracks,
+        metadata=metadata,
+        download=download
     )
 
 @router.post("/sync", tags=["sync"])
@@ -229,8 +319,8 @@ class SyncPlaylistArgs(BaseModel):
 
 @router.post("/sync/playlists", tags=["sync"])
 @inject
-async def sync(
-        args: SyncPlaylistArgs,
+async def sync_playlists(
+        request: SyncPlanRequest,
         session_id: str | None = Cookie(None),
         username: str | None = None,
         db_controller: DbController = Depends(Provide[Container.db_controller]),
@@ -240,30 +330,39 @@ async def sync(
     success = False
     reason = ""
     user = None
-    server_tracks_dict = {}
     zip_path = None
+    all_tracks = []
+
     if not username and not session_id:
-        success = False
-        reason = "must have a username or session id to identify user"
+        return {"success": False, "reason": "Must have a username or session ID to identify user"}
+
     if username:
         try:
             user = db_controller.get_user(username)
         except Exception as ex:
-            logger.error(f'error occurred getting user for {username}', exc_info=True)
-            reason = repr(ex)
-    if session_id:
+            logger.error(f"Error occurred getting user for {username}", exc_info=True)
+            return {"success": False, "reason": repr(ex)}
+    elif session_id:
         try:
             user = db_controller.get_user_by_session_id(session_id)
+            username = user["username"]
         except Exception as ex:
-            logger.error(f'error occurred getting user for session id {session_id}', exc_info=True)
-            reason = repr(ex)
-        else:
-            username = user['username']
+            logger.error(f"Error occurred getting user for session ID {session_id}", exc_info=True)
+            return {"success": False, "reason": repr(ex)}
+
     if user:
-        all_tracks = []
-        for playlist_id in args.ids:
-            tracks = await subsonic_client.get_playlist_tracks(user, playlist_id)
-            all_tracks.extend(tracks)
+        for playlist in request.playlists:
+            playlist_tracks = await subsonic_client.get_playlist_tracks(user, playlist["id"])
+            filtered_tracks = [
+                track for track in playlist_tracks
+                if not any(
+                    local_track.title.lower().strip() == track.name.lower().strip() and
+                    local_track.artist.lower().strip() == track.artist.lower().strip() and
+                    (not local_track.album or local_track.album.lower().strip() == (track.album or "").lower().strip())
+                    for local_track in request.localTracks
+                )
+            ]
+            all_tracks.extend(filtered_tracks)
 
         n_tracks_zipped, zip_path = fb_file_handler.sync(
             username=username,
@@ -272,9 +371,8 @@ async def sync(
         success = True
 
     return {
-        'success': success,
-        'nTracksExported': len(server_tracks_dict),
-        'zipPath': zip_path,
-        'reason': reason
+        "success": success,
+        "nTracksExported": len(all_tracks),
+        "zipPath": zip_path,
+        "reason": reason
     }
-
