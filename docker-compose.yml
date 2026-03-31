@@ -1,15 +1,31 @@
 version: '3.5'
 services:
+  pymix-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    container_name: pymix-postgres
+    environment:
+      POSTGRES_DB: pymix
+      POSTGRES_USER: pymix
+      POSTGRES_PASSWORD: pymix
+    volumes:
+      - pymix-pgdata:/var/lib/postgresql/data
+    ports:
+      - 5432:5432
+    networks:
+      - traefik_default
+
   pymix:
     image: laker93/pymix:latest
     privileged: true
     restart: unless-stopped
     container_name: "pymix"
     #user: "501:20"
+    depends_on:
+      - pymix-postgres
     ports:
       - 8002:8002
     volumes:
-      - ./db:/pymix/db
       - user-updownloads:/user-updownloads
       - private-music:/private-music
       - private-staged:/private-staged
@@ -27,6 +43,9 @@ networks:
     name: traefik_default
 
 volumes:
+  pymix-pgdata:
+    driver: local
+    name: pymix-pgdata
   user-updownloads:
     external: true
     name: user-updownloads

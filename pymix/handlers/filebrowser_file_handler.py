@@ -12,8 +12,6 @@ from zipfile import ZipFile
 import music_tag
 from watchfiles import awatch, Change
 
-from tinydb import TinyDB
-
 from pymix.controllers.db_controller import DbController
 from pymix.model.original_track_meta import OriginalTracks, OriginalTrackMeta
 from pymix.model.subboxtrack import SubBoxTrack
@@ -249,8 +247,16 @@ class FileBrowserFileHandler:
                     n_files_written += 1
         return n_files_written, dst_dir
 
-    def export_subsonic_music(self, db_path: str, app_env: str, username: str, job_id: str) -> int:
-        db_controller = DbController(TinyDB(db_path), app_env)
+    def export_subsonic_music(self, db_config: dict, app_env: str, username: str, job_id: str) -> int:
+        from pymix.factories.create_db_session import create_db_session
+        session_factory = create_db_session(
+            db_host=db_config["host"],
+            db_port=db_config["port"],
+            db_name=db_config["name"],
+            db_user=db_config["user"],
+            db_password=db_config["password"],
+        )
+        db_controller = DbController(session_factory, app_env, 0)
         src_dir = self._serving_music_path_base.format(user=username)
         dst_dir = Path(self._filebrowser_data_path_downloads.format(user=username)) / self._zip_name
         output_path = str(dst_dir.with_suffix('.zip'))
