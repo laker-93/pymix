@@ -1,6 +1,9 @@
 import asyncio
+import grp
+import pwd
 import shutil
 import logging
+import stat
 from pathlib import Path
 from typing import Optional
 
@@ -93,6 +96,40 @@ class ServicesOrchestrator:
         port = user['subsonic_port']
         username = user['username']
         project_name = f'navidrome{username}'
+        # have to create this drive first before running compose to ensure the drive is created with non root user
+        config_dst = self._config['containers']['subsonic']['config_file_dst'].format(user=username)
+        dir_path = Path(config_dst).parent
+        if dir_path.exists():
+            logger.info(f'navidrome container already exists for user. Skipping creation')
+            return
+        dir_path.mkdir(parents=True, exist_ok=False)
+
+        # --- Log permissions ---
+        st = dir_path.stat()
+
+        uid = st.st_uid
+        gid = st.st_gid
+        mode = stat.S_IMODE(st.st_mode)
+
+        try:
+            user = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            user = f"UID {uid}"
+
+        try:
+            group = grp.getgrgid(gid).gr_name
+        except KeyError:
+            group = f"GID {gid}"
+
+        logger.info(
+            "Directory created: %s | owner=%s (%s) group=%s (%s) perms=%o",
+            dir_path,
+            user,
+            uid,
+            group,
+            gid,
+            mode
+        )
         self._env_file_handler.create_env_file(
             Path(self._config['containers']['subsonic']['env_file']),
             username,
@@ -107,7 +144,6 @@ class ServicesOrchestrator:
         )
         docker.compose.up(detach=True)
 
-        config_dst = self._config['containers']['subsonic']['config_file_dst'].format(user=username)
 
         content = navidrome_template.render()
         with open(config_dst, 'w') as f:
@@ -118,6 +154,15 @@ class ServicesOrchestrator:
         port = user['beets_port']
         username = user['username']
         project_name = f'beets{username}'
+
+        # have to create this drive first before running compose to ensure the drive is created with non root user
+        config_dst = self._config['containers']['beets']['config_file_dst'].format(user=username)
+        dir_path = Path(config_dst).parent
+        if dir_path.exists():
+            logger.info(f'beets container already exists for user. Skipping creation')
+            return
+        dir_path.mkdir(parents=True, exist_ok=False)
+
         self._env_file_handler.create_env_file(
             Path(self._config['containers']['beets']['env_file']),
             username,
@@ -137,7 +182,6 @@ class ServicesOrchestrator:
         content = beets_template.render(username=username, password=user['password'], user_navidrome=f'navidrome{username}')
         with open(config_dst, 'w') as f:
             f.write(content)
-
 
     def _create_filebrowser_account(self, user: dict):
         filebrowser_container = docker.container.inspect("filebrowser")
@@ -191,7 +235,8 @@ class ServicesOrchestrator:
         # while not user_dir.parent.exists():
         #     logger.info(f'user dir has yet to be created by filebrowser. Sleeping...')
         #     time.sleep(2)
-        user_dir.mkdir(parents=False, exist_ok=True)  # todo change to false when launch
+        # the user dir at /user-updownloads/{user} should be created by the container: see https://github.com/filebrowser/filebrowser/issues/657#issuecomment-1781390444
+        user_dir.mkdir(parents=False, exist_ok=False)
         user_dir = self._config['containers']['filebrowser']['data_downloads'].format(user=username)
         user_dir = Path(user_dir)
-        user_dir.mkdir(parents=False, exist_ok=True)  # todo change to false when launch
+        user_dir.mkdir(parents=True, exist_ok=True)  # todo change to false when launch

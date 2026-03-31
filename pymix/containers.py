@@ -2,8 +2,6 @@ from pathlib import Path
 import aiohttp
 from pyserato.builder import Builder
 
-from toredocore.providers.healthcheck.async_healthcheck_provider import AsyncHealthcheckProvider
-from toredocore.providers.healthcheck.healthcheck_dependency import HealthcheckDependency
 from dependency_injector import containers, providers
 
 from pymix.clients.beets_client import BeetsClient
@@ -114,7 +112,8 @@ class Container(containers.DeclarativeContainer):
         config.containers.filebrowser.data_downloads,
         config.containers.beets.data,
         config.containers.beets.data_public,
-        config.update_job_period_s
+        config.update_job_period_s,
+        db_controller
     )
 
     rekordbox_xml_controller = providers.Singleton(
@@ -160,20 +159,3 @@ class Container(containers.DeclarativeContainer):
         session=aiohttp_session,
         app_env=config.app_env
     )
-
-    healthcheck_provider = providers.Resource(
-        AsyncHealthcheckProvider,
-        config.app_name,
-        config.app_env,
-        providers.List(
-            providers.Factory(
-                HealthcheckDependency,
-                name='rekordbox xml controller',
-                healthcheck_fn=rekordbox_xml_controller.provided.get_healthcheck,
-                expected_return=True,
-                key_to_check='is_healthy',
-                capture_full_response=True
-            ),
-        )
-    )
-

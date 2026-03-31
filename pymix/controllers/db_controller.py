@@ -484,6 +484,10 @@ class DbController:
         self._add_user(username, password, email, user_id, beets_port, subsonic_port, self._max_library_size)
         return self.create_session(username, password)
 
+    def add_user_token(self):
+        # todo only set the user token on success
+        pass
+
     def create_session(self, username: str, password: str) -> str:
         user = self.get_user(username)
         assert user['password'] == password

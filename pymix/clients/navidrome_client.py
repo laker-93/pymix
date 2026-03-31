@@ -1,6 +1,6 @@
 import logging
 
-from toredocore.providers.base_api_client import BaseAPIClient
+from pymix.clients.base_api_client import BaseAPIClient
 
 logger = logging.getLogger(__name__)
 
