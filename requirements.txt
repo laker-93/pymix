@@ -10,6 +10,7 @@ mutagen
 music-tag
 sqlalchemy~=2.0
 psycopg2-binary~=2.9
+alembic~=1.13
 pyserato~=0.2
 mediafile~=0.13.0
 beets~=2.2.0

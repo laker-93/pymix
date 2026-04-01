@@ -37,6 +37,7 @@ RUN pip install --upgrade pip && \
     pip install -r requirements.txt
 
 # ---------- Copy app ----------
+COPY ./alembic.ini ./alembic.ini
 COPY ./pymix ./pymix
 
 # ---------- Non-root user ----------

@@ -500,13 +500,14 @@ class DbController:
         with self._session_factory() as session:
             return session.query(UserRow).count()
 
-    def user_library_size_exceeded(self, username: str, size_import: int) -> bool:
+    def user_library_size_exceeded(self, username: str, size_import: int) -> tuple[bool, int, int]:
         total_size = sum(file.stat().st_size for file in Path(f'/private-music/{username}').rglob('*'))
         user = self.get_user(username)
-        if int(total_size + size_import) > int(user['max_library_size']):
+        max_storage_bytes = int(user['max_library_size'])
+        if int(total_size + size_import) > max_storage_bytes:
             logger.error(
                 f"user {username} has exceeded max size of library of {user['max_library_size']} with current size: {total_size} and attempted import {size_import}"
             )
-            return True
+            return True, max_storage_bytes, total_size
         else:
-            return False
+            return False, max_storage_bytes, total_size

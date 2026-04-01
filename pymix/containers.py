@@ -63,9 +63,6 @@ class Container(containers.DeclarativeContainer):
         create_db_session,
         db_host=config.db.host,
         db_port=config.db.port,
-        db_name=config.db.name,
-        db_user=config.db.user,
-        db_password=config.db.password,
     )
 
     db_controller = providers.Singleton(

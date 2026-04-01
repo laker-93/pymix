@@ -11,7 +11,7 @@ from pyrekordbox.rbxml import Track
 from pymix.controllers.db_controller import DbController
 from pymix.model.subboxtrack import SubBoxTrack
 from pymix.orchestrators.rekordbox_xml_orchestrator import RekordboxXMLOrchestrator
-from pymix.utils.tag_subbox_id import tag_subbox_id, get_subbox_id
+from pymix.utils.tag_subbox_id import get_subbox_id
 
 logger = logging.getLogger(__name__)
 

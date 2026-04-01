@@ -50,7 +50,8 @@ async def rekordbox_import(
         size = fb_file_handler.get_size_of_import(username)
         size_import_bytes = size['size_tracks']
         total_n_tracks_for_import = size['n_tracks']
-        if db_controller.user_library_size_exceeded(username, size_import_bytes):
+        exceeded, _1, _2 =  db_controller.user_library_size_exceeded(username, size_import_bytes)
+        if exceeded:
             return {
                 'success': False,
                 'job_id': job_id,

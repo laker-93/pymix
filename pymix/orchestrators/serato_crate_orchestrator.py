@@ -51,7 +51,7 @@ class SeratoCrateOrchestrator:
                 subbox_id = original_meta['subbox_id']
                 beets_path = self._rb_xml_controller.get_path_by_subbox_id(user['username'], subbox_id, False)
                 entry_dir = str(beets_path).removeprefix('/music')
-                src_dir = self._serving_music_path_base.format(user=user['username'])
+                src_dir = f'{self._serving_music_path_base}/{user["username"]}'
                 p = Path(src_dir + entry_dir)
                 assert p.exists(), f"path {p} does not exist"
                 tags = music_tag.load_file(p)

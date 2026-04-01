@@ -33,7 +33,10 @@ services:
       - /Users/lukepurnell/workspace/subbox:/subbox
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      - APP_ENVIRONMENT=dev
+      APP_ENVIRONMENT: dev
+      POSTGRES_DB: pymix
+      POSTGRES_USER: pymix
+      POSTGRES_PASSWORD: pymix
 
     networks:
       - traefik_default

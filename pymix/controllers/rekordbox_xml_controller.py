@@ -172,7 +172,7 @@ class RekordboxXMLController:
         # 3️⃣ Read subbox_id tag using music-tag for each path
         for beet_id, path in beet_entries:
             entry_dir = path.removeprefix('/music')
-            src_dir = self._serving_music_path_base.format(user=username)
+            src_dir = f'{self._serving_music_path_base}/{username}'
             p = Path(src_dir + entry_dir)
             with taglib.File(p) as song:
                 subbox_tag = song.tags.get("SUBBOX_ID")
@@ -366,10 +366,9 @@ class RekordboxXMLController:
             track_match = await self._subsonic_client.get_track_match(user, track.Name, track.Artist, album)
             assert track_match is not None, f"unable to get track match for {track}"
             track_match = track_match[0]
-            entry_dir = str(track_match.path).removeprefix('/' + self._zip_name)
-            src_dir = self._serving_music_path_base.format(user=user['username'])
-            p = Path(src_dir + entry_dir)
-            subbox_id = get_subbox_id(p)
+            assert track_match.pymix_path
+            assert track_match.pymix_path.exists()
+            subbox_id = get_subbox_id(track_match.pymix_path)
             assert subbox_id is not None, f"subbox id tag not present on {p}"
             # todo create pydantic model for cues and attack to subbox track and pass this to the db controller
             self._db_controller.update_metadata(

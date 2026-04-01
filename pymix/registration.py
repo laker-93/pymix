@@ -18,6 +18,9 @@ from pymix.handlers.filebrowser_file_handler import poll_watchdir, trigger_proce
 from pymix.routers import maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, match_tracks, track
 
 
+logger = logging.getLogger(__name__)
+
+
 def initialise_logger(app_name, level="DEBUG", **kwargs):
     """
     Initialises the logger for the application with default handlers
@@ -133,6 +136,11 @@ def create_container(environment="dev"):
     container = Container()
     container.config.from_dict(app_config)
     container.init_resources()
+    logger.info(
+        "startup complete: container initialized (env=%s, app=%s)",
+        environment,
+        app_config["application_settings"]["app_name"],
+    )
     container.wire(
         modules=[
             maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, sys.modules[__name__]

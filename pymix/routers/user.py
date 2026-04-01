@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 from dependency_injector.wiring import Provide, inject
-from fastapi import APIRouter, Depends, Cookie
+from fastapi import APIRouter, Depends, Cookie, Header
 from pydantic import BaseModel
 from starlette.responses import JSONResponse
 
@@ -133,6 +133,72 @@ async def library_size(
         'success': success,
         'total_size_bytes': total_size,
         'reason': reason
+    }
+
+
+@router.get("/user/storage_check", tags=["user"])
+@inject
+async def storage_check(
+        uploadSizeBytes: int = 0,
+        session_id: str | None = Cookie(None),
+        authorization: str | None = Header(None),
+        db_controller: DbController = Depends(Provide[Container.db_controller]),
+) -> dict:
+    success = False
+    exceeded = False
+    reason = ""
+    current_usage_bytes = 0
+    max_storage_bytes = 0
+    remaining_bytes = 0
+
+    if uploadSizeBytes < 0:
+        return {
+            'allowed': False,
+            'currentUsageBytes': 0,
+            'maxStorageBytes': 0,
+            'remainingBytes': 0,
+            'reason': 'uploadSizeBytes must be >= 0',
+            'success': False
+        }
+
+    # Prefer Bearer token, fall back to cookie for existing clients.
+    auth_session_id = session_id
+    if authorization:
+        parts = authorization.split(" ", 1)
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            auth_session_id = parts[1].strip()
+
+    if not auth_session_id:
+        return {
+            'allowed': False,
+            'currentUsageBytes': 0,
+            'maxStorageBytes': 0,
+            'remainingBytes': 0,
+            'reason': 'must have an Authorization Bearer token or session cookie to identify user',
+            'success': False
+        }
+
+    try:
+        user = db_controller.get_user_by_session_id(auth_session_id)
+        if not user:
+            reason = 'no user found for provided session'
+        else:
+            username = user['username']
+            exceeded, max_storage_bytes, current_usage_bytes = db_controller.user_library_size_exceeded(username, uploadSizeBytes)
+            remaining_bytes = max(0, max_storage_bytes - current_usage_bytes)
+            reason = 'storage limit exceeded' if exceeded else 'ok'
+            success = True
+    except Exception as ex:
+        logger.error('error occurred performing storage check', exc_info=True)
+        reason = repr(ex)
+
+    return {
+        'allowed': not exceeded,
+        'currentUsageBytes': current_usage_bytes,
+        'maxStorageBytes': max_storage_bytes,
+        'remainingBytes': remaining_bytes,
+        'reason': reason,
+        'success': success
     }
 
 @router.get("/user/delete", tags=["db"])
