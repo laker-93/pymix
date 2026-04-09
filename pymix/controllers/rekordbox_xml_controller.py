@@ -75,7 +75,7 @@ class RekordboxXMLController:
         :param subsonic_playlist:
         :return:
         """
-        playlist = self._rekordbox_xml_orchestrator.create_rekordbox_xml_playlist(subsonic_playlist.name)
+        playlist = self._rekordbox_xml_orchestrator.create_rekordbox_xml_playlist(subsonic_playlist)
         for track in subsonic_playlist.tracks:
             self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(user_root, user, track, playlist)
 
@@ -263,13 +263,20 @@ class RekordboxXMLController:
         if subsonic_playlists:
             # sort the playlists by name so duplicate folders of the same name are not created
             subsonic_playlists.sort(key=lambda playlist: playlist.name)
+            # Enrich subsonic playlists with stored path_components for lossless folder reconstruction
+            path_rows = self._db_controller.get_playlist_paths(user['username'])
+            path_map = {row['display_name']: row['path_components'] for row in path_rows}
+            for subsonic_playlist in subsonic_playlists:
+                if subsonic_playlist.name in path_map:
+                    subsonic_playlist.path_components = path_map[subsonic_playlist.name]
             # Given the Playlist data from Subsonic create the playlist directory structure in Rekordbox.
             for subsonic_playlist in subsonic_playlists:
                 self._create_rekordbox_xml_playlist(user_root, user, subsonic_playlist)
         # add subsonic tracks that do not belong to a playlist to a default playlist.
         default_playlist = self._rekordbox_xml_orchestrator.get_playlist('NOPLAYLIST')
         if not default_playlist:
-            default_playlist = self._rekordbox_xml_orchestrator.create_rekordbox_xml_playlist('NOPLAYLIST')
+            noplaylist = SubBoxPlaylist(name='NOPLAYLIST', path_components=['NOPLAYLIST'])
+            default_playlist = self._rekordbox_xml_orchestrator.create_rekordbox_xml_playlist(noplaylist)
         # suppress the exception that would be raised due to attempting to add a track that is already present.
         import asyncio
         # todo figure this out - seem to need to pause to avoid getting disconnected from server
@@ -330,7 +337,14 @@ class RekordboxXMLController:
             self._get_duplicates(username, False)
             self._map_subbox_id_beet_id(username, False)
 
-    async def create_subsonic_playlists_from_xml(self, user: dict, xml_path: Path, zip_path: Optional[Path], audio_path: Optional[Path]):
+    async def create_subsonic_playlists_from_xml(
+            self,
+            user: dict,
+            xml_path: Path,
+            zip_path: Optional[Path],
+            audio_path: Optional[Path],
+            playlist_names: Optional[List[List[str]]] = None,
+    ):
         username = user['username']
         self._rekordbox_xml_orchestrator.create_xml(xml_path)
 
@@ -340,23 +354,61 @@ class RekordboxXMLController:
         # next step
         await self._subsonic_orchestrator.scan(user)
         await anyio.sleep(2)
-        await self._set_data_from_xml(user)
+        await self._set_data_from_xml(user, playlist_names)
         # the fb path is removed here as we only want to remove data in fb once import is successful to avoid
         # unnecessarily having to reupload data from the client after a beets import failure
         self._file_browser_file_handler.remove_fb_data_path(username)
 
-    async def _set_data_from_xml(self, user: dict):
-        # todo make this logic more similar to serato_controller where subbox_id is used for look up
-        await self._create_playlists_from_xml(user)
-        await self._set_metadata_from_xml(user)
+    @staticmethod
+    def _filter_playlists(playlists: List[SubBoxPlaylist], requested: List[List[str]]) -> List[SubBoxPlaylist]:
+        """Filter playlists by exact path_components match OR folder prefix match.
 
-    async def _set_metadata_from_xml(self, user):
-        rated_tracks = list(filter(lambda t: t.rating > 0, self._rekordbox_xml_orchestrator.get_all_xml_tracks()))
+        Each entry in `requested` is a list of path components.
+        If a requested path is a prefix of a playlist's path_components,
+        that playlist is included (folder-level selection).
+        For example, requesting ["Genre", "House"] matches ["Genre", "House", "Deep House"].
+        """
+        normalised = [tuple(c.strip().lower() for c in r) for r in requested if r]
+        result = []
+        for p in playlists:
+            if not p.path_components:
+                continue
+            p_norm = tuple(c.strip().lower() for c in p.path_components)
+            for req in normalised:
+                if p_norm[:len(req)] == req:
+                    result.append(p)
+                    break
+        return result
+
+    async def _set_data_from_xml(self, user: dict, playlist_names: Optional[List[List[str]]] = None):
+        # todo make this logic more similar to serato_controller where subbox_id is used for look up
+        await self._create_playlists_from_xml(user, playlist_names)
+        await self._set_metadata_from_xml(user, playlist_names)
+
+    async def _set_metadata_from_xml(self, user, playlist_names: Optional[List[List[str]]] = None):
+        allowed_track_ids = None
+        if playlist_names:
+            rekordbox_xml_playlists = self._rekordbox_xml_orchestrator.get_all_xml_playlists()
+            all_playlists: List[SubBoxPlaylist] = []
+            self._rekordbox_xml_orchestrator.get_subbox_playlists_from_rekordbox_xml_playlists(
+                rekordbox_xml_playlists, [], all_playlists
+            )
+            filtered_playlists = self._filter_playlists(all_playlists, playlist_names)
+            allowed_track_ids = {t.track_id for pl in filtered_playlists for t in pl.tracks}
+            logger.info("Filtered metadata to %s track(s) from %s playlist(s)", len(allowed_track_ids), len(filtered_playlists))
+
+        all_xml_tracks = self._rekordbox_xml_orchestrator.get_all_xml_tracks()
+        if allowed_track_ids is not None:
+            all_xml_tracks = [t for t in all_xml_tracks if t.track_id in allowed_track_ids]
+            logger.info(f"Filtered to {len(all_xml_tracks)} track(s) with metadata from XML based on playlist filter.")
+        rated_tracks = list(filter(lambda t: t.rating > 0, all_xml_tracks))
         await self._subsonic_orchestrator.update_tracks_with_subid(user, tracks=rated_tracks)
         #  and set the rating of the track in navidrome from the rating taken from xml
         await self._subsonic_orchestrator.set_ratings(user, rated_tracks)
         #encoder = V2Mp3Encoder()
         for track in self._rekordbox_xml_orchestrator._rekordbox_xml.get_tracks():
+            if allowed_track_ids is not None and track.TrackID not in allowed_track_ids:
+                continue
             marks = track.marks
             cues = list(filter(lambda m: m.Type == 'cue', marks))
             loops = list(filter(lambda m: m.Type == 'loop', marks))
@@ -398,12 +450,34 @@ class RekordboxXMLController:
             )
 
 
-    async def _create_playlists_from_xml(self, user: dict):
+    async def _create_playlists_from_xml(self, user: dict, playlist_names: Optional[List[List[str]]] = None):
         # 4. create internal subbox playlist and tracks as below
         rekordbox_xml_playlists = self._rekordbox_xml_orchestrator.get_all_xml_playlists()
         subbox_playlists: List[SubBoxPlaylist] = []
-        self._rekordbox_xml_orchestrator.get_subbox_playlists_from_rekordbox_xml_playlists(rekordbox_xml_playlists, '',
+        self._rekordbox_xml_orchestrator.get_subbox_playlists_from_rekordbox_xml_playlists(rekordbox_xml_playlists, [],
                                                                                            subbox_playlists)
+
+        if playlist_names:
+            original_n = len(subbox_playlists)
+            subbox_playlists = self._filter_playlists(subbox_playlists, playlist_names)
+            logger.info(
+                "Filtered XML playlists for import. requested=%s matched=%s total_before=%s total_after=%s",
+                playlist_names,
+                sorted([p.name for p in subbox_playlists]),
+                original_n,
+                len(subbox_playlists),
+            )
+
+        if not subbox_playlists:
+            logger.info("No playlists selected from XML for import.")
+            return
+
+        # Persist playlist path_components in DB for lossless export reconstruction
+        self._db_controller.save_playlist_paths(
+            user['username'],
+            [{'display_name': p.name, 'path_components': p.path_components} for p in subbox_playlists if p.path_components],
+        )
+
         # 5. given the subbox info, create the playlists in navidrome using subsonic api
         # 6. get the tracks from navidrome by using the 'query' api for each track.
         # this sets the subsonic id found from querying navidrome. This can then be used to create the playlist and place

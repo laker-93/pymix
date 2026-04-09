@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from pymix.model.db_tables import (
     UserRow, SessionRow, SubboxBeetsMapRow, LibraryRow,
     MetaHistoryRow, UserJobRow, JobRow, OriginalTrackMetaRow, UserTokenRow,
+    PlaylistPathRow,
 )
 from pymix.model.original_track_meta import OriginalTracks
 from pymix.utils.get_available_port import get_available_port
@@ -511,3 +512,33 @@ class DbController:
             return True, max_storage_bytes, total_size
         else:
             return False, max_storage_bytes, total_size
+
+    def save_playlist_paths(self, username: str, playlists: list[dict]):
+        """Store display_name -> path_components mappings for a user's playlists."""
+        user = self.get_user(username)
+        user_id = user['user_id']
+        with self._session_factory() as session:
+            for pl in playlists:
+                existing = session.query(PlaylistPathRow).filter(
+                    PlaylistPathRow.user_id == user_id,
+                    PlaylistPathRow.display_name == pl['display_name'],
+                ).first()
+                if existing:
+                    existing.path_components = pl['path_components']
+                else:
+                    session.add(PlaylistPathRow(
+                        user_id=user_id,
+                        display_name=pl['display_name'],
+                        path_components=pl['path_components'],
+                    ))
+            session.commit()
+
+    def get_playlist_paths(self, username: str) -> list[dict]:
+        """Return all playlist path mappings for a user."""
+        user = self.get_user(username)
+        user_id = user['user_id']
+        with self._session_factory() as session:
+            rows = session.query(PlaylistPathRow).filter(
+                PlaylistPathRow.user_id == user_id,
+            ).all()
+            return [_row_to_dict(r) for r in rows]

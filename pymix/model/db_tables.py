@@ -93,3 +93,11 @@ class UserTokenRow(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String, default='')
     token = Column(String, nullable=False)
+
+
+class PlaylistPathRow(Base):
+    __tablename__ = 'playlist_path_table'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, nullable=False)
+    display_name = Column(String, nullable=False)
+    path_components = Column(JSON, nullable=False)

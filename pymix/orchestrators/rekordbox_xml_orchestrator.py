@@ -35,25 +35,21 @@ class RekordboxXMLOrchestrator:
             track_number=rb_track.TrackNumber,
         )
 
-    @staticmethod
-    def _get_folders_playlist_from_name(playlist_name: str) -> (List[str], str):
-        folders_playlist = playlist_name.split('-')
-        return folders_playlist[:-1], folders_playlist[-1]
-
-    def get_subbox_playlists_from_rekordbox_xml_playlists(self, xml_playlists: List[Node], parent: str, subbox_playlists) -> List[SubBoxPlaylist]:
+    def get_subbox_playlists_from_rekordbox_xml_playlists(self, xml_playlists: List[Node], parent_components: List[str], subbox_playlists) -> List[SubBoxPlaylist]:
         """
         From the rekordbox XML playlists, create the internal Playlist datastructure
         :param xml_playlists:
-        :param rekordbox_playlists:
+        :param parent_components: list of parent folder names leading to this level
+        :param subbox_playlists:
         :return:
         """
         for playlist in xml_playlists:
-            name = playlist.name if not parent else parent + '-' + playlist.name
+            components = parent_components + [playlist.name]
             track_ids = playlist.get_tracks()
             if not playlist.is_playlist:
                 # recurse through the folder structure until reach the playlist leaves
                 playlists = playlist.get_playlists()
-                self.get_subbox_playlists_from_rekordbox_xml_playlists(playlists, name, subbox_playlists)
+                self.get_subbox_playlists_from_rekordbox_xml_playlists(playlists, components, subbox_playlists)
                 continue
             assert playlist.key_type == 'TrackID', f"playlist key type {playlist.key_type}"
             tracks = []
@@ -70,20 +66,29 @@ class RekordboxXMLOrchestrator:
                         track_id=track_id
                     )
                 )
+            display_name = " / ".join(components)
             subbox_playlists.append(
                 SubBoxPlaylist(
-                    name=name,
-                    tracks=tracks
+                    name=display_name,
+                    tracks=tracks,
+                    path_components=components,
                 )
             )
 
-    def create_rekordbox_xml_playlist(self, name: str) -> Node:
+    def create_rekordbox_xml_playlist(self, subsonic_playlist: SubBoxPlaylist) -> Node:
         """
-        :param playlist_name: Of the custom navidrome format <genre-subgenre-playlist>
-        :return:
+        From the playlist, create the rekordbox folders and playlist node.
+        Uses path_components if available for lossless folder reconstruction,
+        otherwise falls back to splitting display name by ' / '.
         """
-        folders, playlist_name = self._get_folders_playlist_from_name(name)
-        playlist_root = self._create_playlist_folders(folders) if folders else self._rekordbox_xml
+        if subsonic_playlist.path_components and len(subsonic_playlist.path_components) > 1:
+            folders = subsonic_playlist.path_components[:-1]
+            playlist_name = subsonic_playlist.path_components[-1]
+        else:
+            parts = subsonic_playlist.name.split(' / ')
+            folders = parts[:-1]
+            playlist_name = parts[-1]
+        playlist_root = self._create_playlist_folders(list(folders)) if folders else self._rekordbox_xml
         new_playlist = playlist_root.add_playlist(playlist_name)
         logger.info(f'created playlist with name {playlist_name}')
         return new_playlist
