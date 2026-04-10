@@ -48,7 +48,7 @@ class SeratoController:
         :param subsonic_playlist:
         :return:
         """
-        crate = self._serato_crate_orchestrator.create_crate(subsonic_playlist.name)
+        crate = self._serato_crate_orchestrator.create_crate(subsonic_playlist)
         for track in subsonic_playlist.tracks:
             self._serato_crate_orchestrator.add_track_to_crate(user_root, track, crate)
         self._serato_crate_orchestrator.save(crate, output_path)
@@ -60,12 +60,19 @@ class SeratoController:
         else:
             # sort the playlists by name so duplicate folders of the same name are not created
             subsonic_playlists.sort(key=lambda playlist: playlist.name)
+            # Enrich subsonic playlists with stored path_components for lossless folder reconstruction
+            path_rows = self._db_controller.get_playlist_paths(user['username'])
+            path_map = {row['display_name']: row['path_components'] for row in path_rows}
+            for subsonic_playlist in subsonic_playlists:
+                if subsonic_playlist.name in path_map:
+                    subsonic_playlist.path_components = path_map[subsonic_playlist.name]
             # Given the Playlist data from Subsonic create the playlist directory structure in Rekordbox.
             for subsonic_playlist in subsonic_playlists:
                 # can do something here along the lines of keeping the root node
                 self._create_serato_crates(user_root, subsonic_playlist, output_path)
         # add subsonic tracks that do not belong to a playlist to a default playlist.
-        default_crate = self._serato_crate_orchestrator.create_crate('NOPLAYLIST')
+        noplaylist = SubBoxPlaylist(name='NOPLAYLIST', path_components=['NOPLAYLIST'])
+        default_crate = self._serato_crate_orchestrator.create_crate(noplaylist)
         # suppress the exception that would be raised due to attempting to add a track that is already present.
         import asyncio
         # todo figure this out - seem to need to pause to avoid getting disconnected from server

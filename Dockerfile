@@ -32,12 +32,13 @@ RUN apt-get update && \
 WORKDIR /app
 
 # ---------- Install deps first (cache-friendly) ----------
-COPY ./pymix/requirements.txt ./requirements.txt
+COPY ./requirements.txt ./requirements.txt
 RUN pip install --upgrade pip && \
     pip install -r requirements.txt
 
 # ---------- Copy app ----------
-COPY ./pymix/pymix ./pymix
+COPY ./alembic.ini ./alembic.ini
+COPY ./pymix ./pymix
 
 # ---------- Non-root user ----------
 RUN useradd -u 1000 -m deploy

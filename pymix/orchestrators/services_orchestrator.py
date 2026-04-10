@@ -50,7 +50,7 @@ class ServicesOrchestrator:
         try:
             session_id = self._db_controller.create_user(username, password, email, token)
             user = self._db_controller.get_user(username)
-            user_dir = self._config['containers']['subsonic']['serving_music_path_base'].format(user=username)
+            user_dir = f'{self._config["containers"]["subsonic"]["serving_music_path_base"]}/{username}'
             user_dir = Path(user_dir)
             user_dir.mkdir(parents=True, exist_ok=True)  # todo change to false when launch
 

@@ -14,3 +14,4 @@ class SubBoxPlaylist:
     last_updated: Optional[datetime.datetime] = None
     subsonic_id: Optional[str] = None
     tracks: List[SubBoxTrack] = None
+    path_components: Optional[List[str]] = None

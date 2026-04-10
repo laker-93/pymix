@@ -36,8 +36,8 @@ class SeratoCrateOrchestrator:
         self._serving_music_path_base = serving_music_path_base
         self._mp3_encoder = V2Mp3Encoder()
 
-    def _build_subbox_playlists(self, user: dict, crate: Crate, parent: str, subbox_playlists: List[SubBoxPlaylist]):
-        name = crate.name if not parent else parent + '-' + crate.name
+    def _build_subbox_playlists(self, user: dict, crate: Crate, parent_components: List[str], subbox_playlists: List[SubBoxPlaylist]):
+        components = parent_components + [crate.name]
 
         if crate.tracks:
             tracks = []
@@ -51,7 +51,7 @@ class SeratoCrateOrchestrator:
                 subbox_id = original_meta['subbox_id']
                 beets_path = self._rb_xml_controller.get_path_by_subbox_id(user['username'], subbox_id, False)
                 entry_dir = str(beets_path).removeprefix('/music')
-                src_dir = self._serving_music_path_base.format(user=user['username'])
+                src_dir = f'{self._serving_music_path_base}/{user["username"]}'
                 p = Path(src_dir + entry_dir)
                 assert p.exists(), f"path {p} does not exist"
                 tags = music_tag.load_file(p)
@@ -74,16 +74,17 @@ class SeratoCrateOrchestrator:
                         serato_hot_cues=cues
                     )
                 )
+            display_name = " / ".join(components)
             subbox_playlists.append(
                 SubBoxPlaylist(
-                    name=name,
-                    tracks=tracks
+                    name=display_name,
+                    tracks=tracks,
+                    path_components=components,
                 )
             )
         if crate.children:
-            parent = name
             for child in crate.children.values():
-                self._build_subbox_playlists(user, child, parent, subbox_playlists)
+                self._build_subbox_playlists(user, child, components, subbox_playlists)
 
     def get_subbox_playlists_from_crates(self, user: dict, zip_crate_path: Path) -> List[SubBoxPlaylist]:
         """
@@ -95,17 +96,21 @@ class SeratoCrateOrchestrator:
             zip_ref.extractall(zip_crate_path.parent)
         crates = self._crate_builder.parse_crates_from_root_path(zip_crate_path.parent)
         for top_level_crate in crates.values():
-            self._build_subbox_playlists(user, top_level_crate, "", subbox_playlists)
+            self._build_subbox_playlists(user, top_level_crate, [], subbox_playlists)
         assert subbox_playlists
         return subbox_playlists
 
 
-    def create_crate(self, playlist_name: str) -> Crate:
+    def create_crate(self, playlist: SubBoxPlaylist) -> Crate:
         """
-        :param playlist_name: Of the custom navidrome format <root-child-playlist>
-        :return:
+        Creates a crate tree from a SubBoxPlaylist.
+        Uses path_components if available for lossless folder reconstruction,
+        otherwise falls back to splitting display name by ' / '.
         """
-        crate_names = playlist_name.split('-')
+        if playlist.path_components:
+            crate_names = list(playlist.path_components)
+        else:
+            crate_names = playlist.name.split(' / ')
         root_crate = self._create_playlist_crates(crate_names)
         return root_crate
 

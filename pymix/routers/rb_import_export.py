@@ -17,10 +17,15 @@ router = APIRouter()
 
 logger = logging.getLogger(__name__)
 
+class RBImportRequest(BaseModel):
+    playlistNames: list[list[str]]
+
+
 
 @router.post("/rekordbox/import", tags=["import"])
 @inject
 async def rekordbox_import(
+    request: RBImportRequest,
     background_tasks: BackgroundTasks,
     session_id: str | None = Cookie(None),
     beets_client: BeetsClient = Depends(Provide[Container.beets_client]),
@@ -50,7 +55,8 @@ async def rekordbox_import(
         size = fb_file_handler.get_size_of_import(username)
         size_import_bytes = size['size_tracks']
         total_n_tracks_for_import = size['n_tracks']
-        if db_controller.user_library_size_exceeded(username, size_import_bytes):
+        exceeded, _1, _2 =  db_controller.user_library_size_exceeded(username, size_import_bytes)
+        if exceeded:
             return {
                 'success': False,
                 'job_id': job_id,
@@ -74,8 +80,9 @@ async def rekordbox_import(
         total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
         job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
         logger.info(f'RB importing {total_n_tracks_for_import} tracks for user {username}')
+        requested_playlists = [p for p in request.playlistNames if p]
         background_tasks.add_task(run_import_task, rekordbox_xml_controller, username, job_id, db_controller,
-                                  fb_file_handler, total_n_tracks_for_import, user)
+                      fb_file_handler, total_n_tracks_for_import, user, requested_playlists)
         success = True
         reason = ""
 
@@ -89,7 +96,7 @@ async def rekordbox_import(
 
 
 async def run_import_task(rekordbox_xml_controller, username, job_id, db_controller, fb_file_handler,
-                          total_n_tracks_for_import, user):
+                          total_n_tracks_for_import, user, playlist_names: list[list[str]]):
     success = True
     beets_output = ""
     try:
@@ -100,7 +107,8 @@ async def run_import_task(rekordbox_xml_controller, username, job_id, db_control
             user=user,
             xml_path=xml_path,
             zip_path=zip_path,
-            audio_path=audio_path
+            audio_path=audio_path,
+            playlist_names=playlist_names,
         )
         logger.info(f'finished RB import for user {username}')
     except Exception as ex:

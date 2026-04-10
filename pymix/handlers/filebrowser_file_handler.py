@@ -12,8 +12,6 @@ from zipfile import ZipFile
 import music_tag
 from watchfiles import awatch, Change
 
-from tinydb import TinyDB
-
 from pymix.controllers.db_controller import DbController
 from pymix.model.original_track_meta import OriginalTracks, OriginalTrackMeta
 from pymix.model.subboxtrack import SubBoxTrack
@@ -57,7 +55,8 @@ async def poll_watchdir(watchpaths: list[Path], send_stream, db_controller):
                             size_to_import += p.stat().st_size
                         else:
                             logger.info(f'path {p} does not exist')
-                    if db_controller.user_library_size_exceeded(user, size_to_import):
+                    exceeded, _1, _2 = db_controller.user_library_size_exceeded(user, size_to_import)
+                    if exceeded:
                         logger.error(f'exceeded library size for user {user}')
                         maxed_out_users.add(user)
                         # todo some how notify front end and block user from uploading more
@@ -239,7 +238,7 @@ class FileBrowserFileHandler:
         dst_dir = Path(self._filebrowser_data_path_downloads.format(user=username)) / self._zip_name
         output_path = str(dst_dir.with_suffix('.zip'))
         n_files_written = 0
-        src_dir = self._serving_music_path_base.format(user=username)
+        src_dir = f'{self._serving_music_path_base}/{username}'
         if len(tracks_to_zip) > 0:
             with zipfile.ZipFile(output_path,'w', zipfile.ZIP_DEFLATED) as zip_file:
                 for entry in tracks_to_zip:
@@ -249,9 +248,14 @@ class FileBrowserFileHandler:
                     n_files_written += 1
         return n_files_written, dst_dir
 
-    def export_subsonic_music(self, db_path: str, app_env: str, username: str, job_id: str) -> int:
-        db_controller = DbController(TinyDB(db_path), app_env)
-        src_dir = self._serving_music_path_base.format(user=username)
+    def export_subsonic_music(self, db_config: dict, app_env: str, username: str, job_id: str) -> int:
+        from pymix.factories.create_db_session import create_db_session
+        session_factory = create_db_session(
+            db_host=db_config["host"],
+            db_port=db_config["port"],
+        )
+        db_controller = DbController(session_factory, app_env, 0)
+        src_dir = f'{self._serving_music_path_base}/{username}'
         dst_dir = Path(self._filebrowser_data_path_downloads.format(user=username)) / self._zip_name
         output_path = str(dst_dir.with_suffix('.zip'))
         datetime_start = datetime.datetime.now()

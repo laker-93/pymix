@@ -29,7 +29,8 @@ containers:
 logs_directory: logs
 user_root: /subbox/{user}
 db:
-  path: /pymix/db/user_db.json
+  host: pymix-postgres
+  port: 5432
 max_number_of_users: 10
 max_number_of_tracks: 1000
 max_library_size: 10737418240 # 10GB

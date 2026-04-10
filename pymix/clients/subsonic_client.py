@@ -164,7 +164,7 @@ class SubsonicClient(BaseAPIClient):
                 rating=entry.get('userRating', 0),
                 genre=None if entry.get('genre') == '\x1a' else entry.get('genre'),
                 sub_track_id=entry.get('id')
-            ) for entry in resp if 'private' in entry['path']
+            ) for entry in resp
         ], n_items
 
     def _parse_tracks(self, response: dict, username: str) -> List[SubBoxTrack]:
