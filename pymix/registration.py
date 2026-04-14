@@ -105,7 +105,7 @@ def create_app(container):
         CORSMiddleware,
         # need to set explicit origins here rather than * since feishin will be sending credentials in cookies:
         # https://stackoverflow.com/questions/18642828/origin-origin-is-not-allowed-by-access-control-allow-origin
-        allow_origins=["http://localhost:4343", "https://sub-box.net", "https://www.sub-box.net", "http://localhost"],
+        allow_origins=["http://localhost:4343", "https://sub-box.net", "https://www.sub-box.net", "http://localhost", "https://www.staging.sub-box.net", "https://staging.sub-box.net"],
         allow_credentials=True,
         allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "Set-Cookie"],
