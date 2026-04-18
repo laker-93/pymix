@@ -502,7 +502,14 @@ class DbController:
             return session.query(UserRow).count()
 
     def user_library_size_exceeded(self, username: str, size_import: int) -> tuple[bool, int, int]:
-        total_size = sum(file.stat().st_size for file in Path(f'/private-music/{username}').rglob('*'))
+        total_size = 0
+        for file in Path(f'/private-music/{username}').rglob('*'):
+            try:
+                total_size += file.stat().st_size
+            except FileNotFoundError:
+                # file disappeared between rglob and stat
+                logger.error(f"Missing during scan: {file} for user {username}")
+                continue
         user = self.get_user(username)
         max_storage_bytes = int(user['max_library_size'])
         if int(total_size + size_import) > max_storage_bytes:

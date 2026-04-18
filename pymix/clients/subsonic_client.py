@@ -170,6 +170,7 @@ class SubsonicClient(BaseAPIClient):
     def _parse_tracks(self, response: dict, username: str) -> List[SubBoxTrack]:
         resp_playlist = response['subsonic-response']['playlist'].get('entry', [])
         src_dir = self._serving_music_path_base.format(user=username)
+
         return [
             SubBoxTrack(
                 name=entry['title'],

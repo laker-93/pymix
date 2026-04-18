@@ -1,5 +1,6 @@
 import datetime
 import logging
+import time
 
 import mimetypes
 import shutil
@@ -19,47 +20,107 @@ from pymix.utils.tag_subbox_id import tag_subbox_id
 
 logger = logging.getLogger(__name__)
 
+AUDIO_EXTENSIONS = {
+    '.mp3', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.wav', '.aiff', '.aif', '.wma', '.alac', '.zip',
+}
 
 
-async def trigger_processing(recv_stream, rekordbox_xml_controller):
+def _has_audio_files(directory: Path) -> bool:
+    """Check whether a directory contains at least one audio file (or zip)."""
+    for entry in directory.rglob('*'):
+        if entry.is_file() and entry.suffix.lower() in AUDIO_EXTENSIONS:
+            return True
+    return False
+
+
+
+async def trigger_processing(recv_stream, rekordbox_xml_controller, db_controller: DbController):
     async with recv_stream:
         async for user in recv_stream:
-            logger.info(f'processing for user {user}...')
-            await rekordbox_xml_controller.consume_from_filebrowser(user, public=False, watch=True)
+            logger.info(f'watch import: processing for user {user}...')
+            job_id = None
+            success = True
+            try:
+                job_id = db_controller.create_import_job(user, number_of_tracks_to_import=0, total_n_imported_tracks=0)
+                await rekordbox_xml_controller.consume_from_filebrowser(user, public=False, watch=True)
+            except Exception:
+                success = False
+                logger.exception(f'watch import: failed for user {user}')
+            finally:
+                if job_id:
+                    db_controller.job_completed(job_id, success)
+                logger.info(f'watch import: finished for user {user} (success={success})')
 
 
+async def poll_watchdir(user_root: Path, watch_subdir: str, send_stream, db_controller):
+    """Watch user_root for file additions in any user's watch directory.
 
-async def poll_watchdir(watchpaths: list[Path], send_stream, db_controller):
-    poll_time = 10
-    user_paths = defaultdict(list)
-    user_n_timeouts_no_update = defaultdict(int)
-    maxed_out_users = set()
+    Watches the entire user_root tree so newly created users are picked up
+    automatically without needing a restart. Only reacts to files under
+    ``<user_root>/<username>/<watch_subdir>/``.
+
+    Uses a time-based debounce: after the last file addition or modification
+    for a user, waits ``DEBOUNCE_SECONDS`` of inactivity before triggering
+    import. This ensures in-progress downloads (which produce modified events)
+    are complete before processing.
+    """
+    DEBOUNCE_SECONDS = 10
+    user_last_change: dict[str, float] = {}
+    user_pending_size: dict[str, int] = defaultdict(int)
+    maxed_out_users: set[str] = set()
 
     async with send_stream:
-        async for changes in awatch(*watchpaths, yield_on_timeout=True, rust_timeout=1000):
-            for user in user_n_timeouts_no_update.keys():
-                user_n_timeouts_no_update[user] += 1
-                if user_n_timeouts_no_update[user] == poll_time and user not in maxed_out_users:
-                    logger.info(f"user {user} has files to process and has had no update in the past {poll_time} seconds")
-                    await send_stream.send(user)
-                    user_paths[user].clear()
-            for change in changes:
-                if change[0] == Change.added:
-                    added_path = Path(change[1])
-                    user = added_path.parts[added_path.parts.index('user-updownloads') + 1]
-                    user_paths[user].append(added_path)
-                    user_n_timeouts_no_update[user] = 0
-                    size_to_import = 0
-                    for p in user_paths[user]:
-                        if p.exists():
-                            size_to_import += p.stat().st_size
-                        else:
-                            logger.info(f'path {p} does not exist')
-                    exceeded, _1, _2 = db_controller.user_library_size_exceeded(user, size_to_import)
-                    if exceeded:
-                        logger.error(f'exceeded library size for user {user}')
-                        maxed_out_users.add(user)
-                        # todo some how notify front end and block user from uploading more
+        async for changes in awatch(user_root, yield_on_timeout=True, rust_timeout=1000):
+            now = time.monotonic()
+
+            for change_type, change_path in changes:
+                if change_type not in (Change.added, Change.modified):
+                    continue
+                path = Path(change_path)
+                try:
+                    rel = path.relative_to(user_root)
+                except ValueError:
+                    continue
+                # Expect structure: <username>/<watch_subdir>/...
+                parts = rel.parts
+                if len(parts) < 2 or parts[1] != watch_subdir:
+                    continue
+                user = parts[0]
+
+                if user in maxed_out_users:
+                    continue
+
+                if path.is_file():
+                    user_pending_size[user] += path.stat().st_size
+                user_last_change[user] = now
+
+                exceeded, _, _ = db_controller.user_library_size_exceeded(user, user_pending_size[user])
+                if exceeded:
+                    logger.error(f'watch: library size exceeded for user {user}')
+                    maxed_out_users.add(user)
+                    user_pending_size.pop(user, None)
+                    user_last_change.pop(user, None)
+
+            # Check which users have passed the debounce window
+            ready_users = [
+                u for u, last in user_last_change.items()
+                if now - last >= DEBOUNCE_SECONDS and u not in maxed_out_users
+            ]
+            for user in ready_users:
+                watch_dir = user_root / user / watch_subdir
+                if not _has_audio_files(watch_dir):
+                    logger.info(f'watch: no audio files in watch dir for user {user}, skipping')
+                    user_last_change.pop(user)
+                    user_pending_size.pop(user, 0)
+                    continue
+                n_bytes = user_pending_size.get(user, 0)
+                logger.info(
+                    f'watch: triggering import for user {user} '
+                    f'(~{n_bytes / 1024 / 1024:.1f} MB, debounce complete)'
+                )
+                await send_stream.send(user)
+                user_last_change.pop(user)
+                user_pending_size.pop(user, 0)
 
 
 
@@ -238,7 +299,7 @@ class FileBrowserFileHandler:
         dst_dir = Path(self._filebrowser_data_path_downloads.format(user=username)) / self._zip_name
         output_path = str(dst_dir.with_suffix('.zip'))
         n_files_written = 0
-        src_dir = f'{self._serving_music_path_base}/{username}'
+        src_dir = self._serving_music_path_base
         if len(tracks_to_zip) > 0:
             with zipfile.ZipFile(output_path,'w', zipfile.ZIP_DEFLATED) as zip_file:
                 for entry in tracks_to_zip:
@@ -273,7 +334,9 @@ class FileBrowserFileHandler:
 
     def stage_for_import(self, username: str, public: bool, watch: bool):
         """
-        copy files from filebrowser to beets input data path.
+        Stage files from filebrowser to beets input data path.
+        When watch=True, files are moved (not copied) so new arrivals during
+        a slow import are left untouched for the next cycle.
         """
         if watch:
             src_dir = self._filebrowser_data_path_watch.format(user=username)
@@ -284,20 +347,24 @@ class FileBrowserFileHandler:
         else:
             dst_dir = self._beets_data_path.format(user=username)
         logger.info(f'staging for import. Extracting from {src_dir} to {dst_dir}')
-        n_files = 0
         for entry in Path(src_dir).iterdir():
-            n_files += 1
             if entry.is_file():
                 if entry.suffix == '.zip':
                     with zipfile.ZipFile(entry, 'r') as zip_ref:
                         zip_ref.extractall(dst_dir)
+                    if watch:
+                        entry.unlink()
                 else:
                     file_name = entry.parts[-1]
-                    # must use shutil as pathlib doesn't work cross filesystem as fb-data path is on a docker volume
-                    shutil.copy(entry, Path(dst_dir) / file_name)
-                    #entry.rename(Path(dest_dir) / file_name)
+                    if watch:
+                        shutil.move(str(entry), Path(dst_dir) / file_name)
+                    else:
+                        # must use shutil as pathlib doesn't work cross filesystem as fb-data path is on a docker volume
+                        shutil.copy(entry, Path(dst_dir) / file_name)
             elif entry.is_dir():
                 shutil.copytree(entry, Path(dst_dir) / entry.name, dirs_exist_ok=True)
+                if watch:
+                    shutil.rmtree(entry)
 
         tracks = OriginalTracks(tracks=[])
 
@@ -323,7 +390,6 @@ class FileBrowserFileHandler:
 
         logger.info(f"constructed metadata for {len(tracks.tracks)} audio files")
         self._db_controller.save_original_track_meta(username, tracks)
-
 
     def remove_fb_data_path(self, username, watch: bool = False):
         if watch:

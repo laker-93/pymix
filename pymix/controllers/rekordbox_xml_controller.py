@@ -204,6 +204,20 @@ class RekordboxXMLController:
     async def consume_from_filebrowser(self, username: str, public: bool, watch: bool = False) -> str:
         return await anyio.to_thread.run_sync(self._consume_from_filebrowser, username, public, watch)
 
+    @staticmethod
+    def _log_subbox_id_tags(directory: Path, label: str):
+        """Debug: log the SUBBOX_ID tag for every audio file in a directory tree."""
+        for f in sorted(directory.rglob('*')):
+            if not f.is_file():
+                continue
+            try:
+                with taglib.File(str(f), save_on_exit=False) as song:
+                    subbox_tag = song.tags.get("SUBBOX_ID")
+                    tag_val = subbox_tag[0] if subbox_tag else "<MISSING>"
+                logger.info(f'[{label}] {f.name} → SUBBOX_ID={tag_val}')
+            except Exception:
+                logger.info(f'[{label}] {f.name} → <UNREADABLE>')
+
     def _consume_from_filebrowser(self, username: str, public: bool, watch) -> str:
         """
         # steps:
@@ -214,15 +228,12 @@ class RekordboxXMLController:
 
         self._file_browser_file_handler.stage_for_import(username, public, watch)
 
-        # 1. invoke beets import on the audio files to import
-        # can set to interactive with tty to pipe docker stdin input/output to terminal for user feedback.
-        # beets config set to quiet mode and fallback of 'asis'. If user needs to correct later, they will have to
-        # specify a musicbrainz id and re import with a specific query. This will need a separate API to be implemented.
+        # Debug: log SUBBOX_ID tags on staged files before beets import
+        staging_dir = Path(self._file_browser_file_handler._beets_data_path.format(user=username))
+        self._log_subbox_id_tags(staging_dir, 'PRE-BEETS')
 
         # set a custom field of the username that uploaded the track. This allows to query tracks that a username has uploaded.
         # group-albums to allow importing correctly tracks with different album tags.
-        # detach to avoid returning potentially large stdout from the docker logs.
-        # Instead logs are streamed incrementally
         beets_command = f"beet import --group-albums --set user={username} --set public={public} -q /downloads"
         logger.info(f'running beet import command {beets_command}')
         try:
@@ -236,6 +247,9 @@ class RekordboxXMLController:
             raise
         else:
             logger.info(f"finished beets command {beets_command} for {username}")
+            # Debug: log SUBBOX_ID tags on imported files after beets import
+            music_dir = Path(f'{self._serving_music_path_base}/{username}')
+            self._log_subbox_id_tags(music_dir, 'POST-BEETS')
             # 9. on success, remove the directory of the beets import
             logger.info(f'starting post import clean up for {username}')
             # todo - inject public in from router

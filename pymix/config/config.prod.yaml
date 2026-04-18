@@ -13,7 +13,7 @@ containers:
     music_backup_path: /private-music/backup/{user}
     docker_compose_file: /subbox/docker-compose/navidrome/docker-compose.yml
     env_file: /subbox/docker-compose/navidrome/env
-    config_file_dst: /subbox/users/{user}/navidrome/data/navidrome.toml
+    config_file_dst: /subbox/users/{user}/data/navidrome.toml
   filebrowser:
     user_root: /user-updownloads
     data_watch: /user-updownloads/{user}/watch
