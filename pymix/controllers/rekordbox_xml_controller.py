@@ -266,7 +266,10 @@ class RekordboxXMLController:
             self._map_subbox_id_beet_id(username, False)
 
 
-    async def create_rekordbox_xml_from_subsonic_playlists(self, user_root: str, user: dict, xml_path: Optional[Path], xml_output_path: Path):
+    async def create_rekordbox_xml_from_subsonic_playlists(
+        self, user_root: str, user: dict, xml_path: Optional[Path], xml_output_path: Path,
+        playlist_ids: Optional[List[str]] = None,
+    ):
         # todo this could be made a context manager to create, update then save the xml
         self._rekordbox_xml_orchestrator.create_xml(xml_path)
 
@@ -275,6 +278,15 @@ class RekordboxXMLController:
             logger.info(f'no subsonic playlists found for user')
 
         if subsonic_playlists:
+            if playlist_ids:
+                id_set = set(playlist_ids)
+                logger.info(f'export: {len(subsonic_playlists)} playlists before filtering: {[(p.name, p.subsonic_id) for p in subsonic_playlists]}')
+                subsonic_playlists = [p for p in subsonic_playlists if p.subsonic_id in id_set]
+                matched_ids = {p.subsonic_id for p in subsonic_playlists}
+                unmatched_ids = id_set - matched_ids
+                if unmatched_ids:
+                    logger.error(f'export: requested playlist ids not found: {unmatched_ids}')
+                logger.info(f'export: {len(subsonic_playlists)} playlists after filtering: {[(p.name, p.subsonic_id) for p in subsonic_playlists]}')
             # sort the playlists by name so duplicate folders of the same name are not created
             subsonic_playlists.sort(key=lambda playlist: playlist.name)
             # Enrich subsonic playlists with stored path_components for lossless folder reconstruction
@@ -286,25 +298,24 @@ class RekordboxXMLController:
             # Given the Playlist data from Subsonic create the playlist directory structure in Rekordbox.
             for subsonic_playlist in subsonic_playlists:
                 self._create_rekordbox_xml_playlist(user_root, user, subsonic_playlist)
-        # add subsonic tracks that do not belong to a playlist to a default playlist.
-        default_playlist = self._rekordbox_xml_orchestrator.get_playlist('NOPLAYLIST')
-        if not default_playlist:
-            noplaylist = SubBoxPlaylist(name='NOPLAYLIST', path_components=['NOPLAYLIST'])
-            default_playlist = self._rekordbox_xml_orchestrator.create_rekordbox_xml_playlist(noplaylist)
-        # suppress the exception that would be raised due to attempting to add a track that is already present.
-        import asyncio
-        # todo figure this out - seem to need to pause to avoid getting disconnected from server
-        await asyncio.sleep(2)
-        async for tracks in self._subsonic_client.get_all_tracks(user, 200):
-            for track in tracks:
-                self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(
-                    user_root,
-                    user,
-                    track,
-                    default_playlist,
-                    force=False
-                )
+        # When not filtering, add subsonic tracks that do not belong to a playlist to a default playlist.
+        if not playlist_ids:
+            default_playlist = self._rekordbox_xml_orchestrator.get_playlist('NOPLAYLIST')
+            if not default_playlist:
+                noplaylist = SubBoxPlaylist(name='NOPLAYLIST', path_components=['NOPLAYLIST'])
+                default_playlist = self._rekordbox_xml_orchestrator.create_rekordbox_xml_playlist(noplaylist)
+            import asyncio
             await asyncio.sleep(2)
+            async for tracks in self._subsonic_client.get_all_tracks(user, 200):
+                for track in tracks:
+                    self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(
+                        user_root,
+                        user,
+                        track,
+                        default_playlist,
+                        force=False
+                    )
+                await asyncio.sleep(2)
 
         # todo remove any playlists that have no tracks
         self._rekordbox_xml_orchestrator.save_xml(xml_output_path)

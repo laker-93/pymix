@@ -26,7 +26,8 @@ async def main(playlist_id: str):
             app_env="dev",
         )
         user = {"username": USERNAME, "password": PASSWORD}
-        tracks = await client.get_playlist_tracks(user, playlist_id)
+        #tracks = await client.get_playlist_tracks(user, playlist_id)
+        tracks = await client.get_playlists(user)
         print(f"{len(tracks)} tracks:")
         print(tracks)
 
