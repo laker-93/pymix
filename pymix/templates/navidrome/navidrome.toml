@@ -1,3 +1,3 @@
-Tags.subboxiD.Aliases = ["subbox_id", "subboxid"]
-Tags.subboxiD.Split = ["; ", " / "]
+Tags.subboxid.Aliases = ["subbox_id", "subboxid"]
+Tags.subboxid.Split = ["; ", " / "]
 Scanner.PurgeMissing = "always"

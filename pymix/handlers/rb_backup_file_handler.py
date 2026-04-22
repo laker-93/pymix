@@ -1,6 +1,5 @@
 import logging
 import zipfile
-import mimetypes
 
 import music_tag
 import shutil
@@ -12,6 +11,7 @@ from pymix.controllers.db_controller import DbController
 from pymix.model.subboxtrack import SubBoxTrack
 from pymix.orchestrators.rekordbox_xml_orchestrator import RekordboxXMLOrchestrator
 from pymix.utils.tag_subbox_id import get_subbox_id
+from pymix.utils.utility import detect_audio_type
 
 logger = logging.getLogger(__name__)
 
@@ -113,12 +113,7 @@ class RBBackupFileHandler:
         beets_data_path = Path(beets_data_path)
         for item in audio_files.rglob('*'):
             if item.is_file():
-                mime_type_encoding = mimetypes.guess_type(item)
-                if mime_type_encoding is None:
-                    logger.error(f'could not guess mime type of {item}')
-                    continue
-                mime_type = mime_type_encoding[0]
-                if mime_type and mime_type.split('/')[0] == 'audio':
+                if detect_audio_type(item) is not None:
                     subbox_id = get_subbox_id(item)
                     if subbox_id:
                         subbox_id_beet_id = self._db_controller.get_subbox_beet_map(username, subbox_id)
@@ -131,11 +126,8 @@ class RBBackupFileHandler:
                     suffix = item.suffix
                     destination = beets_data_path / relative_path
                     if not suffix:
-                        extension = mimetypes.guess_extension(mime_type)
-                        if extension:
-                            destination = destination.with_suffix(f'{extension}')
-                        else:
-                            logger.error(f'unknown file type for {item}')
+                        logger.error(f'no file extension and cannot determine type for {item}, skipping')
+                        continue
 
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     logger.info(f'staging {item} to {destination}')

@@ -1,13 +1,13 @@
 import datetime
 import logging
 import time
-
 import mimetypes
+
 import shutil
 import zipfile
 from collections import defaultdict
 from pathlib import Path
-from typing import Tuple, Optional, Dict
+from typing import Tuple, Optional, Dict, Any
 from zipfile import ZipFile
 
 import music_tag
@@ -17,6 +17,7 @@ from pymix.controllers.db_controller import DbController
 from pymix.model.original_track_meta import OriginalTracks, OriginalTrackMeta
 from pymix.model.subboxtrack import SubBoxTrack
 from pymix.utils.tag_subbox_id import tag_subbox_id
+from pymix.utils.utility import detect_audio_type, detect_audio_type_with_reason
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,27 @@ def _has_audio_files(directory: Path) -> bool:
         if entry.is_file() and entry.suffix.lower() in AUDIO_EXTENSIONS:
             return True
     return False
+
+
+def _all_files_stable(directory: Path, stable_seconds: float) -> bool:
+    """Return True only if every audio file's mtime is at least *stable_seconds* ago.
+
+    This guards against partially-downloaded files whose filesystem events
+    may not have been delivered to watchfiles (e.g. writes via an open fd,
+    or temp-file-then-rename patterns).
+    """
+    now = time.time()
+    for entry in directory.rglob('*'):
+        if entry.is_file() and entry.suffix.lower() in AUDIO_EXTENSIONS:
+            try:
+                age = now - entry.stat().st_mtime
+                if age < stable_seconds:
+                    logger.info(f'watch: file {entry.name} still unstable (modified {age:.1f}s ago)')
+                    return False
+            except OSError:
+                # File may have been removed between rglob and stat
+                continue
+    return True
 
 
 
@@ -64,7 +86,7 @@ async def poll_watchdir(user_root: Path, watch_subdir: str, send_stream, db_cont
     import. This ensures in-progress downloads (which produce modified events)
     are complete before processing.
     """
-    DEBOUNCE_SECONDS = 10
+    DEBOUNCE_SECONDS = 15
     user_last_change: dict[str, float] = {}
     user_pending_size: dict[str, int] = defaultdict(int)
     maxed_out_users: set[str] = set()
@@ -113,6 +135,11 @@ async def poll_watchdir(user_root: Path, watch_subdir: str, send_stream, db_cont
                     user_last_change.pop(user)
                     user_pending_size.pop(user, 0)
                     continue
+                if not _all_files_stable(watch_dir, DEBOUNCE_SECONDS):
+                    logger.info(f'watch: files still being written for user {user}, deferring import')
+                    # Reset debounce so we re-check after another DEBOUNCE_SECONDS
+                    user_last_change[user] = now
+                    continue
                 n_bytes = user_pending_size.get(user, 0)
                 logger.info(
                     f'watch: triggering import for user {user} '
@@ -145,7 +172,6 @@ class FileBrowserFileHandler:
         self._beets_data_path = beets_data_path
         self._beets_data_path_public = beets_data_path_public
         self._update_job_period_s = update_job_period_s
-        self._mimetypes = mimetypes.init()
         self._db_controller = db_controller
 
     def get_xml_output_path(self, username: str) -> Path:
@@ -177,39 +203,99 @@ class FileBrowserFileHandler:
         for f in src_path.rglob('*'):
             if not f.is_file():
                 continue
-            mime_type_encoding = mimetypes.guess_type(str(f))
-            if mime_type_encoding is None:
-                logger.error(f'skipping file {f}')
-                continue
-            mime_type = mime_type_encoding[0]
             if f.name.lower() == 'all-crates.zip':
                 subcrate_path = f
             elif f.name.endswith('.zip') and 'macosx' not in f.name.lower() and 'all-crates' not in f.name.lower():
                 zip_path = f
-            elif mime_type.split('/')[0] == 'audio':
+            elif detect_audio_type(f) is not None:
                 audio_path = src_path
             if audio_path and subcrate_path:
                 break
         assert subcrate_path
         return subcrate_path, zip_path, audio_path
 
-    def tag_staging_with_subbox_id(self, user: str, tracks: OriginalTracks):
+    def tag_staging_with_subbox_id(self, user: str, tracks: OriginalTracks) -> Dict[str, Any]:
         src_path = Path(
             self._filebrowser_data_path_uploads.format(user=user)
         )
 
+        report: Dict[str, Any] = {
+            'tagged_count': 0,
+            'already_tagged_count': 0,
+            'untagged_count': 0,
+            'untagged': [],
+        }
+
+        # Build a lookup by staging location so we can explain why each track was skipped.
+        tracks_by_staging = {track.stagingLocation: track for track in tracks.tracks}
+        matched_staging_locations: set[str] = set()
+
         for f in src_path.rglob('*'):
-            if f.is_file():
-                mime_type = mimetypes.guess_type(str(f))[0]
-                if mime_type is None:
-                    logger.error(f'skipping file {f}')
-                    continue
-                if mime_type.split('/')[0] == 'audio':
-                    for track in tracks.tracks:
-                        if track.stagingLocation in str(f):
-                            subbox_id = tag_subbox_id(f)
-                            if subbox_id:
-                                track.subbox_id = subbox_id
+            if not f.is_file():
+                continue
+
+            file_path = str(f)
+            track = None
+            for staging_location, candidate in tracks_by_staging.items():
+                if staging_location in file_path:
+                    track = candidate
+                    matched_staging_locations.add(staging_location)
+                    break
+            if track is None:
+                continue
+
+            audio_type, non_audio_reason = detect_audio_type_with_reason(f)
+            if audio_type is None:
+                logger.error(
+                    'tag_staging_with_subbox_id: non-audio file for stagingLocation=%s file=%s reason=%s',
+                    track.stagingLocation,
+                    file_path,
+                    non_audio_reason,
+                )
+                report['untagged'].append({
+                    'stagingLocation': track.stagingLocation,
+                    'file': file_path,
+                    'reason': non_audio_reason,
+                })
+                continue
+
+            existing_subbox_id = track.subbox_id
+            subbox_id = tag_subbox_id(f)
+            if subbox_id:
+                track.subbox_id = subbox_id
+                if existing_subbox_id and existing_subbox_id == subbox_id:
+                    report['already_tagged_count'] += 1
+                else:
+                    report['tagged_count'] += 1
+            else:
+                report['untagged'].append({
+                    'stagingLocation': track.stagingLocation,
+                    'file': file_path,
+                    'reason': 'tag_subbox_id_returned_none',
+                })
+
+        for track in tracks.tracks:
+            if track.subbox_id is not None:
+                continue
+            if track.stagingLocation not in matched_staging_locations:
+                report['untagged'].append({
+                    'stagingLocation': track.stagingLocation,
+                    'file': None,
+                    'reason': 'no_matching_file_for_staging_location',
+                })
+
+        report['untagged_count'] = len(report['untagged'])
+        logger.info(
+            'tag_staging_with_subbox_id summary for user %s: tagged=%s already_tagged=%s untagged=%s',
+            user,
+            report['tagged_count'],
+            report['already_tagged_count'],
+            report['untagged_count'],
+        )
+        if report['untagged_count']:
+            logger.error('tag_staging_with_subbox_id untagged details: %s', report['untagged'])
+
+        return report
 
 
 
@@ -232,18 +318,13 @@ class FileBrowserFileHandler:
         for f in src_path.rglob('*'):
             if f.is_file():
                 counters["n_file"] += 1
-                mime_type_encoding = mimetypes.guess_type(str(f))
-                if mime_type_encoding is None:
-                    logger.error(f'skipping file {f}')
-                    counters["n_skipped_files"] += 1
-                    continue
-                mime_type = mime_type_encoding[0]
-                if mime_type == 'application/xml' or mime_type == 'text/xml':
+                guessed_mime = mimetypes.guess_type(str(f))[0]
+                if guessed_mime in ('application/xml', 'text/xml'):
                     xml_path = f
                     counters["n_xml"] += 1
                 elif f.name.endswith('.zip') and 'macosx' not in f.name.lower():
                     zip_path = f
-                elif mime_type.split('/')[0] == 'audio':
+                elif detect_audio_type(f) is not None:
                     audio_path = src_path
                     counters["n_audio"] += 1
             if zip_path and xml_path:
@@ -267,12 +348,9 @@ class FileBrowserFileHandler:
                     break
         for f in src_path.rglob('*'):
             if f.is_file():
-                mimestart = mimetypes.guess_type(str(f))[0]
-                if mimestart:
-                    mimecategory = mimestart.split('/')[0]
-                    if mimecategory == 'audio':
-                        n_files += 1
-                        total_size += f.stat().st_size
+                if detect_audio_type(f) is not None:
+                    n_files += 1
+                    total_size += f.stat().st_size
 
         if audio_files_zip:
             with ZipFile(audio_files_zip) as zip:
@@ -284,13 +362,12 @@ class FileBrowserFileHandler:
                     if f.endswith('.crate'):
                         # ignore crate
                         continue
-                    mimestart = mimetypes.guess_type(str(f))[0]
-                    if mimestart:
-                        mimecategory = mimestart.split('/')[0]
-                        if mimecategory == 'audio':
-                            logger.info(f'found audio file {f}')
-                            n_files += 1
-                            total_size += zip.getinfo(f).file_size
+                    # Zip entries are not real paths on disk; fall back to extension check
+                    suffix = Path(f).suffix.lower()
+                    if suffix in AUDIO_EXTENSIONS - {'.zip'}:
+                        logger.info(f'found audio file {f}')
+                        n_files += 1
+                        total_size += zip.getinfo(f).file_size
 
         return {'n_tracks': n_files, 'size_tracks': total_size}
 
@@ -323,7 +400,13 @@ class FileBrowserFileHandler:
         n_files_written = 0
         with zipfile.ZipFile(output_path,'w', zipfile.ZIP_DEFLATED) as zip_file:
             for entry in Path(src_dir).rglob("*"):
-                zip_file.write(entry, Path(self._zip_name) / entry.relative_to(src_dir))
+                if not entry.is_file():
+                    continue
+                # Store paths relative to /private-music/<username>/ so the zip extracts to
+                # <zip location>/<artist>/<album>/<track> without private server prefixes.
+                entry_to_write = entry.relative_to(src_dir)
+                logger.info(f'exporting {entry} as {entry_to_write} for user {username}')
+                zip_file.write(entry, entry_to_write)
                 n_files_written += 1
                 datetime_now = datetime.datetime.now()
                 if (datetime_now - datetime_start).total_seconds() > self._update_job_period_s:
