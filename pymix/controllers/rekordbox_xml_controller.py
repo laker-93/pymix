@@ -55,7 +55,7 @@ class RekordboxXMLController:
             subsonic_client: SubsonicClient,
             db_controller: DbController,
             restored_db_output_root: str,
-            zip_name: str,
+            local_user_music_stem: str,
             serving_music_path_base: str
     ):
         self._subsonic_orchestrator = subsonic_orchestrator
@@ -65,7 +65,7 @@ class RekordboxXMLController:
         self._db_controller = db_controller
         self._restored_db_output_root = restored_db_output_root
         self._subsonic_client = subsonic_client
-        self._zip_name = zip_name
+        self._local_user_music_stem = local_user_music_stem
         self._serving_music_path_base = serving_music_path_base
 
     def _create_rekordbox_xml_playlist(self, user_root: str, user: dict, subsonic_playlist: SubBoxPlaylist):

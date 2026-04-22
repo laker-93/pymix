@@ -154,6 +154,7 @@ async def poll_watchdir(user_root: Path, watch_subdir: str, send_stream, db_cont
 class FileBrowserFileHandler:
     def __init__(
             self,
+            local_user_music_stem: str,
             zip_name: str,
             serving_music_path_base: str,
             filebrowser_data_path_uploads: str,
@@ -162,8 +163,9 @@ class FileBrowserFileHandler:
             beets_data_path: str,
             beets_data_path_public: str,
             update_job_period_s: int,
-            db_controller: DbController
+            db_controller: DbController,
     ):
+        self._local_user_music_stem = local_user_music_stem
         self._zip_name = zip_name
         self._serving_music_path_base = serving_music_path_base.removesuffix('/')
         self._filebrowser_data_path_uploads = filebrowser_data_path_uploads
@@ -373,17 +375,62 @@ class FileBrowserFileHandler:
 
 
     def sync(self, username: str, tracks_to_zip: list[SubBoxTrack]) -> Tuple[int, Path]:
+        src_dir = self._get_user_music_root(username)
+        files_to_zip: list[Path] = []
+        for track in tracks_to_zip:
+            file_path: Optional[Path] = None
+            if track.pymix_path:
+                file_path = Path(track.pymix_path)
+            elif track.path:
+                entry_dir = str(track.path).removeprefix('/' + self._local_user_music_stem).lstrip('/')
+                file_path = src_dir / entry_dir
+
+            if file_path is None:
+                logger.error(f'sync: unable to resolve file path for track {track}')
+                continue
+            if not file_path.exists():
+                logger.error(f'sync: track file not found {file_path}')
+                continue
+            files_to_zip.append(file_path)
+
+        n_files_written, dst_dir = self._write_export_zip(
+            username=username,
+            src_dir=src_dir,
+            files_to_zip=files_to_zip,
+            db_controller=None,
+            job_id=None,
+        )
+        return n_files_written, dst_dir
+
+    def _get_user_music_root(self, username: str) -> Path:
+        if '{user}' in self._serving_music_path_base:
+            return Path(self._serving_music_path_base.format(user=username))
+        return Path(self._serving_music_path_base) / username
+
+    def _write_export_zip(
+        self,
+        username: str,
+        src_dir: Path,
+        files_to_zip: list[Path],
+        db_controller: Optional[DbController],
+        job_id: Optional[str],
+    ) -> Tuple[int, Path]:
         dst_dir = Path(self._filebrowser_data_path_downloads.format(user=username)) / self._zip_name
         output_path = str(dst_dir.with_suffix('.zip'))
+        datetime_start = datetime.datetime.now()
         n_files_written = 0
-        src_dir = self._serving_music_path_base
-        if len(tracks_to_zip) > 0:
-            with zipfile.ZipFile(output_path,'w', zipfile.ZIP_DEFLATED) as zip_file:
-                for entry in tracks_to_zip:
-                    entry_dir = str(entry.path).removeprefix('/' + self._zip_name)
-                    p = Path(src_dir + entry_dir)
-                    zip_file.write(p, Path(self._zip_name) / p.relative_to(src_dir))
-                    n_files_written += 1
+        with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for entry in files_to_zip:
+                if not entry.is_file():
+                    continue
+                entry_to_write = Path(self._local_user_music_stem) / entry.relative_to(src_dir) if self._local_user_music_stem else entry.relative_to(src_dir)
+                logger.info(f'exporting {entry} as {entry_to_write} for user {username}')
+                zip_file.write(entry, entry_to_write)
+                n_files_written += 1
+                if db_controller and job_id:
+                    datetime_now = datetime.datetime.now()
+                    if (datetime_now - datetime_start).total_seconds() > self._update_job_period_s:
+                        db_controller.update_export_job(job_id, n_files_written)
         return n_files_written, dst_dir
 
     def export_subsonic_music(self, db_config: dict, app_env: str, username: str, job_id: str) -> int:
@@ -393,24 +440,15 @@ class FileBrowserFileHandler:
             db_port=db_config["port"],
         )
         db_controller = DbController(session_factory, app_env, 0)
-        src_dir = f'{self._serving_music_path_base}/{username}'
-        dst_dir = Path(self._filebrowser_data_path_downloads.format(user=username)) / self._zip_name
-        output_path = str(dst_dir.with_suffix('.zip'))
-        datetime_start = datetime.datetime.now()
-        n_files_written = 0
-        with zipfile.ZipFile(output_path,'w', zipfile.ZIP_DEFLATED) as zip_file:
-            for entry in Path(src_dir).rglob("*"):
-                if not entry.is_file():
-                    continue
-                # Store paths relative to /private-music/<username>/ so the zip extracts to
-                # <zip location>/<artist>/<album>/<track> without private server prefixes.
-                entry_to_write = entry.relative_to(src_dir)
-                logger.info(f'exporting {entry} as {entry_to_write} for user {username}')
-                zip_file.write(entry, entry_to_write)
-                n_files_written += 1
-                datetime_now = datetime.datetime.now()
-                if (datetime_now - datetime_start).total_seconds() > self._update_job_period_s:
-                    db_controller.update_export_job(job_id, n_files_written)
+        src_dir = self._get_user_music_root(username)
+        files_to_zip = [entry for entry in src_dir.rglob('*') if entry.is_file()]
+        n_files_written, _ = self._write_export_zip(
+            username=username,
+            src_dir=src_dir,
+            files_to_zip=files_to_zip,
+            db_controller=db_controller,
+            job_id=job_id,
+        )
         db_controller.update_export_job(job_id, n_files_written)
         return n_files_written
 

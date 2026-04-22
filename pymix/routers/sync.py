@@ -52,6 +52,10 @@ class SyncPlanRequest(BaseModel):
     localTracks: List[Track]
     options: Optional[Dict[str, bool]] = None
 
+
+def _normalize_sync_match_value(value: Optional[str]) -> str:
+    return (value or "").strip().lower()
+
 @router.post("/sync/map_meta", tags=["sync"])
 @inject
 async def map_meta(
@@ -199,17 +203,59 @@ async def sync_plan(
     metadata = {"updates": []}
     download = {"strategy": "zip"}
 
+    logger.info(
+        "sync_plan start: user=%s direction=%s playlists=%s local_tracks=%s include_metadata=%s",
+        username,
+        request.direction,
+        len(request.playlists),
+        len(request.localTracks),
+        bool(request.options and request.options.get("includeMetadata")),
+    )
+
     for playlist in request.playlists:
         playlist_tracks = await subsonic_client.get_playlist_tracks(user, playlist["id"])
         summary["tracksRequested"] += len(playlist_tracks)
+        logger.info(
+            "sync_plan playlist: user=%s playlist_id=%s playlist_name=%s server_tracks=%s",
+            username,
+            playlist.get("id"),
+            playlist.get("name"),
+            len(playlist_tracks),
+        )
 
         for track in playlist_tracks:
+            normalized_server_title = _normalize_sync_match_value(track.name)
+            normalized_server_artist = _normalize_sync_match_value(track.artist)
+            normalized_server_album = _normalize_sync_match_value(track.album)
+
+            title_matches = [
+                local for local in request.localTracks
+                if _normalize_sync_match_value(local.title) == normalized_server_title
+            ]
+            artist_matches = [
+                local for local in request.localTracks
+                if _normalize_sync_match_value(local.artist) == normalized_server_artist
+            ]
             match = next((local for local in request.localTracks if
-                          local.title.lower().strip() == track.name.lower().strip() and
-                          local.artist.lower().strip() == track.artist.lower().strip() and
-                          (not local.album or local.album.lower().strip() == (track.album or "").lower().strip())), None)
+                          _normalize_sync_match_value(local.title) == normalized_server_title and
+                          _normalize_sync_match_value(local.artist) == normalized_server_artist and
+                          (not local.album or _normalize_sync_match_value(local.album) == normalized_server_album)), None)
 
             if match:
+                logger.info(
+                    "sync_plan matched: user=%s playlist_id=%s title=%r artist=%r album=%r normalized=(%r,%r,%r) local=(%r,%r,%r)",
+                    username,
+                    playlist.get("id"),
+                    track.name,
+                    track.artist,
+                    track.album,
+                    normalized_server_title,
+                    normalized_server_artist,
+                    normalized_server_album,
+                    match.title,
+                    match.artist,
+                    match.album,
+                )
                 tracks["existing"].append({
                     "title": track.name,
                     "artist": track.artist,
@@ -221,6 +267,38 @@ async def sync_plan(
                 file_size = 0
                 if track.pymix_path and os.path.isfile(track.pymix_path):
                     file_size = os.path.getsize(track.pymix_path)
+                title_match_examples = [
+                    {
+                        "title": local.title,
+                        "artist": local.artist,
+                        "album": local.album,
+                    }
+                    for local in title_matches[:3]
+                ]
+                artist_match_examples = [
+                    {
+                        "title": local.title,
+                        "artist": local.artist,
+                        "album": local.album,
+                    }
+                    for local in artist_matches[:3]
+                ]
+                logger.info(
+                    "sync_plan missing: user=%s playlist_id=%s title=%r artist=%r album=%r normalized=(%r,%r,%r) title_matches=%s artist_matches=%s title_examples=%s artist_examples=%s file_size=%s",
+                    username,
+                    playlist.get("id"),
+                    track.name,
+                    track.artist,
+                    track.album,
+                    normalized_server_title,
+                    normalized_server_artist,
+                    normalized_server_album,
+                    len(title_matches),
+                    len(artist_matches),
+                    title_match_examples,
+                    artist_match_examples,
+                    file_size,
+                )
                 tracks["missing"].append({
                     "title": track.name,
                     "artist": track.artist,
@@ -236,6 +314,17 @@ async def sync_plan(
                 "artist": track["artist"],
             })
             summary["metadataUpdates"] += 1
+
+    logger.info(
+        "sync_plan complete: user=%s playlists=%s requested=%s existing=%s missing=%s metadata_updates=%s download_size_bytes=%s",
+        username,
+        summary["playlists"],
+        summary["tracksRequested"],
+        summary["tracksAlreadyPresent"],
+        summary["tracksMissing"],
+        summary["metadataUpdates"],
+        summary["downloadSizeBytes"],
+    )
 
     return SyncPlanResponse(
         summary=summary,

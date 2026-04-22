@@ -89,9 +89,9 @@ def extract_track_name(full_string: str, artist: str, album=None) -> None | str:
 
 class SubsonicClient(BaseAPIClient):
     def __init__(self, host: str, session: aiohttp.ClientSession, version: str,
-                 music_path_base_to_remove: str, serving_music_path_base: str, zip_name: Optional[str], app_env: str):
+                 music_path_base_to_remove: str, serving_music_path_base: str, local_user_music_stem: Optional[str], app_env: str):
         super().__init__(host, session)
-        self._zip_name = '/' + zip_name + '/' if zip_name else ''
+        self._local_user_music_stem = '/' + local_user_music_stem + '/' if local_user_music_stem else ''
         self._version = version
         self._music_path_base_to_remove = music_path_base_to_remove
         self._serving_music_path_base = serving_music_path_base
@@ -159,7 +159,7 @@ class SubsonicClient(BaseAPIClient):
             SubBoxTrack(
                 name=entry['title'],
                 artist=entry['artist'],
-                path=Path(f"{self._zip_name}{entry['path'].removeprefix(self._music_path_base_to_remove)}"),
+                path=Path(f"{self._local_user_music_stem}{entry['path'].removeprefix(self._music_path_base_to_remove)}"),
                 pymix_path=Path(src_dir + (entry['path'].removeprefix(self._music_path_base_to_remove))),
                 album=entry['album'],
                 rating=entry.get('userRating', 0),
@@ -180,7 +180,7 @@ class SubsonicClient(BaseAPIClient):
             tracks.append(SubBoxTrack(
                 name=entry['title'],
                 artist=entry['artist'],
-                path=Path(f"{self._zip_name}{entry['path'].removeprefix(self._music_path_base_to_remove)}"),
+                path=Path(f"{self._local_user_music_stem}{entry['path'].removeprefix(self._music_path_base_to_remove)}"),
                 pymix_path=pymix_path,
                 album=entry['album'],
                 rating=entry.get('userRating', 0),
@@ -240,6 +240,7 @@ class SubsonicClient(BaseAPIClient):
         )
         response = await self.get(url)
         assert response
+        print(response)
         tracks = self._parse_tracks(response, username=username)
         return tracks
 
