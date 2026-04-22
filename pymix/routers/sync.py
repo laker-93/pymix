@@ -25,6 +25,7 @@ class ClientTracks(BaseModel):
 class Track(BaseModel):
     title: str
     artist: str
+    fromTag: bool
     album: Optional[str] = None
 
 class MatchedTrack(BaseModel):
@@ -222,40 +223,43 @@ async def sync_plan(
             playlist.get("name"),
             len(playlist_tracks),
         )
-
-        for track in playlist_tracks:
-            normalized_server_title = _normalize_sync_match_value(track.name)
-            normalized_server_artist = _normalize_sync_match_value(track.artist)
-            normalized_server_album = _normalize_sync_match_value(track.album)
-
-            title_matches = [
-                local for local in request.localTracks
-                if _normalize_sync_match_value(local.title) == normalized_server_title
-            ]
-            artist_matches = [
-                local for local in request.localTracks
-                if _normalize_sync_match_value(local.artist) == normalized_server_artist
-            ]
-            match = next((local for local in request.localTracks if
-                          _normalize_sync_match_value(local.title) == normalized_server_title and
-                          _normalize_sync_match_value(local.artist) == normalized_server_artist and
-                          (not local.album or _normalize_sync_match_value(local.album) == normalized_server_album)), None)
-
-            if match:
+        matched_server_track_ids: set[int] = set()
+        for local in request.localTracks:
+            match = await subsonic_client._get_best_track_match(
+                local.title,
+                local.artist,
+                local.album,
+                playlist_tracks,
+                similarity_threshold=0.6,
+            )
+            if not match:
                 logger.info(
-                    "sync_plan matched: user=%s playlist_id=%s title=%r artist=%r album=%r normalized=(%r,%r,%r) local=(%r,%r,%r)",
+                    "sync_plan local_track_unmatched: user=%s playlist_id=%s local=(%r,%r,%r)",
                     username,
                     playlist.get("id"),
-                    track.name,
-                    track.artist,
-                    track.album,
-                    normalized_server_title,
-                    normalized_server_artist,
-                    normalized_server_album,
-                    match.title,
-                    match.artist,
-                    match.album,
+                    local.title,
+                    local.artist,
+                    local.album,
                 )
+                continue
+
+            matched_server_track, similarity = match
+            matched_server_track_ids.add(id(matched_server_track))
+            logger.info(
+                "sync_plan local_track_matched: user=%s playlist_id=%s local=(%r,%r,%r) server=(%r,%r,%r) similarity=%.3f",
+                username,
+                playlist.get("id"),
+                local.title,
+                local.artist,
+                local.album,
+                matched_server_track.name,
+                matched_server_track.artist,
+                matched_server_track.album,
+                similarity,
+            )
+
+        for track in playlist_tracks:
+            if id(track) in matched_server_track_ids:
                 tracks["existing"].append({
                     "title": track.name,
                     "artist": track.artist,
@@ -263,49 +267,27 @@ async def sync_plan(
                     "status": "match"
                 })
                 summary["tracksAlreadyPresent"] += 1
-            else:
-                file_size = 0
-                if track.pymix_path and os.path.isfile(track.pymix_path):
-                    file_size = os.path.getsize(track.pymix_path)
-                title_match_examples = [
-                    {
-                        "title": local.title,
-                        "artist": local.artist,
-                        "album": local.album,
-                    }
-                    for local in title_matches[:3]
-                ]
-                artist_match_examples = [
-                    {
-                        "title": local.title,
-                        "artist": local.artist,
-                        "album": local.album,
-                    }
-                    for local in artist_matches[:3]
-                ]
-                logger.info(
-                    "sync_plan missing: user=%s playlist_id=%s title=%r artist=%r album=%r normalized=(%r,%r,%r) title_matches=%s artist_matches=%s title_examples=%s artist_examples=%s file_size=%s",
-                    username,
-                    playlist.get("id"),
-                    track.name,
-                    track.artist,
-                    track.album,
-                    normalized_server_title,
-                    normalized_server_artist,
-                    normalized_server_album,
-                    len(title_matches),
-                    len(artist_matches),
-                    title_match_examples,
-                    artist_match_examples,
-                    file_size,
-                )
-                tracks["missing"].append({
-                    "title": track.name,
-                    "artist": track.artist,
-                    "album": track.album,
-                })
-                summary["tracksMissing"] += 1
-                summary["downloadSizeBytes"] += file_size
+                continue
+
+            file_size = 0
+            if track.pymix_path and os.path.isfile(track.pymix_path):
+                file_size = os.path.getsize(track.pymix_path)
+            logger.info(
+                "sync_plan missing: user=%s playlist_id=%s server=(%r,%r,%r) file_size=%s",
+                username,
+                playlist.get("id"),
+                track.name,
+                track.artist,
+                track.album,
+                file_size,
+            )
+            tracks["missing"].append({
+                "title": track.name,
+                "artist": track.artist,
+                "album": track.album,
+            })
+            summary["tracksMissing"] += 1
+            summary["downloadSizeBytes"] += file_size
 
     if request.options and request.options.get("includeMetadata"):
         for track in tracks["missing"]:
@@ -332,96 +314,6 @@ async def sync_plan(
         metadata=metadata,
         download=download
     )
-
-@router.post("/sync", tags=["sync"])
-@inject
-async def sync(
-        client_tracks: ClientTracks,
-        session_id: str | None = None,
-        username: str | None = None,
-        db_controller: DbController = Depends(Provide[Container.db_controller]),
-        fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
-        subsonic_client: SubsonicClient = Depends(Provide[Container.subsonic_client])
-) -> dict:
-    success = False
-    reason = ""
-    user = None
-    server_tracks_dict = {}
-    client_tracks_to_remove = []
-    zip_path = None
-    if not username and not session_id:
-        success = False
-        reason = "must have a username or session id to identify user"
-    if username:
-        try:
-            user = db_controller.get_user(username)
-        except Exception as ex:
-            logger.error(f'error occurred getting user for {username}', exc_info=True)
-            reason = repr(ex)
-    if session_id:
-        try:
-            user = db_controller.get_user_by_session_id(session_id)
-        except Exception as ex:
-            logger.error(f'error occurred getting user for session id {session_id}', exc_info=True)
-            reason = repr(ex)
-        else:
-            username = user['username']
-    if user:
-        client_sub_tracks = {}
-        match_similarities = {}
-        for client_track in client_tracks.tracks:
-            sub_track = await subsonic_client.get_track_match(
-                user=user,
-                title=client_track['title'],
-                artist=client_track['artist'],
-                album=client_track.get('album'),
-            )
-            # if have an exact match then can exclude it as the client already having it.
-            if sub_track:
-                sub_track, similarity = sub_track
-                assert sub_track.sub_track_id is not None
-                if sub_track.sub_track_id in client_sub_tracks:
-                    if similarity > match_similarities.get(sub_track.sub_track_id, 0):
-                        client_sub_tracks[sub_track.sub_track_id] = sub_track
-                        match_similarities[sub_track.sub_track_id] = similarity
-                else:
-                    client_sub_tracks[sub_track.sub_track_id] = sub_track
-                    match_similarities[sub_track.sub_track_id] = similarity
-
-
-        async for server_tracks in subsonic_client.get_all_tracks(user, 200):
-            for server_track in server_tracks:
-                server_tracks_dict[server_track.sub_track_id] = server_track
-
-        logger.info(f'got {len(client_tracks.tracks)} raw client tracks')
-        logger.info(f'got {len(server_tracks_dict)} from the server')
-        logger.info(f'got {len(client_sub_tracks)} client matches')
-
-
-        for client_track in client_sub_tracks.values():
-            if client_track.sub_track_id not in server_tracks_dict:
-                logger.debug(f'client match {client_track} not present in server tracks')
-                client_tracks_to_remove.append(client_track)
-            else:
-                logger.debug(f'track {client_track} is present on both server and client')
-                server_tracks_dict.pop(client_track.sub_track_id)
-
-        logger.info(f'missing server tracks {list(server_tracks_dict.values())}')
-        n_tracks_zipped, zip_path = fb_file_handler.sync(
-            username=username,
-            tracks_to_zip=list(server_tracks_dict.values())
-        )
-        success = True
-
-    return {
-        'success': success,
-        'filesNotOnServer': client_tracks_to_remove,
-        'nTracksExported': len(server_tracks_dict),
-        'zipPath': zip_path,
-        'reason': reason
-    }
-
-
 
 class SyncPlaylistArgs(BaseModel):
     ids: list[str]
@@ -464,14 +356,43 @@ async def sync_playlists(
     if user:
         for playlist in request.playlists:
             playlist_tracks = await subsonic_client.get_playlist_tracks(user, playlist["id"])
+            matched_server_track_ids: set[int] = set()
+            for local_track in request.localTracks:
+                match = await subsonic_client._get_best_track_match(
+                    local_track.title,
+                    local_track.artist,
+                    local_track.album,
+                    playlist_tracks,
+                    similarity_threshold=0.6,
+                )
+                if match:
+                    matched_server_track, similarity = match
+                    matched_server_track_ids.add(id(matched_server_track))
+                    logger.info(
+                        "sync_playlists local_track_matched: user=%s playlist_id=%s local=(%r,%r,%r) server=(%r,%r,%r) similarity=%.3f",
+                        username,
+                        playlist.get("id"),
+                        local_track.title,
+                        local_track.artist,
+                        local_track.album,
+                        matched_server_track.name,
+                        matched_server_track.artist,
+                        matched_server_track.album,
+                        similarity,
+                    )
+                else:
+                    logger.info(
+                        "sync_playlists local_track_unmatched: user=%s playlist_id=%s local=(%r,%r,%r)",
+                        username,
+                        playlist.get("id"),
+                        local_track.title,
+                        local_track.artist,
+                        local_track.album,
+                    )
+
             filtered_tracks = [
                 track for track in playlist_tracks
-                if not any(
-                    local_track.title.lower().strip() == track.name.lower().strip() and
-                    local_track.artist.lower().strip() == track.artist.lower().strip() and
-                    (not local_track.album or local_track.album.lower().strip() == (track.album or "").lower().strip())
-                    for local_track in request.localTracks
-                )
+                if id(track) not in matched_server_track_ids
             ]
             all_tracks.extend(filtered_tracks)
 

@@ -240,7 +240,6 @@ class SubsonicClient(BaseAPIClient):
         )
         response = await self.get(url)
         assert response
-        print(response)
         tracks = self._parse_tracks(response, username=username)
         return tracks
 

@@ -29,10 +29,10 @@ match:
     missing_tracks: 0
 
 paths:
-    default: $albumartist/$album/$track - $title
-    singleton: Non-Album/$artist - $title
-    comp: Compilations/$album/$track - $title
-    albumtype_soundtrack: Soundtracks/$album/$track $title 
+    default: $albumartist/$album/$track - $artist - $title
+    singleton: Non-Album/$track - $artist - $title
+    comp: Compilations/$album/$track - $artist - $title
+    albumtype_soundtrack: Soundtracks/$album/$track - $artist - $title 
         
 import:
     write: yes
