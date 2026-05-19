@@ -229,8 +229,8 @@ class RekordboxXMLController:
         self._file_browser_file_handler.stage_for_import(username, public, watch)
 
         # Debug: log SUBBOX_ID tags on staged files before beets import
-        staging_dir = Path(self._file_browser_file_handler._beets_data_path.format(user=username))
-        self._log_subbox_id_tags(staging_dir, 'PRE-BEETS')
+        #staging_dir = Path(self._file_browser_file_handler._beets_data_path.format(user=username))
+        #self._log_subbox_id_tags(staging_dir, 'PRE-BEETS')
 
         # set a custom field of the username that uploaded the track. This allows to query tracks that a username has uploaded.
         # group-albums to allow importing correctly tracks with different album tags.
@@ -248,8 +248,8 @@ class RekordboxXMLController:
         else:
             logger.info(f"finished beets command {beets_command} for {username}")
             # Debug: log SUBBOX_ID tags on imported files after beets import
-            music_dir = Path(f'{self._serving_music_path_base}/{username}')
-            self._log_subbox_id_tags(music_dir, 'POST-BEETS')
+            #music_dir = Path(f'{self._serving_music_path_base}/{username}')
+            #self._log_subbox_id_tags(music_dir, 'POST-BEETS')
             # 9. on success, remove the directory of the beets import
             logger.info(f'starting post import clean up for {username}')
             # todo - inject public in from router
@@ -447,6 +447,15 @@ class RekordboxXMLController:
             assert track_match.pymix_path.exists()
             subbox_id = get_subbox_id(track_match.pymix_path)
             assert subbox_id is not None, f"subbox id tag not present on {p}"
+            # doesn't support float value for bpm so convert to int
+            beets_command = f"beet modify -y subbox_id:{subbox_id} bpm={int(track.AverageBpm)}"
+
+            container_name = f"beets{user['username']}"
+            log_iter = docker.execute(container_name, beets_command.split(), stream=True)
+            for log_type, log in log_iter:
+                line = log.decode()
+                logger.info(f'{log_type}: {line}')
+            #logger.info(f"Mapped subbox_id={subbox_id} → beet_id={beet_id}")
             # todo create pydantic model for cues and attack to subbox track and pass this to the db controller
             self._db_controller.update_metadata(
                 username=user['username'],

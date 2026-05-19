@@ -41,7 +41,7 @@ class SeratoController:
         self._serving_music_path_base = serving_music_path_base
 
 
-    def _create_serato_crates(self, user_root: str, subsonic_playlist: SubBoxPlaylist, output_path: Path):
+    def _create_serato_crates(self, user_root: str, username: str, subsonic_playlist: SubBoxPlaylist, output_path: Path):
         """
         From the playlist given, create the rekordbox folders and playlists.
         Add the tracks to the playlist.
@@ -50,7 +50,7 @@ class SeratoController:
         """
         crate = self._serato_crate_orchestrator.create_crate(subsonic_playlist)
         for track in subsonic_playlist.tracks:
-            self._serato_crate_orchestrator.add_track_to_crate(user_root, track, crate)
+            self._serato_crate_orchestrator.add_track_to_crate(user_root, username, track, crate)
         self._serato_crate_orchestrator.save(crate, output_path)
 
     async def create_crates_from_subsonic_playlists(self, user_root: str, user: dict, output_path: Path):
@@ -69,7 +69,7 @@ class SeratoController:
             # Given the Playlist data from Subsonic create the playlist directory structure in Rekordbox.
             for subsonic_playlist in subsonic_playlists:
                 # can do something here along the lines of keeping the root node
-                self._create_serato_crates(user_root, subsonic_playlist, output_path)
+                self._create_serato_crates(user_root, user['username'], subsonic_playlist, output_path)
         # add subsonic tracks that do not belong to a playlist to a default playlist.
         noplaylist = SubBoxPlaylist(name='NOPLAYLIST', path_components=['NOPLAYLIST'])
         default_crate = self._serato_crate_orchestrator.create_crate(noplaylist)
@@ -81,6 +81,7 @@ class SeratoController:
             for track in tracks:
                 self._serato_crate_orchestrator.add_track_to_crate(
                     user_root,
+                    user['username'],
                     track,
                     default_crate
                 )

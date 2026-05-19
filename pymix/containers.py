@@ -92,7 +92,8 @@ class Container(containers.DeclarativeContainer):
     rekordbox_xml_orchestrator = providers.Singleton(
         RekordboxXMLOrchestrator,
         rekordbox_xml_factory,
-        db_controller
+        db_controller,
+        config.local_user_music_stem,
     )
     rb_backup_file_handler = providers.Singleton(
         RBBackupFileHandler,
@@ -135,6 +136,7 @@ class Container(containers.DeclarativeContainer):
         rekordbox_xml_controller,
         config.containers.filebrowser.data_uploads,
         config.containers.subsonic.serving_music_path_base,
+        config.local_user_music_stem,
     )
     serato_controller = providers.Singleton(
         SeratoController,

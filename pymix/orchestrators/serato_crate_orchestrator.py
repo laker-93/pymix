@@ -26,7 +26,8 @@ class SeratoCrateOrchestrator:
         db_controller: DbController,
         rb_xml_controller: RekordboxXMLController,
         filebrowser_data_path_uploads: str,
-        serving_music_path_base: str
+        serving_music_path_base: str,
+        local_user_music_stem: str
 
     ):
         self._crate_builder = crate_builder
@@ -34,7 +35,28 @@ class SeratoCrateOrchestrator:
         self._rb_xml_controller = rb_xml_controller
         self._filebrowser_data_path_uploads = filebrowser_data_path_uploads
         self._serving_music_path_base = serving_music_path_base
+        self._local_user_music_stem = local_user_music_stem
         self._mp3_encoder = V2Mp3Encoder()
+
+    def _get_user_music_root(self, username: str) -> Path:
+        if '{user}' in self._local_user_music_stem:
+            return Path('/' + self._local_user_music_stem.format(user=username))
+        return Path('/' + self._local_user_music_stem) / username
+
+    def _resolve_track_location(self, user_root: str, username: str, track: SubBoxTrack) -> Path:
+        src_dir = self._get_user_music_root(username)
+        track_path = Path(track.path)
+        try:
+            relative_path = track_path.relative_to(src_dir)
+            return Path(user_root) / relative_path
+        except ValueError:
+            logger.warning(
+                'track path %s is not under src_dir %s for user %s; falling back to legacy path join',
+                track_path,
+                src_dir,
+                username,
+            )
+            return Path(f'{user_root}/{track.path}')
 
     def _build_subbox_playlists(self, user: dict, crate: Crate, parent_components: List[str], subbox_playlists: List[SubBoxPlaylist]):
         components = parent_components + [crate.name]
@@ -114,16 +136,16 @@ class SeratoCrateOrchestrator:
         root_crate = self._create_playlist_crates(crate_names)
         return root_crate
 
-    @staticmethod
-    def add_track_to_crate(user_root: str, track: SubBoxTrack, crate: Crate):
+    def add_track_to_crate(self, user_root: str, username: str, track: SubBoxTrack, crate: Crate):
         """
         Add track to the leaf of a root crate. The crate tree must not have any branches.
         """
         while crate.children:
             crate = list(crate.children.values())[-1]
         try:
+            resolved_location = self._resolve_track_location(user_root, username, track)
             crate.add_track(
-                Track.from_path(Path(f'{user_root}/{track.path}'))
+                Track.from_path(resolved_location)
             )
         except DuplicateTrackError:
             logger.info(f"track {track} is already present. Not adding to crate {crate}.")

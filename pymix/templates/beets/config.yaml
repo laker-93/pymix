@@ -29,7 +29,8 @@ match:
     missing_tracks: 0
 
 paths:
-    default: $albumartist/$album/$track - $artist - $title
+    # for tracks without albumartist, fallback to unknown folder
+    default: %if{$albumartist,$albumartist,_unknown}/%if{$album,$album,_unknown}/$track - %if{$artist,$artist,_unknown} - %if{$title,$title,_unknown}
     singleton: Non-Album/$track - $artist - $title
     comp: Compilations/$album/$track - $artist - $title
     albumtype_soundtrack: Soundtracks/$album/$track - $artist - $title 

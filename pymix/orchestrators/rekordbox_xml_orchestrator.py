@@ -17,10 +17,31 @@ logger = logging.getLogger(__name__)
 
 
 class RekordboxXMLOrchestrator:
-    def __init__(self, rekordbox_xml_factory: RekordboxXMLFactory, db_controller: DbController):
+    def __init__(self, rekordbox_xml_factory: RekordboxXMLFactory, db_controller: DbController, local_user_music_stem: str):
         self._rekordbox_xml_factory = rekordbox_xml_factory
         self._db_controller = db_controller
+        self._local_user_music_stem = local_user_music_stem.removesuffix('/')
         self._rekordbox_xml = None
+
+    def _get_user_music_root(self, username: str) -> Path:
+        if '{user}' in self._local_user_music_stem:
+            return Path('/' + self._local_user_music_stem.format(user=username))
+        return Path('/' + self._local_user_music_stem) / username
+
+    def _resolve_track_location(self, user_root: str, user: dict, track: SubBoxTrack) -> Path:
+        src_dir = self._get_user_music_root(user['username'])
+        track_path = Path(track.path)
+        try:
+            relative_path = track_path.relative_to(src_dir)
+            return Path(user_root) / relative_path
+        except ValueError:
+            logger.warning(
+                'track path %s is not under src_dir %s for user %s; falling back to legacy path join',
+                track_path,
+                src_dir,
+                user['username'],
+            )
+            return Path(f'{user_root}/{track.path}')
 
     def create_xml(self, xml_path: Optional[Path] = None):
         self._rekordbox_xml = self._rekordbox_xml_factory.create_rekordbox_xml(xml_path)
@@ -96,7 +117,9 @@ class RekordboxXMLOrchestrator:
 
     def _get_cue_data(self, user: dict, track: SubBoxTrack) -> Optional[Dict]:
         subbox_id = get_subbox_id(track.pymix_path)
-        assert subbox_id is not None, f"no subbox id found for {track}"
+        if subbox_id is None:
+            logger.warning(f'no subbox id found for track {track}. This track will be imported without cues or loops.')
+            return None
         lib_entry = self._db_controller.get_library_entry(user['username'], subbox_id)
         if lib_entry:
             cue_data = lib_entry["cuedata"]
@@ -111,9 +134,11 @@ class RekordboxXMLOrchestrator:
         logger.info(f'attempting to add track {track} to playlist {playlist}')
         cue_data = self._get_cue_data(user, track)
         duration = get_duration(track.pymix_path)
+        resolved_location = self._resolve_track_location(user_root, user, track)
+        resolved_location_str = os.path.normpath(str(resolved_location))
         try:
             rekordbox_track = self._rekordbox_xml.add_track(
-                f'{user_root}/{track.path}',
+            resolved_location_str,
                 Name=track.name,
                 Artist=track.artist,
                 Album=track.album,
@@ -133,7 +158,7 @@ class RekordboxXMLOrchestrator:
                 # the rekord box get_track api is stupid so do some very inefficient work around
                 #rekordbox_track = self._rekordbox_xml.get_track(index=1, Location=os.path.normpath(str(track.path)))
                 for other in self._rekordbox_xml.get_tracks():
-                    if os.path.normpath(f'{user_root}/{track.path}') == other.Location:
+                    if resolved_location_str == other.Location:
                         rekordbox_track = other
                         break
             assert rekordbox_track
@@ -234,7 +259,8 @@ class RekordboxXMLOrchestrator:
                     album=rekordbox_track.Album,
                     genre=rekordbox_track.Genre,
                     track_id=rekordbox_track.TrackID,
-                    rating=rekordbox_track.Rating
+                    rating=rekordbox_track.Rating,
+                    bpm=rekordbox_track.AverageBpm
                 )
             )
         return all_tracks
