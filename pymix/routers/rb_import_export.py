@@ -126,6 +126,7 @@ async def run_import_task(rekordbox_xml_controller, username, job_id, db_control
 
 class RBExportRequest(BaseModel):
     user_root: str
+    playlistIds: list[str] = []
 
 @router.post("/rekordbox/export", tags=["import"])
 @inject
@@ -162,11 +163,13 @@ async def rekordbox_export(
         logger.info(f'exporting {n_beets_tracks} tracks for user {username}')
         try:
             xml_output_path = fb_file_handler.get_xml_output_path(username)
+            requested_playlist_ids = [p for p in request.playlistIds if p]
             await rekordbox_xml_controller.create_rekordbox_xml_from_subsonic_playlists(
                 user_root=user_root,
                 user=user,
                 xml_path=None,
-                xml_output_path=xml_output_path
+                xml_output_path=xml_output_path,
+                playlist_ids=requested_playlist_ids or None,
             )
         except Exception as ex:
             success = False

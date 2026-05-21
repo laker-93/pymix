@@ -55,7 +55,7 @@ class RekordboxXMLController:
             subsonic_client: SubsonicClient,
             db_controller: DbController,
             restored_db_output_root: str,
-            zip_name: str,
+            local_user_music_stem: str,
             serving_music_path_base: str
     ):
         self._subsonic_orchestrator = subsonic_orchestrator
@@ -65,7 +65,7 @@ class RekordboxXMLController:
         self._db_controller = db_controller
         self._restored_db_output_root = restored_db_output_root
         self._subsonic_client = subsonic_client
-        self._zip_name = zip_name
+        self._local_user_music_stem = local_user_music_stem
         self._serving_music_path_base = serving_music_path_base
 
     def _create_rekordbox_xml_playlist(self, user_root: str, user: dict, subsonic_playlist: SubBoxPlaylist):
@@ -204,6 +204,20 @@ class RekordboxXMLController:
     async def consume_from_filebrowser(self, username: str, public: bool, watch: bool = False) -> str:
         return await anyio.to_thread.run_sync(self._consume_from_filebrowser, username, public, watch)
 
+    @staticmethod
+    def _log_subbox_id_tags(directory: Path, label: str):
+        """Debug: log the SUBBOX_ID tag for every audio file in a directory tree."""
+        for f in sorted(directory.rglob('*')):
+            if not f.is_file():
+                continue
+            try:
+                with taglib.File(str(f), save_on_exit=False) as song:
+                    subbox_tag = song.tags.get("SUBBOX_ID")
+                    tag_val = subbox_tag[0] if subbox_tag else "<MISSING>"
+                logger.info(f'[{label}] {f.name} → SUBBOX_ID={tag_val}')
+            except Exception:
+                logger.info(f'[{label}] {f.name} → <UNREADABLE>')
+
     def _consume_from_filebrowser(self, username: str, public: bool, watch) -> str:
         """
         # steps:
@@ -214,15 +228,12 @@ class RekordboxXMLController:
 
         self._file_browser_file_handler.stage_for_import(username, public, watch)
 
-        # 1. invoke beets import on the audio files to import
-        # can set to interactive with tty to pipe docker stdin input/output to terminal for user feedback.
-        # beets config set to quiet mode and fallback of 'asis'. If user needs to correct later, they will have to
-        # specify a musicbrainz id and re import with a specific query. This will need a separate API to be implemented.
+        # Debug: log SUBBOX_ID tags on staged files before beets import
+        #staging_dir = Path(self._file_browser_file_handler._beets_data_path.format(user=username))
+        #self._log_subbox_id_tags(staging_dir, 'PRE-BEETS')
 
         # set a custom field of the username that uploaded the track. This allows to query tracks that a username has uploaded.
         # group-albums to allow importing correctly tracks with different album tags.
-        # detach to avoid returning potentially large stdout from the docker logs.
-        # Instead logs are streamed incrementally
         beets_command = f"beet import --group-albums --set user={username} --set public={public} -q /downloads"
         logger.info(f'running beet import command {beets_command}')
         try:
@@ -236,6 +247,9 @@ class RekordboxXMLController:
             raise
         else:
             logger.info(f"finished beets command {beets_command} for {username}")
+            # Debug: log SUBBOX_ID tags on imported files after beets import
+            #music_dir = Path(f'{self._serving_music_path_base}/{username}')
+            #self._log_subbox_id_tags(music_dir, 'POST-BEETS')
             # 9. on success, remove the directory of the beets import
             logger.info(f'starting post import clean up for {username}')
             # todo - inject public in from router
@@ -252,7 +266,10 @@ class RekordboxXMLController:
             self._map_subbox_id_beet_id(username, False)
 
 
-    async def create_rekordbox_xml_from_subsonic_playlists(self, user_root: str, user: dict, xml_path: Optional[Path], xml_output_path: Path):
+    async def create_rekordbox_xml_from_subsonic_playlists(
+        self, user_root: str, user: dict, xml_path: Optional[Path], xml_output_path: Path,
+        playlist_ids: Optional[List[str]] = None,
+    ):
         # todo this could be made a context manager to create, update then save the xml
         self._rekordbox_xml_orchestrator.create_xml(xml_path)
 
@@ -261,6 +278,15 @@ class RekordboxXMLController:
             logger.info(f'no subsonic playlists found for user')
 
         if subsonic_playlists:
+            if playlist_ids:
+                id_set = set(playlist_ids)
+                logger.info(f'export: {len(subsonic_playlists)} playlists before filtering: {[(p.name, p.subsonic_id) for p in subsonic_playlists]}')
+                subsonic_playlists = [p for p in subsonic_playlists if p.subsonic_id in id_set]
+                matched_ids = {p.subsonic_id for p in subsonic_playlists}
+                unmatched_ids = id_set - matched_ids
+                if unmatched_ids:
+                    logger.error(f'export: requested playlist ids not found: {unmatched_ids}')
+                logger.info(f'export: {len(subsonic_playlists)} playlists after filtering: {[(p.name, p.subsonic_id) for p in subsonic_playlists]}')
             # sort the playlists by name so duplicate folders of the same name are not created
             subsonic_playlists.sort(key=lambda playlist: playlist.name)
             # Enrich subsonic playlists with stored path_components for lossless folder reconstruction
@@ -272,25 +298,24 @@ class RekordboxXMLController:
             # Given the Playlist data from Subsonic create the playlist directory structure in Rekordbox.
             for subsonic_playlist in subsonic_playlists:
                 self._create_rekordbox_xml_playlist(user_root, user, subsonic_playlist)
-        # add subsonic tracks that do not belong to a playlist to a default playlist.
-        default_playlist = self._rekordbox_xml_orchestrator.get_playlist('NOPLAYLIST')
-        if not default_playlist:
-            noplaylist = SubBoxPlaylist(name='NOPLAYLIST', path_components=['NOPLAYLIST'])
-            default_playlist = self._rekordbox_xml_orchestrator.create_rekordbox_xml_playlist(noplaylist)
-        # suppress the exception that would be raised due to attempting to add a track that is already present.
-        import asyncio
-        # todo figure this out - seem to need to pause to avoid getting disconnected from server
-        await asyncio.sleep(2)
-        async for tracks in self._subsonic_client.get_all_tracks(user, 200):
-            for track in tracks:
-                self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(
-                    user_root,
-                    user,
-                    track,
-                    default_playlist,
-                    force=False
-                )
+        # When not filtering, add subsonic tracks that do not belong to a playlist to a default playlist.
+        if not playlist_ids:
+            default_playlist = self._rekordbox_xml_orchestrator.get_playlist('NOPLAYLIST')
+            if not default_playlist:
+                noplaylist = SubBoxPlaylist(name='NOPLAYLIST', path_components=['NOPLAYLIST'])
+                default_playlist = self._rekordbox_xml_orchestrator.create_rekordbox_xml_playlist(noplaylist)
+            import asyncio
             await asyncio.sleep(2)
+            async for tracks in self._subsonic_client.get_all_tracks(user, 200):
+                for track in tracks:
+                    self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(
+                        user_root,
+                        user,
+                        track,
+                        default_playlist,
+                        force=False
+                    )
+                await asyncio.sleep(2)
 
         # todo remove any playlists that have no tracks
         self._rekordbox_xml_orchestrator.save_xml(xml_output_path)
@@ -422,6 +447,15 @@ class RekordboxXMLController:
             assert track_match.pymix_path.exists()
             subbox_id = get_subbox_id(track_match.pymix_path)
             assert subbox_id is not None, f"subbox id tag not present on {p}"
+            # doesn't support float value for bpm so convert to int
+            beets_command = f"beet modify -y subbox_id:{subbox_id} bpm={int(track.AverageBpm)}"
+
+            container_name = f"beets{user['username']}"
+            log_iter = docker.execute(container_name, beets_command.split(), stream=True)
+            for log_type, log in log_iter:
+                line = log.decode()
+                logger.info(f'{log_type}: {line}')
+            #logger.info(f"Mapped subbox_id={subbox_id} → beet_id={beet_id}")
             # todo create pydantic model for cues and attack to subbox track and pass this to the db controller
             self._db_controller.update_metadata(
                 username=user['username'],

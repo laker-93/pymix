@@ -40,7 +40,7 @@ class Container(containers.DeclarativeContainer):
         version=config.containers.subsonic.version,
         music_path_base_to_remove=config.containers.subsonic.music_path_base_to_remove,
         serving_music_path_base=config.containers.subsonic.serving_music_path_base,
-        zip_name=config.rekordbox.zip_name,
+        local_user_music_stem=config.local_user_music_stem,
         app_env=config.app_env
     )
 
@@ -92,7 +92,8 @@ class Container(containers.DeclarativeContainer):
     rekordbox_xml_orchestrator = providers.Singleton(
         RekordboxXMLOrchestrator,
         rekordbox_xml_factory,
-        db_controller
+        db_controller,
+        config.local_user_music_stem,
     )
     rb_backup_file_handler = providers.Singleton(
         RBBackupFileHandler,
@@ -103,7 +104,8 @@ class Container(containers.DeclarativeContainer):
     )
     file_browser_file_handler = providers.Singleton(
         FileBrowserFileHandler,
-        config.rekordbox.zip_name,
+        config.local_user_music_stem,
+        config.zip_name,
         config.containers.subsonic.serving_music_path_base,
         config.containers.filebrowser.data_uploads,
         config.containers.filebrowser.data_watch,
@@ -111,7 +113,7 @@ class Container(containers.DeclarativeContainer):
         config.containers.beets.data,
         config.containers.beets.data_public,
         config.update_job_period_s,
-        db_controller
+        db_controller,
     )
 
     rekordbox_xml_controller = providers.Singleton(
@@ -123,7 +125,7 @@ class Container(containers.DeclarativeContainer):
         subsonic_client,
         db_controller,
         config.rekordbox.restored_rb_output_root,
-        config.rekordbox.zip_name,
+        config.local_user_music_stem,
         config.containers.subsonic.serving_music_path_base,
     )
 
@@ -134,6 +136,7 @@ class Container(containers.DeclarativeContainer):
         rekordbox_xml_controller,
         config.containers.filebrowser.data_uploads,
         config.containers.subsonic.serving_music_path_base,
+        config.local_user_music_stem,
     )
     serato_controller = providers.Singleton(
         SeratoController,

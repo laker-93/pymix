@@ -1,12 +1,13 @@
 import datetime
 import logging
-
+import time
 import mimetypes
+
 import shutil
 import zipfile
 from collections import defaultdict
 from pathlib import Path
-from typing import Tuple, Optional, Dict
+from typing import Tuple, Optional, Dict, Any
 from zipfile import ZipFile
 
 import music_tag
@@ -16,56 +17,144 @@ from pymix.controllers.db_controller import DbController
 from pymix.model.original_track_meta import OriginalTracks, OriginalTrackMeta
 from pymix.model.subboxtrack import SubBoxTrack
 from pymix.utils.tag_subbox_id import tag_subbox_id
+from pymix.utils.utility import detect_audio_type, detect_audio_type_with_reason
 
 logger = logging.getLogger(__name__)
 
+AUDIO_EXTENSIONS = {
+    '.mp3', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.wav', '.aiff', '.aif', '.wma', '.alac', '.zip',
+}
 
 
-async def trigger_processing(recv_stream, rekordbox_xml_controller):
+def _has_audio_files(directory: Path) -> bool:
+    """Check whether a directory contains at least one audio file (or zip)."""
+    for entry in directory.rglob('*'):
+        if entry.is_file() and entry.suffix.lower() in AUDIO_EXTENSIONS:
+            return True
+    return False
+
+
+def _all_files_stable(directory: Path, stable_seconds: float) -> bool:
+    """Return True only if every audio file's mtime is at least *stable_seconds* ago.
+
+    This guards against partially-downloaded files whose filesystem events
+    may not have been delivered to watchfiles (e.g. writes via an open fd,
+    or temp-file-then-rename patterns).
+    """
+    now = time.time()
+    for entry in directory.rglob('*'):
+        if entry.is_file() and entry.suffix.lower() in AUDIO_EXTENSIONS:
+            try:
+                age = now - entry.stat().st_mtime
+                if age < stable_seconds:
+                    logger.info(f'watch: file {entry.name} still unstable (modified {age:.1f}s ago)')
+                    return False
+            except OSError:
+                # File may have been removed between rglob and stat
+                continue
+    return True
+
+
+
+async def trigger_processing(recv_stream, rekordbox_xml_controller, db_controller: DbController):
     async with recv_stream:
         async for user in recv_stream:
-            logger.info(f'processing for user {user}...')
-            await rekordbox_xml_controller.consume_from_filebrowser(user, public=False, watch=True)
+            logger.info(f'watch import: processing for user {user}...')
+            job_id = None
+            success = True
+            try:
+                job_id = db_controller.create_import_job(user, number_of_tracks_to_import=0, total_n_imported_tracks=0)
+                await rekordbox_xml_controller.consume_from_filebrowser(user, public=False, watch=True)
+            except Exception:
+                success = False
+                logger.exception(f'watch import: failed for user {user}')
+            finally:
+                if job_id:
+                    db_controller.job_completed(job_id, success)
+                logger.info(f'watch import: finished for user {user} (success={success})')
 
 
+async def poll_watchdir(user_root: Path, watch_subdir: str, send_stream, db_controller):
+    """Watch user_root for file additions in any user's watch directory.
 
-async def poll_watchdir(watchpaths: list[Path], send_stream, db_controller):
-    poll_time = 10
-    user_paths = defaultdict(list)
-    user_n_timeouts_no_update = defaultdict(int)
-    maxed_out_users = set()
+    Watches the entire user_root tree so newly created users are picked up
+    automatically without needing a restart. Only reacts to files under
+    ``<user_root>/<username>/<watch_subdir>/``.
+
+    Uses a time-based debounce: after the last file addition or modification
+    for a user, waits ``DEBOUNCE_SECONDS`` of inactivity before triggering
+    import. This ensures in-progress downloads (which produce modified events)
+    are complete before processing.
+    """
+    DEBOUNCE_SECONDS = 15
+    user_last_change: dict[str, float] = {}
+    user_pending_size: dict[str, int] = defaultdict(int)
+    maxed_out_users: set[str] = set()
 
     async with send_stream:
-        async for changes in awatch(*watchpaths, yield_on_timeout=True, rust_timeout=1000):
-            for user in user_n_timeouts_no_update.keys():
-                user_n_timeouts_no_update[user] += 1
-                if user_n_timeouts_no_update[user] == poll_time and user not in maxed_out_users:
-                    logger.info(f"user {user} has files to process and has had no update in the past {poll_time} seconds")
-                    await send_stream.send(user)
-                    user_paths[user].clear()
-            for change in changes:
-                if change[0] == Change.added:
-                    added_path = Path(change[1])
-                    user = added_path.parts[added_path.parts.index('user-updownloads') + 1]
-                    user_paths[user].append(added_path)
-                    user_n_timeouts_no_update[user] = 0
-                    size_to_import = 0
-                    for p in user_paths[user]:
-                        if p.exists():
-                            size_to_import += p.stat().st_size
-                        else:
-                            logger.info(f'path {p} does not exist')
-                    exceeded, _1, _2 = db_controller.user_library_size_exceeded(user, size_to_import)
-                    if exceeded:
-                        logger.error(f'exceeded library size for user {user}')
-                        maxed_out_users.add(user)
-                        # todo some how notify front end and block user from uploading more
+        async for changes in awatch(user_root, yield_on_timeout=True, rust_timeout=1000):
+            now = time.monotonic()
+
+            for change_type, change_path in changes:
+                if change_type not in (Change.added, Change.modified):
+                    continue
+                path = Path(change_path)
+                try:
+                    rel = path.relative_to(user_root)
+                except ValueError:
+                    continue
+                # Expect structure: <username>/<watch_subdir>/...
+                parts = rel.parts
+                if len(parts) < 2 or parts[1] != watch_subdir:
+                    continue
+                user = parts[0]
+
+                if user in maxed_out_users:
+                    continue
+
+                if path.is_file():
+                    user_pending_size[user] += path.stat().st_size
+                user_last_change[user] = now
+
+                exceeded, _, _ = db_controller.user_library_size_exceeded(user, user_pending_size[user])
+                if exceeded:
+                    logger.error(f'watch: library size exceeded for user {user}')
+                    maxed_out_users.add(user)
+                    user_pending_size.pop(user, None)
+                    user_last_change.pop(user, None)
+
+            # Check which users have passed the debounce window
+            ready_users = [
+                u for u, last in user_last_change.items()
+                if now - last >= DEBOUNCE_SECONDS and u not in maxed_out_users
+            ]
+            for user in ready_users:
+                watch_dir = user_root / user / watch_subdir
+                if not _has_audio_files(watch_dir):
+                    logger.info(f'watch: no audio files in watch dir for user {user}, skipping')
+                    user_last_change.pop(user)
+                    user_pending_size.pop(user, 0)
+                    continue
+                if not _all_files_stable(watch_dir, DEBOUNCE_SECONDS):
+                    logger.info(f'watch: files still being written for user {user}, deferring import')
+                    # Reset debounce so we re-check after another DEBOUNCE_SECONDS
+                    user_last_change[user] = now
+                    continue
+                n_bytes = user_pending_size.get(user, 0)
+                logger.info(
+                    f'watch: triggering import for user {user} '
+                    f'(~{n_bytes / 1024 / 1024:.1f} MB, debounce complete)'
+                )
+                await send_stream.send(user)
+                user_last_change.pop(user)
+                user_pending_size.pop(user, 0)
 
 
 
 class FileBrowserFileHandler:
     def __init__(
             self,
+            local_user_music_stem: str,
             zip_name: str,
             serving_music_path_base: str,
             filebrowser_data_path_uploads: str,
@@ -74,8 +163,9 @@ class FileBrowserFileHandler:
             beets_data_path: str,
             beets_data_path_public: str,
             update_job_period_s: int,
-            db_controller: DbController
+            db_controller: DbController,
     ):
+        self._local_user_music_stem = local_user_music_stem
         self._zip_name = zip_name
         self._serving_music_path_base = serving_music_path_base.removesuffix('/')
         self._filebrowser_data_path_uploads = filebrowser_data_path_uploads
@@ -84,7 +174,6 @@ class FileBrowserFileHandler:
         self._beets_data_path = beets_data_path
         self._beets_data_path_public = beets_data_path_public
         self._update_job_period_s = update_job_period_s
-        self._mimetypes = mimetypes.init()
         self._db_controller = db_controller
 
     def get_xml_output_path(self, username: str) -> Path:
@@ -116,39 +205,99 @@ class FileBrowserFileHandler:
         for f in src_path.rglob('*'):
             if not f.is_file():
                 continue
-            mime_type_encoding = mimetypes.guess_type(str(f))
-            if mime_type_encoding is None:
-                logger.error(f'skipping file {f}')
-                continue
-            mime_type = mime_type_encoding[0]
             if f.name.lower() == 'all-crates.zip':
                 subcrate_path = f
             elif f.name.endswith('.zip') and 'macosx' not in f.name.lower() and 'all-crates' not in f.name.lower():
                 zip_path = f
-            elif mime_type.split('/')[0] == 'audio':
+            elif detect_audio_type(f) is not None:
                 audio_path = src_path
             if audio_path and subcrate_path:
                 break
         assert subcrate_path
         return subcrate_path, zip_path, audio_path
 
-    def tag_staging_with_subbox_id(self, user: str, tracks: OriginalTracks):
+    def tag_staging_with_subbox_id(self, user: str, tracks: OriginalTracks) -> Dict[str, Any]:
         src_path = Path(
             self._filebrowser_data_path_uploads.format(user=user)
         )
 
+        report: Dict[str, Any] = {
+            'tagged_count': 0,
+            'already_tagged_count': 0,
+            'untagged_count': 0,
+            'untagged': [],
+        }
+
+        # Build a lookup by staging location so we can explain why each track was skipped.
+        tracks_by_staging = {track.stagingLocation: track for track in tracks.tracks}
+        matched_staging_locations: set[str] = set()
+
         for f in src_path.rglob('*'):
-            if f.is_file():
-                mime_type = mimetypes.guess_type(str(f))[0]
-                if mime_type is None:
-                    logger.error(f'skipping file {f}')
-                    continue
-                if mime_type.split('/')[0] == 'audio':
-                    for track in tracks.tracks:
-                        if track.stagingLocation in str(f):
-                            subbox_id = tag_subbox_id(f)
-                            if subbox_id:
-                                track.subbox_id = subbox_id
+            if not f.is_file():
+                continue
+
+            file_path = str(f)
+            track = None
+            for staging_location, candidate in tracks_by_staging.items():
+                if staging_location in file_path:
+                    track = candidate
+                    matched_staging_locations.add(staging_location)
+                    break
+            if track is None:
+                continue
+
+            audio_type, non_audio_reason = detect_audio_type_with_reason(f)
+            if audio_type is None:
+                logger.error(
+                    'tag_staging_with_subbox_id: non-audio file for stagingLocation=%s file=%s reason=%s',
+                    track.stagingLocation,
+                    file_path,
+                    non_audio_reason,
+                )
+                report['untagged'].append({
+                    'stagingLocation': track.stagingLocation,
+                    'file': file_path,
+                    'reason': non_audio_reason,
+                })
+                continue
+
+            existing_subbox_id = track.subbox_id
+            subbox_id = tag_subbox_id(f)
+            if subbox_id:
+                track.subbox_id = subbox_id
+                if existing_subbox_id and existing_subbox_id == subbox_id:
+                    report['already_tagged_count'] += 1
+                else:
+                    report['tagged_count'] += 1
+            else:
+                report['untagged'].append({
+                    'stagingLocation': track.stagingLocation,
+                    'file': file_path,
+                    'reason': 'tag_subbox_id_returned_none',
+                })
+
+        for track in tracks.tracks:
+            if track.subbox_id is not None:
+                continue
+            if track.stagingLocation not in matched_staging_locations:
+                report['untagged'].append({
+                    'stagingLocation': track.stagingLocation,
+                    'file': None,
+                    'reason': 'no_matching_file_for_staging_location',
+                })
+
+        report['untagged_count'] = len(report['untagged'])
+        logger.info(
+            'tag_staging_with_subbox_id summary for user %s: tagged=%s already_tagged=%s untagged=%s',
+            user,
+            report['tagged_count'],
+            report['already_tagged_count'],
+            report['untagged_count'],
+        )
+        if report['untagged_count']:
+            logger.error('tag_staging_with_subbox_id untagged details: %s', report['untagged'])
+
+        return report
 
 
 
@@ -171,18 +320,13 @@ class FileBrowserFileHandler:
         for f in src_path.rglob('*'):
             if f.is_file():
                 counters["n_file"] += 1
-                mime_type_encoding = mimetypes.guess_type(str(f))
-                if mime_type_encoding is None:
-                    logger.error(f'skipping file {f}')
-                    counters["n_skipped_files"] += 1
-                    continue
-                mime_type = mime_type_encoding[0]
-                if mime_type == 'application/xml' or mime_type == 'text/xml':
+                guessed_mime = mimetypes.guess_type(str(f))[0]
+                if guessed_mime in ('application/xml', 'text/xml'):
                     xml_path = f
                     counters["n_xml"] += 1
                 elif f.name.endswith('.zip') and 'macosx' not in f.name.lower():
                     zip_path = f
-                elif mime_type.split('/')[0] == 'audio':
+                elif detect_audio_type(f) is not None:
                     audio_path = src_path
                     counters["n_audio"] += 1
             if zip_path and xml_path:
@@ -206,12 +350,9 @@ class FileBrowserFileHandler:
                     break
         for f in src_path.rglob('*'):
             if f.is_file():
-                mimestart = mimetypes.guess_type(str(f))[0]
-                if mimestart:
-                    mimecategory = mimestart.split('/')[0]
-                    if mimecategory == 'audio':
-                        n_files += 1
-                        total_size += f.stat().st_size
+                if detect_audio_type(f) is not None:
+                    n_files += 1
+                    total_size += f.stat().st_size
 
         if audio_files_zip:
             with ZipFile(audio_files_zip) as zip:
@@ -223,29 +364,73 @@ class FileBrowserFileHandler:
                     if f.endswith('.crate'):
                         # ignore crate
                         continue
-                    mimestart = mimetypes.guess_type(str(f))[0]
-                    if mimestart:
-                        mimecategory = mimestart.split('/')[0]
-                        if mimecategory == 'audio':
-                            logger.info(f'found audio file {f}')
-                            n_files += 1
-                            total_size += zip.getinfo(f).file_size
+                    # Zip entries are not real paths on disk; fall back to extension check
+                    suffix = Path(f).suffix.lower()
+                    if suffix in AUDIO_EXTENSIONS - {'.zip'}:
+                        logger.info(f'found audio file {f}')
+                        n_files += 1
+                        total_size += zip.getinfo(f).file_size
 
         return {'n_tracks': n_files, 'size_tracks': total_size}
 
 
     def sync(self, username: str, tracks_to_zip: list[SubBoxTrack]) -> Tuple[int, Path]:
+        src_dir = self._get_user_music_root(username)
+        files_to_zip: list[Path] = []
+        for track in tracks_to_zip:
+            file_path: Optional[Path] = None
+            if track.pymix_path:
+                file_path = Path(track.pymix_path)
+            elif track.path:
+                entry_dir = str(track.path).removeprefix('/' + self._local_user_music_stem).lstrip('/')
+                file_path = src_dir / entry_dir
+
+            if file_path is None:
+                logger.error(f'sync: unable to resolve file path for track {track}')
+                continue
+            if not file_path.exists():
+                logger.error(f'sync: track file not found {file_path}')
+                continue
+            files_to_zip.append(file_path)
+
+        n_files_written, dst_dir = self._write_export_zip(
+            username=username,
+            src_dir=src_dir,
+            files_to_zip=files_to_zip,
+            db_controller=None,
+            job_id=None,
+        )
+        return n_files_written, dst_dir
+
+    def _get_user_music_root(self, username: str) -> Path:
+        if '{user}' in self._serving_music_path_base:
+            return Path(self._serving_music_path_base.format(user=username))
+        return Path(self._serving_music_path_base) / username
+
+    def _write_export_zip(
+        self,
+        username: str,
+        src_dir: Path,
+        files_to_zip: list[Path],
+        db_controller: Optional[DbController],
+        job_id: Optional[str],
+    ) -> Tuple[int, Path]:
         dst_dir = Path(self._filebrowser_data_path_downloads.format(user=username)) / self._zip_name
         output_path = str(dst_dir.with_suffix('.zip'))
+        datetime_start = datetime.datetime.now()
         n_files_written = 0
-        src_dir = f'{self._serving_music_path_base}/{username}'
-        if len(tracks_to_zip) > 0:
-            with zipfile.ZipFile(output_path,'w', zipfile.ZIP_DEFLATED) as zip_file:
-                for entry in tracks_to_zip:
-                    entry_dir = str(entry.path).removeprefix('/' + self._zip_name)
-                    p = Path(src_dir + entry_dir)
-                    zip_file.write(p, Path(self._zip_name) / p.relative_to(src_dir))
-                    n_files_written += 1
+        with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for entry in files_to_zip:
+                if not entry.is_file():
+                    continue
+                entry_to_write = Path(self._local_user_music_stem) / entry.relative_to(src_dir) if self._local_user_music_stem else entry.relative_to(src_dir)
+                logger.info(f'exporting {entry} as {entry_to_write} for user {username}')
+                zip_file.write(entry, entry_to_write)
+                n_files_written += 1
+                if db_controller and job_id:
+                    datetime_now = datetime.datetime.now()
+                    if (datetime_now - datetime_start).total_seconds() > self._update_job_period_s:
+                        db_controller.update_export_job(job_id, n_files_written)
         return n_files_written, dst_dir
 
     def export_subsonic_music(self, db_config: dict, app_env: str, username: str, job_id: str) -> int:
@@ -255,25 +440,24 @@ class FileBrowserFileHandler:
             db_port=db_config["port"],
         )
         db_controller = DbController(session_factory, app_env, 0)
-        src_dir = f'{self._serving_music_path_base}/{username}'
-        dst_dir = Path(self._filebrowser_data_path_downloads.format(user=username)) / self._zip_name
-        output_path = str(dst_dir.with_suffix('.zip'))
-        datetime_start = datetime.datetime.now()
-        n_files_written = 0
-        with zipfile.ZipFile(output_path,'w', zipfile.ZIP_DEFLATED) as zip_file:
-            for entry in Path(src_dir).rglob("*"):
-                zip_file.write(entry, Path(self._zip_name) / entry.relative_to(src_dir))
-                n_files_written += 1
-                datetime_now = datetime.datetime.now()
-                if (datetime_now - datetime_start).total_seconds() > self._update_job_period_s:
-                    db_controller.update_export_job(job_id, n_files_written)
+        src_dir = self._get_user_music_root(username)
+        files_to_zip = [entry for entry in src_dir.rglob('*') if entry.is_file()]
+        n_files_written, _ = self._write_export_zip(
+            username=username,
+            src_dir=src_dir,
+            files_to_zip=files_to_zip,
+            db_controller=db_controller,
+            job_id=job_id,
+        )
         db_controller.update_export_job(job_id, n_files_written)
         return n_files_written
 
 
     def stage_for_import(self, username: str, public: bool, watch: bool):
         """
-        copy files from filebrowser to beets input data path.
+        Stage files from filebrowser to beets input data path.
+        When watch=True, files are moved (not copied) so new arrivals during
+        a slow import are left untouched for the next cycle.
         """
         if watch:
             src_dir = self._filebrowser_data_path_watch.format(user=username)
@@ -284,20 +468,24 @@ class FileBrowserFileHandler:
         else:
             dst_dir = self._beets_data_path.format(user=username)
         logger.info(f'staging for import. Extracting from {src_dir} to {dst_dir}')
-        n_files = 0
         for entry in Path(src_dir).iterdir():
-            n_files += 1
             if entry.is_file():
                 if entry.suffix == '.zip':
                     with zipfile.ZipFile(entry, 'r') as zip_ref:
                         zip_ref.extractall(dst_dir)
+                    if watch:
+                        entry.unlink()
                 else:
                     file_name = entry.parts[-1]
-                    # must use shutil as pathlib doesn't work cross filesystem as fb-data path is on a docker volume
-                    shutil.copy(entry, Path(dst_dir) / file_name)
-                    #entry.rename(Path(dest_dir) / file_name)
+                    if watch:
+                        shutil.move(str(entry), Path(dst_dir) / file_name)
+                    else:
+                        # must use shutil as pathlib doesn't work cross filesystem as fb-data path is on a docker volume
+                        shutil.copy(entry, Path(dst_dir) / file_name)
             elif entry.is_dir():
                 shutil.copytree(entry, Path(dst_dir) / entry.name, dirs_exist_ok=True)
+                if watch:
+                    shutil.rmtree(entry)
 
         tracks = OriginalTracks(tracks=[])
 
@@ -323,7 +511,6 @@ class FileBrowserFileHandler:
 
         logger.info(f"constructed metadata for {len(tracks.tracks)} audio files")
         self._db_controller.save_original_track_meta(username, tracks)
-
 
     def remove_fb_data_path(self, username, watch: bool = False):
         if watch:

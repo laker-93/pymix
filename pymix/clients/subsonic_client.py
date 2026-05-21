@@ -15,6 +15,7 @@ from pymix.model.subboxplaylist import SubBoxPlaylist
 
 
 from pymix.model.subboxtrack import SubBoxTrack
+from pymix.utils.tag_subbox_id import get_subbox_id
 from pymix.utils.utility import add_url_params
 
 logger = logging.getLogger(__name__)
@@ -88,9 +89,9 @@ def extract_track_name(full_string: str, artist: str, album=None) -> None | str:
 
 class SubsonicClient(BaseAPIClient):
     def __init__(self, host: str, session: aiohttp.ClientSession, version: str,
-                 music_path_base_to_remove: str, serving_music_path_base: str, zip_name: Optional[str], app_env: str):
+                 music_path_base_to_remove: str, serving_music_path_base: str, local_user_music_stem: Optional[str], app_env: str):
         super().__init__(host, session)
-        self._zip_name = '/' + zip_name + '/' if zip_name else ''
+        self._local_user_music_stem = '/' + local_user_music_stem + '/' if local_user_music_stem else ''
         self._version = version
         self._music_path_base_to_remove = music_path_base_to_remove
         self._serving_music_path_base = serving_music_path_base
@@ -158,7 +159,7 @@ class SubsonicClient(BaseAPIClient):
             SubBoxTrack(
                 name=entry['title'],
                 artist=entry['artist'],
-                path=Path(f"{self._zip_name}{entry['path'].removeprefix(self._music_path_base_to_remove)}"),
+                path=Path(f"{self._local_user_music_stem}{entry['path'].removeprefix(self._music_path_base_to_remove)}"),
                 pymix_path=Path(src_dir + (entry['path'].removeprefix(self._music_path_base_to_remove))),
                 album=entry['album'],
                 rating=entry.get('userRating', 0),
@@ -170,17 +171,23 @@ class SubsonicClient(BaseAPIClient):
     def _parse_tracks(self, response: dict, username: str) -> List[SubBoxTrack]:
         resp_playlist = response['subsonic-response']['playlist'].get('entry', [])
         src_dir = self._serving_music_path_base.format(user=username)
-        return [
-            SubBoxTrack(
+
+        tracks = []
+        for entry in resp_playlist:
+            pymix_path = Path(src_dir + (entry['path'].removeprefix(self._music_path_base_to_remove)))
+            assert pymix_path.is_file(), f"pymix_path does not exist on disk: {pymix_path} for entry {entry}"
+            subbox_id = get_subbox_id(pymix_path)
+            tracks.append(SubBoxTrack(
                 name=entry['title'],
                 artist=entry['artist'],
-                path=Path(f"{self._zip_name}{entry['path'].removeprefix(self._music_path_base_to_remove)}"),
-                pymix_path=Path(src_dir + (entry['path'].removeprefix(self._music_path_base_to_remove))),
+                path=Path(f"{self._local_user_music_stem}{entry['path'].removeprefix(self._music_path_base_to_remove)}"),
+                pymix_path=pymix_path,
                 album=entry['album'],
                 rating=entry.get('userRating', 0),
-                genre=entry.get('genre')
-            ) for entry in resp_playlist
-        ]
+                genre=entry.get('genre'),
+                subbox_id=subbox_id,
+            ))
+        return tracks
 
     async def scan(self, user: dict) -> bool:
         username = user['username']

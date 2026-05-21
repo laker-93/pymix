@@ -74,24 +74,31 @@ def initialise_logger(app_name, level="DEBUG", **kwargs):
         logHandler.setLevel(logging.INFO)
         logHandler.setFormatter(formatter)
         logger.addHandler(logHandler)
+
+    # Suppress noisy watchfiles internal logging (e.g. "N changes detected")
+    logging.getLogger("watchfiles").setLevel(logging.WARNING)
+
     return logger
 
 @asynccontextmanager
 async def lifespan(app: FastAPI, container):
-    # todo create anyio mem obj stream
-    send_stream, receive_stream = create_memory_object_stream[tuple[str, list[Path]]]()
+    send_stream, receive_stream = create_memory_object_stream[str]()
 
     db_controller = container.db_controller()
     rb_xml_controller = await container.rekordbox_xml_controller()
-    directory = Path(container.config()['containers']['filebrowser']['user_root'])
-    users = [subdir.name for subdir in directory.iterdir() if subdir.is_dir()]
-    watchdir = container.config()['containers']['filebrowser']['data_watch']
-    watchpaths = [Path(watchdir.format(user=user)) for user in users]
-    for p in watchpaths:
-        p.mkdir(parents=True, exist_ok=True)
+    user_root = Path(container.config()['containers']['filebrowser']['user_root'])
+    watchdir_template = container.config()['containers']['filebrowser']['data_watch']
+    # the "watch" from "/user-updownloads/{user}/watch" which is the dir we poll for new files to import
+    watch_subdir = Path(watchdir_template).name
+
+    # Ensure watch dirs exist for current users
+    for subdir in user_root.iterdir():
+        if subdir.is_dir():
+            (subdir / watch_subdir).mkdir(parents=True, exist_ok=True)
+
     async with anyio.create_task_group() as tg:
-        tg.start_soon(poll_watchdir, watchpaths, send_stream, db_controller)
-        tg.start_soon(trigger_processing, receive_stream, rb_xml_controller)
+        tg.start_soon(poll_watchdir, user_root, watch_subdir, send_stream, db_controller)
+        tg.start_soon(trigger_processing, receive_stream, rb_xml_controller, db_controller)
         yield
 
 def create_app(container):
@@ -105,7 +112,7 @@ def create_app(container):
         CORSMiddleware,
         # need to set explicit origins here rather than * since feishin will be sending credentials in cookies:
         # https://stackoverflow.com/questions/18642828/origin-origin-is-not-allowed-by-access-control-allow-origin
-        allow_origins=["http://localhost:4343", "https://sub-box.net", "https://www.sub-box.net", "http://localhost"],
+        allow_origins=["http://localhost:4343", "https://sub-box.net", "https://www.sub-box.net", "http://localhost", "https://www.staging.sub-box.net", "https://staging.sub-box.net"],
         allow_credentials=True,
         allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "Set-Cookie"],

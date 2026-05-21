@@ -1,14 +1,15 @@
 ---
 app_env: dev
+local_user_music_stem: music
+zip_name: music
 rekordbox:
   xml_path: /subbox/rekordbox/rekordbox_empty.xml
-  zip_name: 'music'
 containers:
   subsonic:
     host: http://host.docker.internal:{port}
     version: 1.16.1
     music_path_base_to_remove: /music/private
-    serving_music_path_base: /private-music/{user}
+    serving_music_path_base: /private-music
     docker_compose_file: /subbox/docker-compose/navidrome/docker-compose.yml
     env_file: /subbox/docker-compose/navidrome/env
     config_file_dst: /subbox/private/{user}/navidrome/data/navidrome.toml

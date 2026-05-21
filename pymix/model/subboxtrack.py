@@ -24,6 +24,7 @@ class SubBoxTrack:
     sub_track_id: Optional[int] = None
     subbox_id: Optional[str] = None
     serato_hot_cues: Optional[list[HotCue]] = None
+    bpm: Optional[float] = None
 
     def __eq__(self, other):
         return self.name == other.name and self.artist == other.artist
