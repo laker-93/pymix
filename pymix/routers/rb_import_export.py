@@ -18,7 +18,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 class RBImportRequest(BaseModel):
-    playlistNames: list[list[str]]
+    playlistNames: Optional[list[list[str]]]
 
 
 
@@ -80,7 +80,7 @@ async def rekordbox_import(
         total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
         job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
         logger.info(f'RB importing {total_n_tracks_for_import} tracks for user {username}')
-        requested_playlists = [p for p in request.playlistNames if p]
+        requested_playlists = [p for p in request.playlistNames if p] if request.playlistNames else None
         background_tasks.add_task(run_import_task, rekordbox_xml_controller, username, job_id, db_controller,
                       fb_file_handler, total_n_tracks_for_import, user, requested_playlists)
         success = True
@@ -96,7 +96,7 @@ async def rekordbox_import(
 
 
 async def run_import_task(rekordbox_xml_controller, username, job_id, db_controller, fb_file_handler,
-                          total_n_tracks_for_import, user, playlist_names: list[list[str]]):
+                          total_n_tracks_for_import, user, playlist_names: Optional[list[list[str]]]):
     success = True
     beets_output = ""
     try:
