@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Body, Path, Query, Cookie
+from fastapi import APIRouter, Depends, Body, Path, Query, Cookie, HTTPException
 from jsonschema import validate, ValidationError
 from dependency_injector.wiring import inject, Provide
 from typing import Dict, Any, List
@@ -9,6 +9,19 @@ from pydantic import BaseModel
 from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
+
+
+class TrackPresenceRequest(BaseModel):
+    subbox_ids: List[str]
+
+    model_config = {"json_schema_extra": {"example": {"subbox_ids": ["uuid1", "uuid2"]}}}
+
+
+_PRESENCE_MAX_IDS = 1000
+
+
+class TrackPresenceResponse(BaseModel):
+    presence: Dict[str, bool]
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -52,6 +65,33 @@ cue_schema = {
     },
     "additionalProperties": False
 }
+
+@router.post("/tracks/presence", tags=["tracks"], response_model=TrackPresenceResponse)
+@inject
+async def get_tracks_presence(
+    body: TrackPresenceRequest,
+    session_id: str | None = Cookie(None),
+    username: str | None = Query(None, description="Username for authentication"),
+    db_controller: DbController = Depends(Provide[Container.db_controller]),
+) -> TrackPresenceResponse:
+    """
+    Given a list of subbox_ids, return which are already present in the
+    user's library. Intended for the client to determine which files still
+    need to be uploaded.
+    """
+    if len(body.subbox_ids) > _PRESENCE_MAX_IDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many subbox_ids in a single request (max {_PRESENCE_MAX_IDS}). Split into smaller batches.",
+        )
+
+    if not username and session_id:
+        user = db_controller.get_user_by_session_id(session_id)
+        username = user["username"]
+
+    presence = db_controller.get_subbox_ids_presence(username, body.subbox_ids)
+    return TrackPresenceResponse(presence=presence)
+
 
 @router.post("/track/metadata/update", tags=["metadata"])
 @inject

@@ -62,6 +62,28 @@ class DbController:
             )
             raise
 
+    def get_subbox_ids_presence(self, username: str, subbox_ids: list[str]) -> dict[str, bool]:
+        """Return a mapping of subbox_id → True for every id already in the
+        subbox_beets_map_table for this user.  Unknown ids map to False."""
+        if not subbox_ids:
+            return {}
+        try:
+            user = self.get_user(username)
+            user_id = user["user_id"]
+            with self._session_factory() as session:
+                rows = session.query(SubboxBeetsMapRow.subbox_id).filter(
+                    SubboxBeetsMapRow.user_id == user_id,
+                    SubboxBeetsMapRow.subbox_id.in_(subbox_ids),
+                ).all()
+            known = {row.subbox_id for row in rows}
+            return {sid: sid in known for sid in subbox_ids}
+        except Exception as ex:
+            logger.error(
+                "Error checking subbox_ids presence for %s: %r",
+                username, ex, exc_info=True
+            )
+            raise
+
     def get_subbox_beet_map(self, username: str, subbox_id: str) -> dict | None:
         try:
             user = self.get_user(username)

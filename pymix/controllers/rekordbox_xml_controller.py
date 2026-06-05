@@ -489,15 +489,27 @@ class RekordboxXMLController:
             assert track_match.pymix_path
             assert track_match.pymix_path.exists()
             subbox_id = get_subbox_id(track_match.pymix_path)
-            assert subbox_id is not None, f"subbox id tag not present on {p}"
+            if subbox_id is None:
+                logger.warning(f"subbox id tag not present on {track_match.pymix_path}, skipping cue and loop import for this track.")
+                continue
             # doesn't support float value for bpm so convert to int
             beets_command = f"beet modify -y subbox_id:{subbox_id} bpm={int(track.AverageBpm)}"
 
             container_name = f"beets{user['username']}"
             log_iter = docker.execute(container_name, beets_command.split(), stream=True)
-            for log_type, log in log_iter:
-                line = log.decode()
-                logger.info(f'{log_type}: {line}')
+            try:
+                for log_type, log in log_iter:
+                    line = log.decode()
+                    logger.info(f'{log_type}: {line}')
+            except Exception:
+                # if the logic to set the subbox_id tag in beets db failed in
+                # the import step (e.g. because the logic to parse the path from
+                # the output of beet ls failed) then the above beet modify step
+                # will fail as beets is unaware of any track with that
+                # subbox_id. The fix here is to fix the logic of parsing the
+                # correct path from the beet ls output during import stage.
+                logger.exception("Failed to execute beets command for %s",
+                track_match.pymix_path)
             #logger.info(f"Mapped subbox_id={subbox_id} → beet_id={beet_id}")
             # todo create pydantic model for cues and attack to subbox track and pass this to the db controller
             self._db_controller.update_metadata(
