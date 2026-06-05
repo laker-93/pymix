@@ -335,9 +335,9 @@ class SubsonicClient(BaseAPIClient):
         url = self._subsonic_format_url(
             username, password, f"{base_path}/rest/search2", params=[("query", f"{title} {artist}")]
         )
-        logger.info(f'querying url {url}')
+        logger.debug(f'querying url {url}')
         response = await self.get(url)
-        logger.info(f'got response {response}')
+        logger.debug(f'got response {response}')
         try:
             tracks, _ = self._parse_query(response, username=username)
         except Exception as ex:

@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 
 import anyio
@@ -132,7 +133,13 @@ class RekordboxXMLController:
         for duplicate in duplicates_paths:
             path_in_pymix = duplicate.removeprefix('/music')
             path_in_pymix = Path(f'/private-music/{username}/{path_in_pymix}')
-            assert path_in_pymix.exists(), path_in_pymix
+            if not path_in_pymix.exists():
+                resolved = self._resolve_path_with_special_chars(path_in_pymix)
+                if resolved is None:
+                    logger.warning(f"Could not resolve duplicate path {path_in_pymix}, skipping.")
+                    continue
+                logger.info(f"Resolved duplicate path with special chars: {resolved}")
+                path_in_pymix = resolved
             try:
                 item = Item.from_path(path_in_pymix)
             except Exception:
@@ -174,6 +181,16 @@ class RekordboxXMLController:
             entry_dir = path.removeprefix('/music')
             src_dir = f'{self._serving_music_path_base}/{username}'
             p = Path(src_dir + entry_dir)
+            if not p.exists():
+                # beet list may corrupt special characters (e.g. '\' → '/') in
+                # paths, so the reconstructed path might not exist.  Search the
+                # parent directory tree for a file whose name matches when
+                # backslashes are normalised to forward-slashes.
+                p = self._resolve_path_with_special_chars(p)
+                if p is None:
+                    logger.warning(f"Could not resolve path for beet_id={beet_id}, skipping.")
+                    continue
+                logger.info(f"Resolved path with special chars: {p}")
             with taglib.File(p) as song:
                 subbox_tag = song.tags.get("SUBBOX_ID")
             if subbox_tag:
@@ -203,6 +220,30 @@ class RekordboxXMLController:
     # todo this controller is overloaded; this method has nothing to do with rekordbox xml and should live elsewhere.
     async def consume_from_filebrowser(self, username: str, public: bool, watch: bool = False) -> str:
         return await anyio.to_thread.run_sync(self._consume_from_filebrowser, username, public, watch)
+
+    @staticmethod
+    def _resolve_path_with_special_chars(p: Path) -> Optional[Path]:
+        """Fall back to a filesystem search when a path reconstructed from beet
+        list output doesn't exist on disk.
+
+        beet list (and taglib) normalise some special characters — most notably
+        '\\' → '/' — so the reconstructed path can differ from the real one.
+        This method walks up to find the deepest existing ancestor directory,
+        then searches its subtree for a file whose suffix matches and whose
+        path, with backslashes replaced by forward-slashes, matches the
+        expected path string.
+        """
+        expected_normalised = str(p).replace('\\', '/')
+        # Walk up until we find an existing ancestor to start the search from.
+        ancestor = p.parent
+        while not ancestor.exists() and ancestor != ancestor.parent:
+            ancestor = ancestor.parent
+        if not ancestor.exists():
+            return None
+        for candidate in ancestor.rglob(f'*{p.suffix}'):
+            if str(candidate).replace('\\', '/') == expected_normalised:
+                return candidate
+        return None
 
     @staticmethod
     def _log_subbox_id_tags(directory: Path, label: str):
@@ -441,20 +482,34 @@ class RekordboxXMLController:
             album = track.Album if track.Album else None
             # the path on the server could be quite different to the path on the user side xml
             track_match = await self._subsonic_client.get_track_match(user, track.Name, track.Artist, album)
-            assert track_match is not None, f"unable to get track match for {track}"
+            if track_match is None:
+                logger.warning(f"Could not find a match in Navidrome for track {track.Name} by {track.Artist} with album {album}, skipping cue and loop import for this track.")
+                continue
             track_match = track_match[0]
             assert track_match.pymix_path
             assert track_match.pymix_path.exists()
             subbox_id = get_subbox_id(track_match.pymix_path)
-            assert subbox_id is not None, f"subbox id tag not present on {p}"
+            if subbox_id is None:
+                logger.warning(f"subbox id tag not present on {track_match.pymix_path}, skipping cue and loop import for this track.")
+                continue
             # doesn't support float value for bpm so convert to int
             beets_command = f"beet modify -y subbox_id:{subbox_id} bpm={int(track.AverageBpm)}"
 
             container_name = f"beets{user['username']}"
             log_iter = docker.execute(container_name, beets_command.split(), stream=True)
-            for log_type, log in log_iter:
-                line = log.decode()
-                logger.info(f'{log_type}: {line}')
+            try:
+                for log_type, log in log_iter:
+                    line = log.decode()
+                    logger.info(f'{log_type}: {line}')
+            except Exception:
+                # if the logic to set the subbox_id tag in beets db failed in
+                # the import step (e.g. because the logic to parse the path from
+                # the output of beet ls failed) then the above beet modify step
+                # will fail as beets is unaware of any track with that
+                # subbox_id. The fix here is to fix the logic of parsing the
+                # correct path from the beet ls output during import stage.
+                logger.exception("Failed to execute beets command for %s",
+                track_match.pymix_path)
             #logger.info(f"Mapped subbox_id={subbox_id} → beet_id={beet_id}")
             # todo create pydantic model for cues and attack to subbox track and pass this to the db controller
             self._db_controller.update_metadata(

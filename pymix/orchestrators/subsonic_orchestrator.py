@@ -76,6 +76,8 @@ class SubsonicOrchestrator:
         """
         # todo can use the db here to get the original user location from xml and look up subbox id from original meta data
         # then use subbox id and beets query to find new path
+        if not tracks and not subbox_playlists:
+            return
         tracks_to_update = []
         if not tracks:
             for playlist in subbox_playlists:

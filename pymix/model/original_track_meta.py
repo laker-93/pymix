@@ -8,7 +8,7 @@ class OriginalTrackMeta(BaseModel):
     stagingLocation: str
     originalName: str
     originalArtist: str
-    originalAlbum: str
+    originalAlbum: Optional[str] = None
     subbox_id: Optional[str] = None
 
 

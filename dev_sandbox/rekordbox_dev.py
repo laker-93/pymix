@@ -2,9 +2,12 @@ from pyrekordbox import RekordboxXml
 
 
 def read():
-    xml = RekordboxXml("/Users/lukepurnell/Documents/rekordbox-cue-test.xml")
-    track = xml.get_track(0)
-    print(track)
+    #xml = RekordboxXml("/Users/lukepurnell/Documents/rekordbox-test-250526.xml")
+    xml = RekordboxXml("/Users/lukepurnell/Downloads/rekordbox_xml.xml")
+    tracks = xml.get_tracks()
+    print(len(tracks))
+    #for track in tracks:
+    #    print(track.Name, track.Artist, track.Album, track.Location, track.AverageBpm)
 
 def write():
     xml = RekordboxXml("/Users/lajp/rekordbox/rekordbox_original.xml")

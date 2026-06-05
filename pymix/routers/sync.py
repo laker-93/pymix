@@ -446,6 +446,106 @@ async def sync(
     }
 
 
+@router.post("/sync/tracks", tags=["sync"])
+@inject
+async def sync_tracks(
+        request: SyncRequest,
+        session_id: str | None = Cookie(None),
+        username: str | None = None,
+        db_controller: DbController = Depends(Provide[Container.db_controller]),
+        fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
+        subsonic_client: SubsonicClient = Depends(Provide[Container.subsonic_client])
+) -> dict:
+    if not username and not session_id:
+        return {"success": False, "reason": "Must have a username or session ID to identify user"}
+
+    user = None
+    if username:
+        try:
+            user = db_controller.get_user(username)
+        except Exception as ex:
+            logger.error(f"Error occurred getting user for {username}", exc_info=True)
+            return {"success": False, "reason": repr(ex)}
+    elif session_id:
+        try:
+            user = db_controller.get_user_by_session_id(session_id)
+            username = user["username"]
+        except Exception as ex:
+            logger.error(f"Error occurred getting user for session ID {session_id}", exc_info=True)
+            return {"success": False, "reason": repr(ex)}
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    all_tracks_to_zip = []
+
+    logger.info(
+        "sync_tracks start: user=%s tracks_to_download=%s",
+        username,
+        len(request.tracksToDownload),
+    )
+
+    for requested_track in request.tracksToDownload:
+        resolved_title, resolved_artist = _resolve_local_track_for_matching(requested_track)
+        candidate_tracks = await subsonic_client.query_tracks_by(user, resolved_title, resolved_artist)
+        match = await subsonic_client._get_best_track_match(
+            resolved_title,
+            resolved_artist,
+            requested_track.album,
+            candidate_tracks,
+            similarity_threshold=0.6,
+        )
+        if not match:
+            candidate_tracks = await subsonic_client.query_track_by_name(user, resolved_title)
+            match = await subsonic_client._get_best_track_match(
+                resolved_title,
+                resolved_artist,
+                requested_track.album,
+                candidate_tracks,
+                similarity_threshold=0.5,
+            )
+        if match:
+            matched_server_track, similarity = match
+            logger.info(
+                "sync_tracks track_found: user=%s requested=(%r,%r,%r) server=(%r,%r,%r) similarity=%.3f",
+                username,
+                requested_track.title,
+                requested_track.artist,
+                requested_track.album,
+                matched_server_track.name,
+                matched_server_track.artist,
+                matched_server_track.album,
+                similarity,
+            )
+            all_tracks_to_zip.append(matched_server_track)
+        else:
+            logger.warning(
+                "sync_tracks track_not_found: user=%s requested=(%r,%r,%r) — not found on server",
+                username,
+                requested_track.title,
+                requested_track.artist,
+                requested_track.album,
+            )
+
+    n_tracks_zipped, zip_path = fb_file_handler.sync(
+        username=username,
+        tracks_to_zip=all_tracks_to_zip,
+    )
+    logger.info(
+        "sync_tracks complete: user=%s n_tracks_exported=%s zip_path=%s",
+        username,
+        len(all_tracks_to_zip),
+        zip_path,
+    )
+
+    return {
+        "success": True,
+        "nTracksExported": len(all_tracks_to_zip),
+        "zipPath": zip_path,
+        "reason": "",
+    }
+
+
 @router.post("/sync/playlists", tags=["sync"])
 @inject
 async def sync_playlists(
