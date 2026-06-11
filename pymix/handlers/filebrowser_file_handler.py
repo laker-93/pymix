@@ -88,7 +88,7 @@ async def poll_watchdir(user_root: Path, watch_subdir: str, send_stream, db_cont
     """
     DEBOUNCE_SECONDS = 15
     user_last_change: dict[str, float] = {}
-    user_pending_size: dict[str, int] = defaultdict(int)
+    user_pending_files: dict[str, dict[str, int]] = defaultdict(dict)
     maxed_out_users: set[str] = set()
 
     async with send_stream:
@@ -113,14 +113,15 @@ async def poll_watchdir(user_root: Path, watch_subdir: str, send_stream, db_cont
                     continue
 
                 if path.is_file():
-                    user_pending_size[user] += path.stat().st_size
+                    user_pending_files[user][str(path)] = path.stat().st_size
                 user_last_change[user] = now
 
-                exceeded, _, _ = db_controller.user_library_size_exceeded(user, user_pending_size[user])
+                pending_size = sum(user_pending_files[user].values())
+                exceeded, _, _ = db_controller.user_library_size_exceeded(user, pending_size)
                 if exceeded:
                     logger.error(f'watch: library size exceeded for user {user}')
                     maxed_out_users.add(user)
-                    user_pending_size.pop(user, None)
+                    user_pending_files.pop(user, None)
                     user_last_change.pop(user, None)
 
             # Check which users have passed the debounce window
@@ -133,21 +134,21 @@ async def poll_watchdir(user_root: Path, watch_subdir: str, send_stream, db_cont
                 if not _has_audio_files(watch_dir):
                     logger.info(f'watch: no audio files in watch dir for user {user}, skipping')
                     user_last_change.pop(user)
-                    user_pending_size.pop(user, 0)
+                    user_pending_files.pop(user, None)
                     continue
                 if not _all_files_stable(watch_dir, DEBOUNCE_SECONDS):
                     logger.info(f'watch: files still being written for user {user}, deferring import')
                     # Reset debounce so we re-check after another DEBOUNCE_SECONDS
                     user_last_change[user] = now
                     continue
-                n_bytes = user_pending_size.get(user, 0)
+                n_bytes = sum(user_pending_files.get(user, {}).values())
                 logger.info(
                     f'watch: triggering import for user {user} '
                     f'(~{n_bytes / 1024 / 1024:.1f} MB, debounce complete)'
                 )
                 await send_stream.send(user)
                 user_last_change.pop(user)
-                user_pending_size.pop(user, 0)
+                user_pending_files.pop(user, None)
 
 
 
