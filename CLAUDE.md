@@ -11,11 +11,11 @@ Docker containers (Navidrome, beets, filebrowser); pymix orchestrates them.
 ## Read this first when adding a feature
 
 1. This file (architecture + conventions).
-2. `.claude/docs/architecture.md` — layers, request flow, container topology.
-3. `.claude/docs/api.md` — every HTTP endpoint and what it does.
-4. `.claude/docs/data-model.md` — DB tables, domain models, the `subbox_id` concept.
-5. `.claude/docs/workflows.md` — the import/export/sync/watch flows end to end.
-6. `.claude/docs/dev.md` — how to run, test, migrate, and the dev_sandbox scripts.
+2. `docs/architecture.md` — layers, request flow, container topology.
+3. `docs/api.md` — every HTTP endpoint and what it does.
+4. `docs/data-model.md` — DB tables, domain models, the `subbox_id` concept.
+5. `docs/workflows.md` — the import/export/sync/watch flows end to end.
+6. `docs/dev.md` — how to run, test, migrate, and the dev_sandbox scripts.
 
 Only then read source, guided by the docs.
 
