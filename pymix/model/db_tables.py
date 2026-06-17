@@ -14,6 +14,7 @@ class UserRow(Base):
     beets_port = Column(Integer, nullable=False)
     subsonic_port = Column(Integer, nullable=False)
     max_library_size = Column(BigInteger, nullable=False)
+    wishlist_sheet_id = Column(String, nullable=True)
 
 
 class SessionRow(Base):
@@ -101,3 +102,28 @@ class PlaylistPathRow(Base):
     user_id = Column(String, nullable=False)
     display_name = Column(String, nullable=False)
     path_components = Column(JSON, nullable=False)
+
+
+class WishlistRow(Base):
+    __tablename__ = 'wishlist_table'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    wishlist_id = Column(String, unique=True, nullable=False)
+
+    user_id = Column(String, nullable=False)
+
+    artist = Column(String, nullable=False)
+    title = Column(String, nullable=False)
+    album = Column(String)
+    raw_note = Column(String)
+
+    status = Column(String, nullable=False)
+
+    youtube_video_id = Column(String)
+    youtube_url = Column(String)
+
+    linked_subbox_id = Column(String)
+
+    created_at = Column(Float)
+    updated_at = Column(Float)

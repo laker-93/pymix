@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from pymix.model.db_tables import (
     UserRow, SessionRow, SubboxBeetsMapRow, LibraryRow,
     MetaHistoryRow, UserJobRow, JobRow, OriginalTrackMetaRow, UserTokenRow,
-    PlaylistPathRow,
+    PlaylistPathRow, WishlistRow,
 )
 from pymix.model.original_track_meta import OriginalTracks
 from pymix.utils.get_available_port import get_available_port
@@ -507,6 +507,20 @@ class DbController:
             assert len(results) == 1, f'found {len(results)} users with username {username}'
             return _row_to_dict(results[0])
 
+    def update_user_wishlist_sheet_id(self, username: str, sheet_id: str) -> dict:
+        with self._session_factory() as session:
+            row = session.query(UserRow).filter(UserRow.username == username).one()
+            row.wishlist_sheet_id = sheet_id
+            session.commit()
+            result = _row_to_dict(row)
+            logger.info(f"Set wishlist_sheet_id for user {username}")
+            return result
+
+    def get_users_with_wishlist_sheet(self) -> list[dict]:
+        with self._session_factory() as session:
+            rows = session.query(UserRow).filter(UserRow.wishlist_sheet_id.isnot(None)).all()
+            return [_row_to_dict(r) for r in rows]
+
     def delete_user(self, username: str):
         with self._session_factory() as session:
             user = session.query(UserRow).filter(UserRow.username == username).one()
@@ -571,3 +585,117 @@ class DbController:
                 PlaylistPathRow.user_id == user_id,
             ).all()
             return [_row_to_dict(r) for r in rows]
+
+    def create_wishlist_item(
+            self,
+            username: str,
+            artist: str,
+            title: str,
+            album: Optional[str] = None,
+            raw_note: Optional[str] = None,
+            status: str = "wishlist",
+            youtube_video_id: Optional[str] = None,
+            youtube_url: Optional[str] = None,
+    ) -> dict:
+        user = self.get_user(username)
+        user_id = user['user_id']
+        now = datetime.datetime.now().timestamp()
+
+        with self._session_factory() as session:
+            new_item = WishlistRow(
+                wishlist_id=uuid.uuid4().hex,
+                user_id=user_id,
+                artist=artist,
+                title=title,
+                album=album,
+                raw_note=raw_note,
+                status=status,
+                youtube_video_id=youtube_video_id,
+                youtube_url=youtube_url,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(new_item)
+            session.commit()
+            result = _row_to_dict(new_item)
+            logger.info(f"Created wishlist item {result['wishlist_id']} for user {username}")
+            return result
+
+    def get_wishlist_items(self, username: str, status: Optional[str] = None) -> list[dict]:
+        user = self.get_user(username)
+        user_id = user['user_id']
+
+        with self._session_factory() as session:
+            query = session.query(WishlistRow).filter(WishlistRow.user_id == user_id)
+            if status is not None:
+                query = query.filter(WishlistRow.status == status)
+            rows = query.all()
+            return [_row_to_dict(r) for r in rows]
+
+    def get_wishlist_item(self, username: str, wishlist_id: str) -> Optional[dict]:
+        user = self.get_user(username)
+        user_id = user['user_id']
+
+        with self._session_factory() as session:
+            row = session.query(WishlistRow).filter(
+                WishlistRow.user_id == user_id,
+                WishlistRow.wishlist_id == wishlist_id,
+            ).first()
+            return _row_to_dict(row) if row else None
+
+    def update_wishlist_item(self, username: str, wishlist_id: str, updates: dict) -> Optional[dict]:
+        user = self.get_user(username)
+        user_id = user['user_id']
+
+        with self._session_factory() as session:
+            row = session.query(WishlistRow).filter(
+                WishlistRow.user_id == user_id,
+                WishlistRow.wishlist_id == wishlist_id,
+            ).first()
+            if not row:
+                return None
+
+            for key, value in updates.items():
+                setattr(row, key, value)
+            row.updated_at = datetime.datetime.now().timestamp()
+
+            session.commit()
+            result = _row_to_dict(row)
+            logger.info(f"Updated wishlist item {wishlist_id} for user {username}")
+            return result
+
+    def delete_wishlist_item(self, username: str, wishlist_id: str) -> bool:
+        user = self.get_user(username)
+        user_id = user['user_id']
+
+        with self._session_factory() as session:
+            row = session.query(WishlistRow).filter(
+                WishlistRow.user_id == user_id,
+                WishlistRow.wishlist_id == wishlist_id,
+            ).first()
+            if not row:
+                return False
+
+            session.delete(row)
+            session.commit()
+            logger.info(f"Deleted wishlist item {wishlist_id} for user {username}")
+            return True
+
+    def get_wishlist_items_by_status(self, statuses: tuple[str, ...]) -> list[dict]:
+        """Return wishlist items across all users in any of the given statuses.
+
+        Used by Beets-import auto-matching, which operates without a single
+        user context.
+        """
+        with self._session_factory() as session:
+            rows = session.query(WishlistRow).filter(WishlistRow.status.in_(statuses)).all()
+            return [_row_to_dict(r) for r in rows]
+
+    def mark_wishlist_item_imported(self, wishlist_id: str, linked_subbox_id: str):
+        with self._session_factory() as session:
+            row = session.query(WishlistRow).filter(WishlistRow.wishlist_id == wishlist_id).one()
+            row.status = "imported"
+            row.linked_subbox_id = linked_subbox_id
+            row.updated_at = datetime.datetime.now().timestamp()
+            session.commit()
+            logger.info(f"Wishlist item {wishlist_id} matched to subbox_id {linked_subbox_id}")

@@ -15,7 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pymix import constants
 from pymix.containers import Container
 from pymix.handlers.filebrowser_file_handler import poll_watchdir, trigger_processing
-from pymix.routers import maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, match_tracks, track
+from pymix.handlers.sheet_sync_handler import sheet_sync_loop
+from pymix.routers import maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, match_tracks, track, wishlist
 
 
 logger = logging.getLogger(__name__)
@@ -96,9 +97,13 @@ async def lifespan(app: FastAPI, container):
         if subdir.is_dir():
             (subdir / watch_subdir).mkdir(parents=True, exist_ok=True)
 
+    sheet_sync_service = container.sheet_sync_service()
+    poll_interval_s = container.config()['google_sheets']['poll_interval_s']
+
     async with anyio.create_task_group() as tg:
         tg.start_soon(poll_watchdir, user_root, watch_subdir, send_stream, db_controller)
         tg.start_soon(trigger_processing, receive_stream, rb_xml_controller, db_controller)
+        tg.start_soon(sheet_sync_loop, sheet_sync_service, db_controller, poll_interval_s)
         yield
 
 def create_app(container):
@@ -114,7 +119,7 @@ def create_app(container):
         # https://stackoverflow.com/questions/18642828/origin-origin-is-not-allowed-by-access-control-allow-origin
         allow_origins=["http://localhost:4343", "https://sub-box.net", "https://www.sub-box.net", "http://localhost", "https://www.staging.sub-box.net", "https://staging.sub-box.net"],
         allow_credentials=True,
-        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS", "PATCH"],
         allow_headers=["Content-Type", "Set-Cookie"],
     )
 
@@ -128,6 +133,7 @@ def create_app(container):
     app.include_router(sync.router)
     app.include_router(match_tracks.router)
     app.include_router(track.router)
+    app.include_router(wishlist.router)
     return app
 
 
@@ -150,7 +156,7 @@ def create_container(environment="dev"):
     )
     container.wire(
         modules=[
-            maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, sys.modules[__name__]
+            maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, wishlist, sys.modules[__name__]
         ]
     )
     return container

@@ -37,3 +37,6 @@ max_number_of_tracks: 1000
 max_library_size: 10737418240 # 10GB
 # number of seconds after which the export job will be updated with number of files written to zip during export job
 update_job_period_s: 1
+google_sheets:
+  credentials_path: /subbox/secrets/google-sheets-service-account.json
+  poll_interval_s: 300
