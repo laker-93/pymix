@@ -21,3 +21,7 @@ starlette~=0.37.2
 watchfiles~=0.21.0
 jsonschema
 pytaglib==2.1.0
+rapidfuzz~=3.9
+yt-dlp>=2024.8.6
+google-api-python-client~=2.100
+google-auth~=2.30

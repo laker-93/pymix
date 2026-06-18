@@ -419,27 +419,37 @@ grant), reads still work but `write_status` fails — caught and logged in
 misconfiguration never breaks the loop for others. **Surface the service-account
 email and the "share as Editor" step prominently** so write-back normally works.
 
-### ⚠️ Dedup must NOT depend on the sheet write-back
+### Dedup is content-based, not row-position-based
 
-Today the only "already imported" guard is `if row["status"]: continue` in
-`SheetSyncService.sync_user` — i.e. it relies on having **written** `Added` back.
-`create_wishlist_item` does **no** dedup; it always inserts a fresh `wishlist_id`.
-So if write-back is unavailable (Viewer-only share), **every poll re-imports every
-row → duplicate wishlist items every 300s.** That contradicts "missing write access
-won't break anything", so V1 needs a **server-side** dedup safeguard that does not
-depend on the sheet:
+`create_wishlist_item` does **no** dedup itself; it always inserts a fresh
+`wishlist_id`. Two guards in `SheetSyncService.sync_user` stop the same row being
+imported twice:
 
-* Add a per-user high-water-mark cursor, e.g.
-  `UserRow.wishlist_sheet_synced_through_row` (Integer, nullable) — requires an
-  Alembic migration + ORM column.
-* In `sync_user`, only process rows whose `row_index` is **greater than** the
-  cursor; after the cycle, advance the cursor to the highest `row_index` processed.
-* Keep the `Status`-column write-back, but treat it as **best-effort user-facing
-  feedback only**, no longer the dedup mechanism. Keep the `if row["status"]:
-  continue` check too as a cheap secondary guard for the writable case.
-* Known limitation (acceptable for V1): rows inserted **above** the high-water mark
-  are not re-scanned. The offline-capture UX appends at the bottom, so document this
-  rather than solve it now.
+1. **Status check (cheap, primary path)** — `if row["status"]: continue`. Once a row
+   has been imported and `write_status` successfully wrote `Added` back, it's
+   skipped on every later poll without touching the DB.
+2. **Content-signature match (fallback)** — for rows with no Status (new row, or
+   write-back never landed because the user only shared the sheet as Viewer),
+   `sync_user` fetches the user's existing wishlist items once per poll and builds a
+   signature per item: `youtube_video_id` if present, else
+   `(artist.lower(), title.lower())`, else `raw_note.lower()`. The same signature is
+   computed for the sheet row (`_row_signature`); if it already exists in the DB, the
+   row is treated as already-imported — `_sync_row` is skipped (no duplicate insert)
+   but a best-effort `write_status(..., "Added")` is still attempted so the row can
+   take the cheap Status path next time write access is fixed.
+
+This was originally a per-user high-water-mark row-index cursor
+(`UserRow.wishlist_sheet_synced_through_row`), but that breaks if the user deletes
+or reorders rows in their copy of the sheet — a row's *position* isn't a stable
+identity, only its *content* is. The cursor column and its migration
+(`005_add_wishlist_sheet_cursor.py`) were removed in
+`006_drop_wishlist_sheet_cursor.py`.
+
+Known limitation: the existing-item signature is computed from the DB's *current*
+artist/title, not what was originally typed into the sheet. If a user edits an
+already-imported item's artist/title in the app, a sheet row with the *original*
+text no longer matches it and would re-import as a duplicate — this only protects
+against literal duplicate content, not edits made after import.
 
 ## Future: one-click via OAuth (`drive.file`) — not V1
 

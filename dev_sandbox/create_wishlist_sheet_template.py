@@ -172,6 +172,19 @@ def _col_width(sheet_id, c0, c1, px):
 # Sheet setup helpers
 # ---------------------------------------------------------------------------
 
+def _existing_protected_range_ids(sheets_svc, spreadsheet_id, sheet_id):
+    """Protected ranges already on a sheet — so re-running this script replaces them
+    instead of piling up duplicates (or, worse, leaving a stale broken one in place;
+    see the warningOnly comment below)."""
+    meta = sheets_svc.spreadsheets().get(
+        spreadsheetId=spreadsheet_id, fields="sheets(properties.sheetId,protectedRanges.protectedRangeId)"
+    ).execute()
+    for s in meta["sheets"]:
+        if s["properties"]["sheetId"] == sheet_id:
+            return [r["protectedRangeId"] for r in s.get("protectedRanges", [])]
+    return []
+
+
 def _ensure_sheets(sheets_svc, spreadsheet_id):
     meta = sheets_svc.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
     existing = {s["properties"]["title"]: s["properties"]["sheetId"] for s in meta["sheets"]}
@@ -204,11 +217,21 @@ def _ensure_sheets(sheets_svc, spreadsheet_id):
     return existing
 
 
-def _format_wishlist_tab(wid, service_account_email):
+def _format_wishlist_tab(wid, existing_protected_range_ids):
     """Return all batchUpdate requests for the Wishlist tab."""
     DATA_ROWS = 1000  # apply tints this far down
 
     requests = []
+
+    # Delete any pre-existing protection on Status+Added first. Re-running this
+    # script must not leave old ranges in place: a stale non-warningOnly range
+    # (e.g. one created before this script used warningOnly) would block every
+    # future write-back forever, even alongside a correct warningOnly one — Sheets
+    # blocks an edit if *any* overlapping protected range blocks it.
+    requests += [
+        {"deleteProtectedRange": {"protectedRangeId": range_id}}
+        for range_id in existing_protected_range_ids
+    ]
 
     # ---- Header row backgrounds (per column) ----
     requests += [
@@ -279,15 +302,19 @@ def _format_wishlist_tab(wid, service_account_email):
     for col, note in HEADER_NOTES.items():
         requests.append(_note_request(wid, 0, col, note))
 
-    # ---- Protected range: Status + Added ----
-    # Enforced: only Subbox's service account may edit. The spreadsheet owner
-    # can still lift the restriction via Data > Protected sheets and ranges.
+    # ---- Protected range: Status + Added (warning only) ----
+    # Deliberately warningOnly: it shows a "you're editing a protected cell"
+    # confirmation in the UI but never blocks an edit. A hard restriction does
+    # NOT work here: (1) the sheet owner — the user who copied the template —
+    # can always edit their own cells, so the user can't be locked out anyway;
+    # and (2) a protected-range editor list does not carry the service account
+    # across a "Make a copy", so warningOnly=False would block Subbox's own
+    # write-back to Status/Added (the exact bug this replaces).
     requests.append({"addProtectedRange": {
         "protectedRange": {
             "range": _cell_range(wid, 0, DATA_ROWS + 1, COL_STATUS, COL_ADDED + 1),
             "description": "Written by Subbox automatically — do not edit",
-            "warningOnly": False,
-            "editors": {"users": [service_account_email]},
+            "warningOnly": True,
         }
     }})
 
@@ -369,8 +396,9 @@ def main(credentials_path: str) -> None:
     ).execute()
 
     # Apply all formatting in one batchUpdate
+    existing_protected_range_ids = _existing_protected_range_ids(sheets, spreadsheet_id, wishlist_id)
     all_requests = (
-        _format_wishlist_tab(wishlist_id, credentials.service_account_email)
+        _format_wishlist_tab(wishlist_id, existing_protected_range_ids)
         + _format_instructions_tab(instructions_id)
     )
     sheets.spreadsheets().batchUpdate(
