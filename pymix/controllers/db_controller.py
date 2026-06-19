@@ -599,13 +599,14 @@ class DbController:
     def create_wishlist_item(
             self,
             username: str,
-            artist: str,
-            title: str,
+            artist: Optional[str],
+            title: Optional[str],
             album: Optional[str] = None,
             raw_note: Optional[str] = None,
             status: str = "wishlist",
             youtube_video_id: Optional[str] = None,
             youtube_url: Optional[str] = None,
+            bandcamp_url: Optional[str] = None,
     ) -> dict:
         user = self.get_user(username)
         user_id = user['user_id']
@@ -622,6 +623,7 @@ class DbController:
                 status=status,
                 youtube_video_id=youtube_video_id,
                 youtube_url=youtube_url,
+                bandcamp_url=bandcamp_url,
                 created_at=now,
                 updated_at=now,
             )
@@ -630,6 +632,35 @@ class DbController:
             result = _row_to_dict(new_item)
             logger.info(f"Created wishlist item {result['wishlist_id']} for user {username}")
             return result
+
+    def create_wishlist_items_bulk(self, username: str, items: list[dict]) -> list[dict]:
+        user = self.get_user(username)
+        user_id = user['user_id']
+        now = datetime.datetime.now().timestamp()
+
+        with self._session_factory() as session:
+            new_rows = [
+                WishlistRow(
+                    wishlist_id=uuid.uuid4().hex,
+                    user_id=user_id,
+                    artist=item['artist'],
+                    title=item['title'],
+                    album=item.get('album'),
+                    raw_note=item.get('raw_note'),
+                    status=item.get('status', 'wishlist'),
+                    youtube_video_id=item.get('youtube_video_id'),
+                    youtube_url=item.get('youtube_url'),
+                    bandcamp_url=item.get('bandcamp_url'),
+                    created_at=now,
+                    updated_at=now,
+                )
+                for item in items
+            ]
+            session.add_all(new_rows)
+            session.commit()
+            results = [_row_to_dict(row) for row in new_rows]
+            logger.info(f"Created {len(results)} wishlist items for user {username}")
+            return results
 
     def get_wishlist_items(self, username: str, status: Optional[str] = None) -> list[dict]:
         user = self.get_user(username)

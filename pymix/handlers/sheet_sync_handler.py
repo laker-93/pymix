@@ -14,7 +14,7 @@ async def sheet_sync_loop(sheet_sync_service: SheetSyncService, db_controller: D
         logger.info(f"sheet sync: starting poll cycle, {len(users)} user(s) with a wishlist sheet configured")
         for user in users:
             try:
-                sheet_sync_service.sync_user(user)
+                await sheet_sync_service.sync_user(user)
             except Exception:
                 logger.exception(f"sheet sync: unexpected error syncing user {user['username']}")
         logger.info(f"sheet sync: poll cycle complete, sleeping {poll_interval_s}s")

@@ -22,6 +22,7 @@ from pymix.orchestrators.serato_crate_orchestrator import SeratoCrateOrchestrato
 from pymix.orchestrators.services_orchestrator import ServicesOrchestrator
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
 from pymix.services.google_sheets_service import GoogleSheetsService
+from pymix.services.link_parse_service import LinkParseService
 from pymix.services.sheet_sync_service import SheetSyncService
 from pymix.services.youtube_match_service import YoutubeMatchService
 
@@ -168,6 +169,10 @@ class Container(containers.DeclarativeContainer):
         YoutubeMatchService,
     )
 
+    link_parse_service = providers.Singleton(
+        LinkParseService,
+    )
+
     google_sheets_service = providers.Singleton(
         GoogleSheetsService,
         credentials_path=config.google_sheets.credentials_path,
@@ -177,4 +182,5 @@ class Container(containers.DeclarativeContainer):
         SheetSyncService,
         db_controller,
         google_sheets_service,
+        link_parse_service,
     )

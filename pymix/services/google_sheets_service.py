@@ -19,7 +19,7 @@ class SheetRow(TypedDict):
     raw_note: str
     artist: str
     title: str
-    youtube_url: str
+    url: str
     status: str
 
 
@@ -46,13 +46,13 @@ class GoogleSheetsService:
         rows = []
         for offset, row in enumerate(result.get("values", [])):
             row = row + [""] * (6 - len(row))
-            raw_note, artist, title, youtube_url, status, _added = row[:6]
+            raw_note, artist, title, url, status, _added = row[:6]
             rows.append(SheetRow(
                 row_index=offset + 2,  # data starts at row 2 (row 1 is the header)
                 raw_note=raw_note.strip(),
                 artist=artist.strip(),
                 title=title.strip(),
-                youtube_url=youtube_url.strip(),
+                url=url.strip(),
                 status=status.strip(),
             ))
         return rows

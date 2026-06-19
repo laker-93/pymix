@@ -6,8 +6,15 @@ from fastapi import APIRouter, Depends, Cookie, HTTPException, Path, Query
 
 from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
-from pymix.model.api.wishlist_requests import CreateWishlistRequest, SetWishlistSheetRequest, UpdateWishlistRequest
+from pymix.model.api.wishlist_requests import (
+    CreateWishlistBulkRequest,
+    CreateWishlistRequest,
+    ParseLinkRequest,
+    SetWishlistSheetRequest,
+    UpdateWishlistRequest,
+)
 from pymix.model.wishlist import WISHLIST_STATUSES
+from pymix.services.link_parse_service import LinkParseService
 from pymix.services.sheet_sync_service import SheetSyncService
 from pymix.services.youtube_match_service import YoutubeMatchService
 
@@ -60,8 +67,49 @@ async def create_wishlist_item(
         album=body.album,
         youtube_video_id=body.youtube_video_id,
         youtube_url=body.youtube_url,
+        bandcamp_url=body.bandcamp_url,
+        status=body.initial_status,
     )
     return {"item": item}
+
+
+@router.post("/wishlist/bulk", tags=["wishlist"])
+@inject
+async def create_wishlist_items_bulk(
+    body: CreateWishlistBulkRequest,
+    session_id: Optional[str] = Cookie(None),
+    username: Optional[str] = Query(None, description="Username for authentication"),
+    db_controller: DbController = Depends(Provide[Container.db_controller]),
+) -> dict:
+    username = _resolve_username(db_controller, session_id, username)
+
+    items = db_controller.create_wishlist_items_bulk(
+        username=username,
+        items=[{**item.model_dump(), "status": item.initial_status} for item in body.items],
+    )
+    return {"items": items}
+
+
+@router.post("/wishlist/parse-link", tags=["wishlist"])
+@inject
+async def parse_wishlist_link(
+    body: ParseLinkRequest,
+    session_id: Optional[str] = Cookie(None),
+    username: Optional[str] = Query(None, description="Username for authentication"),
+    db_controller: DbController = Depends(Provide[Container.db_controller]),
+    link_parse_service: LinkParseService = Depends(Provide[Container.link_parse_service]),
+) -> dict:
+    _resolve_username(db_controller, session_id, username)
+
+    try:
+        metadata = await link_parse_service.extract(body.url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception(f"Failed to parse wishlist link {body.url!r}")
+        raise HTTPException(status_code=400, detail="Could not extract details from that link")
+
+    return {"metadata": metadata}
 
 
 @router.patch("/wishlist/sheet", tags=["wishlist"])
@@ -76,7 +124,7 @@ async def set_wishlist_sheet(
     username = _resolve_username(db_controller, session_id, username)
 
     user = db_controller.update_user_wishlist_sheet_id(username=username, sheet_id=body.sheet_id)
-    sheet_sync_service.sync_user(user)
+    await sheet_sync_service.sync_user(user)
     return {"success": True}
 
 
@@ -90,10 +138,12 @@ async def get_wishlist_sheet_status(
     username = _resolve_username(db_controller, session_id, username)
 
     user = db_controller.get_user(username)
+    sheet_id = user["wishlist_sheet_id"]
     return {
-        "configured": user["wishlist_sheet_id"] is not None,
+        "configured": sheet_id is not None,
         "status": user["wishlist_sheet_status"],
         "error": user["wishlist_sheet_error"],
+        "sheet_url": f"https://docs.google.com/spreadsheets/d/{sheet_id}" if sheet_id else None,
     }
 
 

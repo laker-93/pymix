@@ -115,8 +115,8 @@ class WishlistRow(Base):
 
     user_id = Column(String, nullable=False)
 
-    artist = Column(String, nullable=False)
-    title = Column(String, nullable=False)
+    artist = Column(String)
+    title = Column(String)
     album = Column(String)
     raw_note = Column(String)
 
@@ -124,6 +124,7 @@ class WishlistRow(Base):
 
     youtube_video_id = Column(String)
     youtube_url = Column(String)
+    bandcamp_url = Column(String)
 
     linked_subbox_id = Column(String)
 

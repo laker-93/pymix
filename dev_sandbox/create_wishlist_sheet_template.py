@@ -21,13 +21,13 @@ SCOPES = [
 
 SPREADSHEET_ID = "1AUS_1Y5xo-HUoGxQkVQRsZFQMYZ6w8KsNeI4VOP9t64"
 
-WISHLIST_HEADERS = ["Raw Note", "Artist", "Title", "YouTube URL", "Status", "Added"]
+WISHLIST_HEADERS = ["Raw Note", "Artist", "Title", "URL", "Status", "Added"]
 
 # Column index constants
 COL_RAW_NOTE = 0
 COL_ARTIST = 1
 COL_TITLE = 2
-COL_YOUTUBE = 3
+COL_URL = 3
 COL_STATUS = 4
 COL_ADDED = 5
 
@@ -35,7 +35,7 @@ COL_ADDED = 5
 # Header row (darker, white text)
 H_NOTE   = {"red": 0.576, "green": 0.439, "blue": 0.859}   # purple
 H_INPUT  = {"red": 0.267, "green": 0.549, "blue": 0.792}   # blue  (Artist + Title)
-H_URL    = {"red": 0.204, "green": 0.659, "blue": 0.325}   # green (YouTube URL)
+H_URL    = {"red": 0.204, "green": 0.659, "blue": 0.325}   # green (URL — YouTube or Bandcamp)
 H_SUBBOX = {"red": 0.400, "green": 0.400, "blue": 0.400}   # dark grey (Status + Added)
 
 # Data rows (very light tint)
@@ -58,18 +58,20 @@ HEADER_NOTES = {
         "Artist name.\n\n"
         "Fill this in together with Title for a structured entry. "
         "Subbox will search YouTube to find the best match.\n\n"
-        "Leave blank if you're using Raw Note or YouTube URL instead."
+        "Leave blank if you're using Raw Note or URL instead."
     ),
     COL_TITLE: (
         "Track title.\n\n"
         "Fill this in together with Artist. "
         "Subbox will search YouTube to find the best match.\n\n"
-        "Leave blank if you're using Raw Note or YouTube URL instead."
+        "Leave blank if you're using Raw Note or URL instead."
     ),
-    COL_YOUTUBE: (
-        "YouTube URL — paste a direct link to the video.\n\n"
-        "Subbox will use this exact video, no matching needed. "
-        "Supports youtube.com/watch, youtu.be, and Shorts links.\n\n"
+    COL_URL: (
+        "YouTube or Bandcamp URL — paste a direct link to the track.\n\n"
+        "Subbox will use this exact track, no matching needed, and will pull "
+        "Artist + Title from the link automatically if you leave those blank. "
+        "Supports youtube.com/watch, youtu.be, Shorts, and *.bandcamp.com/track "
+        "links.\n\n"
         "Leave blank if you're using Artist + Title or Raw Note instead."
     ),
     COL_STATUS: (
@@ -107,10 +109,12 @@ INSTRUCTIONS_TEXT = [
     ["     Subbox fuzzy-matches this against YouTube to find the right video."],
     ["     Example: Artist = \"Bicep\",  Title = \"Glue\""],
     [""],
-    ["  🟢  OPTION 3 — YouTube URL (most precise)"],
-    ["     Column: YouTube URL"],
-    ["     Paste the link. Subbox uses that exact video, no matching needed."],
-    ["     Supports youtube.com/watch, youtu.be, and Shorts links."],
+    ["  🟢  OPTION 3 — URL (most precise)"],
+    ["     Column: URL"],
+    ["     Paste a YouTube or Bandcamp track link. Subbox uses that exact track,"],
+    ["     no matching needed, and pulls Artist + Title from the link if you"],
+    ["     leave those blank. Supports youtube.com/watch, youtu.be, Shorts, and"],
+    ["     *.bandcamp.com/track links."],
     [""],
     ["━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"],
     ["STATUS COLUMN"],
@@ -238,7 +242,7 @@ def _format_wishlist_tab(wid, existing_protected_range_ids):
         _repeat_bg(wid, 0, 1, COL_RAW_NOTE, COL_RAW_NOTE + 1, H_NOTE),
         _repeat_bg(wid, 0, 1, COL_ARTIST,   COL_ARTIST + 1,   H_INPUT),
         _repeat_bg(wid, 0, 1, COL_TITLE,    COL_TITLE + 1,    H_INPUT),
-        _repeat_bg(wid, 0, 1, COL_YOUTUBE,  COL_YOUTUBE + 1,  H_URL),
+        _repeat_bg(wid, 0, 1, COL_URL,  COL_URL + 1,  H_URL),
         _repeat_bg(wid, 0, 1, COL_STATUS,   COL_STATUS + 1,   H_SUBBOX),
         _repeat_bg(wid, 0, 1, COL_ADDED,    COL_ADDED + 1,    H_SUBBOX),
     ]
@@ -273,7 +277,7 @@ def _format_wishlist_tab(wid, existing_protected_range_ids):
         _repeat_bg(wid, 1, DATA_ROWS + 1, COL_RAW_NOTE, COL_RAW_NOTE + 1, D_NOTE),
         _repeat_bg(wid, 1, DATA_ROWS + 1, COL_ARTIST,   COL_ARTIST + 1,   D_INPUT),
         _repeat_bg(wid, 1, DATA_ROWS + 1, COL_TITLE,    COL_TITLE + 1,    D_INPUT),
-        _repeat_bg(wid, 1, DATA_ROWS + 1, COL_YOUTUBE,  COL_YOUTUBE + 1,  D_URL),
+        _repeat_bg(wid, 1, DATA_ROWS + 1, COL_URL,  COL_URL + 1,  D_URL),
         _repeat_bg(wid, 1, DATA_ROWS + 1, COL_STATUS,   COL_STATUS + 1,   D_SUBBOX),
         _repeat_bg(wid, 1, DATA_ROWS + 1, COL_ADDED,    COL_ADDED + 1,    D_SUBBOX),
     ]
@@ -293,7 +297,7 @@ def _format_wishlist_tab(wid, existing_protected_range_ids):
         _col_width(wid, COL_RAW_NOTE, COL_RAW_NOTE + 1, 280),
         _col_width(wid, COL_ARTIST,   COL_ARTIST + 1,   180),
         _col_width(wid, COL_TITLE,    COL_TITLE + 1,    180),
-        _col_width(wid, COL_YOUTUBE,  COL_YOUTUBE + 1,  280),
+        _col_width(wid, COL_URL,  COL_URL + 1,  280),
         _col_width(wid, COL_STATUS,   COL_STATUS + 1,   130),
         _col_width(wid, COL_ADDED,    COL_ADDED + 1,    190),
     ]
