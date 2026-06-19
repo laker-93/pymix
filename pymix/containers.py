@@ -21,6 +21,10 @@ from pymix.orchestrators.rekordbox_xml_orchestrator import RekordboxXMLOrchestra
 from pymix.orchestrators.serato_crate_orchestrator import SeratoCrateOrchestrator
 from pymix.orchestrators.services_orchestrator import ServicesOrchestrator
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
+from pymix.services.google_sheets_service import GoogleSheetsService
+from pymix.services.link_parse_service import LinkParseService
+from pymix.services.sheet_sync_service import SheetSyncService
+from pymix.services.youtube_match_service import YoutubeMatchService
 
 
 class Container(containers.DeclarativeContainer):
@@ -159,4 +163,24 @@ class Container(containers.DeclarativeContainer):
         host=config.containers.beets.host,
         session=aiohttp_session,
         app_env=config.app_env
+    )
+
+    youtube_match_service = providers.Singleton(
+        YoutubeMatchService,
+    )
+
+    link_parse_service = providers.Singleton(
+        LinkParseService,
+    )
+
+    google_sheets_service = providers.Singleton(
+        GoogleSheetsService,
+        credentials_path=config.google_sheets.credentials_path,
+    )
+
+    sheet_sync_service = providers.Singleton(
+        SheetSyncService,
+        db_controller,
+        google_sheets_service,
+        link_parse_service,
     )

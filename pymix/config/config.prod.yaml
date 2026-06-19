@@ -43,3 +43,6 @@ subsonic:
   host: http:/localhost:4533
   username: lajp
   version: 1.16.1
+google_sheets:
+  credentials_path: /subbox/secrets/google-sheets-service-account.json
+  poll_interval_s: 300
