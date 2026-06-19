@@ -1,3 +1,4 @@
+import datetime
 import logging
 from typing import Optional, TypedDict
 
@@ -10,6 +11,7 @@ _SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 _SHEET_NAME = "Wishlist"
 _ROW_RANGE = f"{_SHEET_NAME}!A2:F"
 _STATUS_RANGE = f"{_SHEET_NAME}!E{{row}}:F{{row}}"
+_HEALTH_CHECK_RANGE = f"{_SHEET_NAME}!H1"
 
 
 class SheetRow(TypedDict):
@@ -61,4 +63,13 @@ class GoogleSheetsService:
             range=_STATUS_RANGE.format(row=row_index),
             valueInputOption="RAW",
             body={"values": [[status, added_at]]},
+        ).execute()
+
+    def check_write_access(self, sheet_id: str) -> None:
+        """Writes a timestamp to a health-check cell to verify edit access. Raises on failure."""
+        self._get_service().spreadsheets().values().update(
+            spreadsheetId=sheet_id,
+            range=_HEALTH_CHECK_RANGE,
+            valueInputOption="RAW",
+            body={"values": [[datetime.datetime.now().isoformat(timespec="seconds")]]},
         ).execute()

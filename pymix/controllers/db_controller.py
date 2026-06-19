@@ -516,6 +516,16 @@ class DbController:
             logger.info(f"Set wishlist_sheet_id for user {username}")
             return result
 
+    def update_wishlist_sheet_status(self, username: str, status: str, error: Optional[str]) -> dict:
+        with self._session_factory() as session:
+            row = session.query(UserRow).filter(UserRow.username == username).one()
+            row.wishlist_sheet_status = status
+            row.wishlist_sheet_error = error
+            session.commit()
+            result = _row_to_dict(row)
+            logger.info(f"Set wishlist_sheet_status={status!r} for user {username}")
+            return result
+
     def get_users_with_wishlist_sheet(self) -> list[dict]:
         with self._session_factory() as session:
             rows = session.query(UserRow).filter(UserRow.wishlist_sheet_id.isnot(None)).all()

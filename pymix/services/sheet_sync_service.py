@@ -4,10 +4,17 @@ import re
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
+from googleapiclient.errors import HttpError
+
 from pymix.controllers.db_controller import DbController
 from pymix.services.google_sheets_service import GoogleSheetsService, SheetRow
 
 logger = logging.getLogger(__name__)
+
+
+def _describe_error(e: Exception) -> str:
+    """HttpError.reason is the clean API-provided message; other exceptions have no such field."""
+    return e.reason if isinstance(e, HttpError) else str(e)
 
 _YOUTU_BE_RE = re.compile(r"youtu\.be/([^?&/]+)")
 _SHORTS_RE = re.compile(r"/shorts/([^?&/]+)")
@@ -61,10 +68,28 @@ class SheetSyncService:
 
         try:
             rows = self._google_sheets_service.read_rows(sheet_id)
-        except Exception:
+        except Exception as e:
             logger.exception(f"sheet sync: failed to read sheet for user {username}")
+            self._db_controller.update_wishlist_sheet_status(
+                username=username,
+                status="error",
+                error=f"pymix cannot read this sheet — check it's shared with the service account. ({_describe_error(e)})",
+            )
             return
         logger.info(f"sheet sync: read {len(rows)} row(s) for user {username}")
+
+        try:
+            self._google_sheets_service.check_write_access(sheet_id)
+            self._db_controller.update_wishlist_sheet_status(username=username, status="ok", error=None)
+        except Exception as e:
+            logger.exception(f"sheet sync: write-access check failed for user {username}")
+            self._db_controller.update_wishlist_sheet_status(
+                username=username,
+                status="error",
+                error=f"pymix can read but not edit this sheet — share it as Editor, not Viewer. ({_describe_error(e)})",
+            )
+            # Don't return: rows can still be imported via the signature-based dedup
+            # fallback below even without write-back access.
 
         # Dedup is content-based, not row-position-based, so it survives the user
         # deleting/reordering rows in the sheet. Status is the cheap primary guard

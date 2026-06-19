@@ -15,6 +15,8 @@ class UserRow(Base):
     subsonic_port = Column(Integer, nullable=False)
     max_library_size = Column(BigInteger, nullable=False)
     wishlist_sheet_id = Column(String, nullable=True)
+    wishlist_sheet_status = Column(String, nullable=True)
+    wishlist_sheet_error = Column(String, nullable=True)
 
 
 class SessionRow(Base):

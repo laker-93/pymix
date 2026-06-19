@@ -8,6 +8,7 @@ from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
 from pymix.model.api.wishlist_requests import CreateWishlistRequest, SetWishlistSheetRequest, UpdateWishlistRequest
 from pymix.model.wishlist import WISHLIST_STATUSES
+from pymix.services.sheet_sync_service import SheetSyncService
 from pymix.services.youtube_match_service import YoutubeMatchService
 
 router = APIRouter()
@@ -70,11 +71,30 @@ async def set_wishlist_sheet(
     session_id: Optional[str] = Cookie(None),
     username: Optional[str] = Query(None, description="Username for authentication"),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
+    sheet_sync_service: SheetSyncService = Depends(Provide[Container.sheet_sync_service]),
 ) -> dict:
     username = _resolve_username(db_controller, session_id, username)
 
-    db_controller.update_user_wishlist_sheet_id(username=username, sheet_id=body.sheet_id)
+    user = db_controller.update_user_wishlist_sheet_id(username=username, sheet_id=body.sheet_id)
+    sheet_sync_service.sync_user(user)
     return {"success": True}
+
+
+@router.get("/wishlist/sheet/status", tags=["wishlist"])
+@inject
+async def get_wishlist_sheet_status(
+    session_id: Optional[str] = Cookie(None),
+    username: Optional[str] = Query(None, description="Username for authentication"),
+    db_controller: DbController = Depends(Provide[Container.db_controller]),
+) -> dict:
+    username = _resolve_username(db_controller, session_id, username)
+
+    user = db_controller.get_user(username)
+    return {
+        "configured": user["wishlist_sheet_id"] is not None,
+        "status": user["wishlist_sheet_status"],
+        "error": user["wishlist_sheet_error"],
+    }
 
 
 @router.get("/wishlist/{wishlist_id}", tags=["wishlist"])
