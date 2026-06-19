@@ -67,11 +67,14 @@ HEADER_NOTES = {
         "Leave blank if you're using Raw Note or URL instead."
     ),
     COL_URL: (
-        "YouTube or Bandcamp URL — paste a direct link to the track.\n\n"
-        "Subbox will use this exact track, no matching needed, and will pull "
-        "Artist + Title from the link automatically if you leave those blank. "
-        "Supports youtube.com/watch, youtu.be, Shorts, and *.bandcamp.com/track "
-        "links.\n\n"
+        "YouTube or Bandcamp URL — paste a direct link to a track, or to a "
+        "playlist/album to add every track in it.\n\n"
+        "For a single track, Subbox uses that exact track, no matching needed, "
+        "and pulls Artist + Title from the link automatically if you leave those "
+        "blank. Supports youtube.com/watch, youtu.be, Shorts, and "
+        "*.bandcamp.com/track links.\n\n"
+        "For a playlist or album link (YouTube playlist, or a *.bandcamp.com/album "
+        "link), Subbox adds one wishlist item per track in it.\n\n"
         "Leave blank if you're using Artist + Title or Raw Note instead."
     ),
     COL_STATUS: (
@@ -109,12 +112,15 @@ INSTRUCTIONS_TEXT = [
     ["     Subbox fuzzy-matches this against YouTube to find the right video."],
     ["     Example: Artist = \"Bicep\",  Title = \"Glue\""],
     [""],
-    ["  🟢  OPTION 3 — URL (most precise)"],
+    ["  🟢  OPTION 3 — URL (most precise, also supports playlists/albums)"],
     ["     Column: URL"],
     ["     Paste a YouTube or Bandcamp track link. Subbox uses that exact track,"],
     ["     no matching needed, and pulls Artist + Title from the link if you"],
     ["     leave those blank. Supports youtube.com/watch, youtu.be, Shorts, and"],
     ["     *.bandcamp.com/track links."],
+    [""],
+    ["     Paste a YouTube playlist or Bandcamp album link instead, and Subbox"],
+    ["     adds every track in it as its own wishlist item."],
     [""],
     ["━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"],
     ["STATUS COLUMN"],
