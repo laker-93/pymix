@@ -523,7 +523,7 @@ class DbController:
             row.wishlist_sheet_error = error
             session.commit()
             result = _row_to_dict(row)
-            logger.info(f"Set wishlist_sheet_status={status!r} for user {username}")
+            logger.debug(f"Set wishlist_sheet_status={status!r} for user {username}")
             return result
 
     def get_users_with_wishlist_sheet(self) -> list[dict]:
