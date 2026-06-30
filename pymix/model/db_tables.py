@@ -1,5 +1,7 @@
-from sqlalchemy import Column, String, Integer, Boolean, Float, BigInteger, JSON
+from sqlalchemy import Column, String, Integer, Boolean, Float, BigInteger, JSON, Enum
 from sqlalchemy.orm import declarative_base
+
+from pymix.model.wishlist import WishlistStatus
 
 Base = declarative_base()
 
@@ -120,7 +122,14 @@ class WishlistRow(Base):
     album = Column(String)
     raw_note = Column(String)
 
-    status = Column(String, nullable=False)
+    status = Column(
+        Enum(
+            WishlistStatus,
+            name="wishlist_status",
+            values_callable=lambda e: [m.value for m in e],
+        ),
+        nullable=False,
+    )
 
     youtube_video_id = Column(String)
     youtube_url = Column(String)

@@ -19,6 +19,7 @@ from pymix.handlers.rb_backup_file_handler import RBBackupFileHandler
 from pymix.model.subboxplaylist import SubBoxPlaylist
 from pymix.orchestrators.rekordbox_xml_orchestrator import RekordboxXMLOrchestrator
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
+from pymix.services.wishlist_reconcile_service import WishlistReconcileService
 from pyserato.encoders.serato_tags import clear_all_tags
 from pyserato.encoders.v2_mp3_encoder import V2Mp3Encoder
 from pyserato.model.hot_cue import HotCue
@@ -55,6 +56,7 @@ class RekordboxXMLController:
             file_browser_file_handler: FileBrowserFileHandler,
             subsonic_client: SubsonicClient,
             db_controller: DbController,
+            wishlist_reconcile_service: WishlistReconcileService,
             restored_db_output_root: str,
             local_user_music_stem: str,
             serving_music_path_base: str
@@ -64,6 +66,7 @@ class RekordboxXMLController:
         self._rb_backup_file_handler = rb_backup_file_handler
         self._file_browser_file_handler = file_browser_file_handler
         self._db_controller = db_controller
+        self._wishlist_reconcile_service = wishlist_reconcile_service
         self._restored_db_output_root = restored_db_output_root
         self._subsonic_client = subsonic_client
         self._local_user_music_stem = local_user_music_stem
@@ -219,7 +222,17 @@ class RekordboxXMLController:
 
     # todo this controller is overloaded; this method has nothing to do with rekordbox xml and should live elsewhere.
     async def consume_from_filebrowser(self, username: str, public: bool, watch: bool = False) -> str:
-        return await anyio.to_thread.run_sync(self._consume_from_filebrowser, username, public, watch)
+        result = await anyio.to_thread.run_sync(self._consume_from_filebrowser, username, public, watch)
+        # Once the import has landed in beets (subbox_ids mapped), resolve any open
+        # wishlist items whose track now exists in the user's Navidrome. Only for the
+        # user's own (private) library — public imports don't reach a user's Navidrome.
+        if not public:
+            try:
+                user = self._db_controller.get_user(username)
+                await self._wishlist_reconcile_service.reconcile_user(user)
+            except Exception:
+                logger.exception(f"wishlist reconcile after import failed for {username}")
+        return result
 
     @staticmethod
     def _resolve_path_with_special_chars(p: Path) -> Optional[Path]:

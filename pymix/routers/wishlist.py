@@ -16,6 +16,7 @@ from pymix.model.api.wishlist_requests import (
 from pymix.model.wishlist import WISHLIST_STATUSES
 from pymix.services.link_parse_service import LinkParseService
 from pymix.services.sheet_sync_service import SheetSyncService
+from pymix.services.wishlist_reconcile_service import WishlistReconcileService
 from pymix.services.youtube_match_service import YoutubeMatchService
 
 router = APIRouter()
@@ -145,6 +146,23 @@ async def get_wishlist_sheet_status(
         "error": user["wishlist_sheet_error"],
         "sheet_url": f"https://docs.google.com/spreadsheets/d/{sheet_id}" if sheet_id else None,
     }
+
+
+@router.post("/wishlist/reconcile", tags=["wishlist"])
+@inject
+async def reconcile_wishlist(
+    session_id: Optional[str] = Cookie(None),
+    username: Optional[str] = Query(None, description="Username for authentication"),
+    db_controller: DbController = Depends(Provide[Container.db_controller]),
+    wishlist_reconcile_service: WishlistReconcileService = Depends(
+        Provide[Container.wishlist_reconcile_service]
+    ),
+) -> dict:
+    username = _resolve_username(db_controller, session_id, username)
+
+    user = db_controller.get_user(username)
+    resolved = await wishlist_reconcile_service.reconcile_user(user)
+    return {"resolved": resolved}
 
 
 @router.get("/wishlist/{wishlist_id}", tags=["wishlist"])

@@ -14,6 +14,7 @@ from pymix.handlers.serato_backup_file_handler import SeratoBackupFileHandler
 from pymix.model.subboxplaylist import SubBoxPlaylist
 from pymix.orchestrators.serato_crate_orchestrator import SeratoCrateOrchestrator
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
+from pymix.services.wishlist_reconcile_service import WishlistReconcileService
 from pymix.utils.make_readable import make_readable
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ class SeratoController:
         rb_backup_file_handler: RBBackupFileHandler,
         rb_xml_controller: RekordboxXMLController,
         db_controller: DbController,
+        wishlist_reconcile_service: WishlistReconcileService,
         serving_music_path_base: str
     ):
         self._subsonic_orchestrator = subsonic_orchestrator
@@ -38,6 +40,7 @@ class SeratoController:
         self._rb_backup_file_handler = rb_backup_file_handler
         self._rb_xml_controller = rb_xml_controller
         self._db_controller = db_controller
+        self._wishlist_reconcile_service = wishlist_reconcile_service
         self._serving_music_path_base = serving_music_path_base
 
 
@@ -143,6 +146,11 @@ class SeratoController:
         await self._subsonic_orchestrator.scan(user)
         await anyio.sleep(2)
         await self._set_data_from_crates(user, serato_crate_path)
+        # Resolve any open wishlist items whose track is now in the user's Navidrome.
+        try:
+            await self._wishlist_reconcile_service.reconcile_user(user)
+        except Exception:
+            logger.exception(f"wishlist reconcile after serato import failed for {username}")
         # the fb path is removed here as it's needed for processing the .crate files so can't be removed in
         # import_to_beets stage. Also we only want to remove data in fb once import is successful to avoid
         # unnecessarily having to reupload data from the client after a beets import failure

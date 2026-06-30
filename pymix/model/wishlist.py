@@ -1,8 +1,25 @@
 from typing import Optional
 import dataclasses
+import enum
 
 
-WISHLIST_STATUSES = ("inbox", "wishlist", "downloaded", "imported", "available", "ignored")
+class WishlistStatus(str, enum.Enum):
+    """The states a wishlist item can occupy.
+
+    ``imported`` and ``available`` used to be distinct, but both meant "in the
+    collection / playable now" — Navidrome serves directly off the beets library, so
+    "in beets" already means "playable". They are collapsed into ``available``.
+    """
+
+    INBOX = "inbox"           # raw note, not yet curated into artist/title
+    WISHLIST = "wishlist"     # curated, want to acquire (artist + title known)
+    DOWNLOADED = "downloaded"  # file has landed but not yet in beets
+    AVAILABLE = "available"   # in the collection / playable now
+    IGNORED = "ignored"
+
+
+# Tuple of the string values, for the existing membership-validation call-sites.
+WISHLIST_STATUSES = tuple(s.value for s in WishlistStatus)
 
 
 @dataclasses.dataclass

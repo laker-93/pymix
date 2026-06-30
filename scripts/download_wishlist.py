@@ -79,6 +79,11 @@ long command lines:
     SLSKD_URL, SLSKD_USERNAME, SLSKD_PASSWORD, SLSKD_API_KEY, SLSKD_DOWNLOADS_DIR
 
 Use ``--dry-run`` to see what *would* be downloaded without enqueuing anything.
+
+Add ``--watch`` to keep it running: after each pass it sleeps ``--interval`` seconds
+(default 300) and re-checks the wishlist, picking up anything newly added or still
+missing. A failing pass (e.g. a brief network blip) is logged and the watcher keeps
+going; Ctrl-C stops it.
 """
 
 from __future__ import annotations
@@ -413,16 +418,33 @@ class Slskd:
         return {"Authorization": f"Bearer {self._token}"}
 
     def search(self, text: str, wait: float, poll: float = 1.5) -> list[dict]:
-        """Start a search, wait for it to complete (or time out), return responses."""
+        """Start a search, wait for slskd to gather results, and return the responses.
+
+        Soulseek search is peer-to-peer and asynchronous: slskd forwards the query to
+        the network and matches *trickle back* over several seconds, only marking the
+        search ``Completed`` once its own server-side search timeout elapses — on a
+        stock slskd that's ~15s. So we must wait for slskd to declare the search
+        finished; ``wait`` is only a hard cap (the loop breaks early the moment slskd
+        reports completion). Bailing out before then routinely returns an empty list
+        even when the identical query in the slskd UI shows plenty of files a few
+        seconds later — the UI is simply being read after the results have landed.
+        """
         created = http_request(
             "POST", self._url("searches"), json_body={"searchText": text}, headers=self.headers, timeout=self.timeout
         )
         search_id = created.get("id")
         deadline = time.monotonic() + wait
-        while time.monotonic() < deadline:
+        while True:
             time.sleep(poll)
             state = http_request("GET", self._url(f"searches/{search_id}"), headers=self.headers, timeout=self.timeout)
-            if state.get("isComplete") or "Completed" in str(state.get("state", "")):
+            # slskd signals completion via `isComplete`, an `endedAt` timestamp, or a
+            # `state` string containing "Completed" (which spelling varies by version).
+            complete = bool(
+                state.get("isComplete")
+                or state.get("endedAt")
+                or "Completed" in str(state.get("state", ""))
+            )
+            if complete or time.monotonic() >= deadline:
                 break
         responses = http_request(
             "GET", self._url(f"searches/{search_id}/responses"), headers=self.headers, timeout=self.timeout
@@ -631,11 +653,20 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--match-threshold", type=float, default=0.85,
                    help="Fuzzy similarity (0-1) above which a wishlist item counts as already owned.")
     p.add_argument("--max-downloads", type=int, default=0, help="Cap the number of downloads (0 = no cap).")
-    p.add_argument("--search-wait", type=float, default=8.0, help="Seconds to gather Soulseek search results.")
+    p.add_argument("--search-wait", type=float, default=30.0,
+                   help="Hard cap (seconds) on gathering Soulseek search results per item. "
+                        "slskd usually completes its own search in ~15s and we stop as soon as "
+                        "it does, so this is just an upper bound for slow/quiet queries.")
     p.add_argument("--download-timeout", type=float, default=600.0,
                    help="Max seconds to wait for all transfers to finish.")
     p.add_argument("--no-wait", action="store_true",
                    help="Enqueue downloads and exit without waiting/moving.")
+    p.add_argument("--watch", action="store_true",
+                   help="Run continuously: after each pass, sleep --interval and check the "
+                        "wishlist again, downloading anything newly added or still missing. "
+                        "Ctrl-C to stop.")
+    p.add_argument("--interval", type=float, default=300.0,
+                   help="Seconds to sleep between passes in --watch mode.")
     p.add_argument("--dry-run", action="store_true",
                    help="Show missing tracks and chosen files without enqueuing.")
     p.add_argument("--insecure", action="store_true",
@@ -653,33 +684,17 @@ def build_slskd(args: argparse.Namespace) -> Optional[Slskd]:
     return None
 
 
-def main(argv: Optional[list[str]] = None) -> int:
-    args = parse_args(argv)
+def run_once(
+    args: argparse.Namespace,
+    navidrome_url: str,
+    slskd_downloads_dir: Optional[Path],
+) -> int:
+    """Do one full pass: fetch wishlist → diff against the library → search/enqueue/move.
 
-    if args.insecure:
-        global _INSECURE_TLS
-        _INSECURE_TLS = True
-
-    have_slskd_auth = bool(args.slskd_api_key or (args.slskd_username and args.slskd_password))
-    if not args.dry_run and not have_slskd_auth:
-        print(
-            "error: slskd credentials required unless --dry-run — pass --slskd-api-key, "
-            "or --slskd-username and --slskd-password.",
-            file=sys.stderr,
-        )
-        return 2
-
-    if not args.username:
-        print("error: --username (or PYMIX_USERNAME) is required.", file=sys.stderr)
-        return 2
-    if not args.password:
-        print("error: --password (or PYMIX_PASSWORD) is required.", file=sys.stderr)
-        return 2
-
-    navidrome_url = args.navidrome_url or default_navidrome_url(args.username)
-
-    slskd_downloads_dir = args.slskd_downloads_dir or default_slskd_downloads_dir()
-
+    Returns a process exit code. In --watch mode the caller ignores it and keeps
+    looping, so a transient failure here (wishlist fetch, Navidrome ping) ends only
+    the current pass, not the watcher.
+    """
     # 1. wishlist
     try:
         wishlist = fetch_wishlist(args.pymix_url, args.username, args.session_id, args.status)
@@ -769,5 +784,57 @@ def main(argv: Optional[list[str]] = None) -> int:
     return 0
 
 
+def main(argv: Optional[list[str]] = None) -> int:
+    args = parse_args(argv)
+
+    if args.insecure:
+        global _INSECURE_TLS
+        _INSECURE_TLS = True
+
+    have_slskd_auth = bool(args.slskd_api_key or (args.slskd_username and args.slskd_password))
+    if not args.dry_run and not have_slskd_auth:
+        print(
+            "error: slskd credentials required unless --dry-run — pass --slskd-api-key, "
+            "or --slskd-username and --slskd-password.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not args.username:
+        print("error: --username (or PYMIX_USERNAME) is required.", file=sys.stderr)
+        return 2
+    if not args.password:
+        print("error: --password (or PYMIX_PASSWORD) is required.", file=sys.stderr)
+        return 2
+
+    navidrome_url = args.navidrome_url or default_navidrome_url(args.username)
+    slskd_downloads_dir = args.slskd_downloads_dir or default_slskd_downloads_dir()
+
+    if not args.watch:
+        return run_once(args, navidrome_url, slskd_downloads_dir)
+
+    # --watch: loop forever, surviving per-pass errors, until the user interrupts.
+    print(f"watch mode: checking the wishlist every {args.interval:.0f}s (Ctrl-C to stop)\n")
+    while True:
+        started = time.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"=== pass @ {started} ===")
+        try:
+            run_once(args, navidrome_url, slskd_downloads_dir)
+        except RuntimeError as exc:
+            # run_once already handles its own expected failures; this is a backstop
+            # so an unexpected one ends the pass, not the watcher.
+            print(f"  ! pass failed: {exc}", file=sys.stderr)
+        try:
+            print(f"\nsleeping {args.interval:.0f}s until next pass…\n")
+            time.sleep(args.interval)
+        except KeyboardInterrupt:
+            print("\nstopping watch.")
+            return 0
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("\ninterrupted.")
+        raise SystemExit(130)

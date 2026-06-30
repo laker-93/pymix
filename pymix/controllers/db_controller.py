@@ -732,10 +732,10 @@ class DbController:
             rows = session.query(WishlistRow).filter(WishlistRow.status.in_(statuses)).all()
             return [_row_to_dict(r) for r in rows]
 
-    def mark_wishlist_item_imported(self, wishlist_id: str, linked_subbox_id: str):
+    def mark_wishlist_item_available(self, wishlist_id: str, linked_subbox_id: str):
         with self._session_factory() as session:
             row = session.query(WishlistRow).filter(WishlistRow.wishlist_id == wishlist_id).one()
-            row.status = "imported"
+            row.status = "available"
             row.linked_subbox_id = linked_subbox_id
             row.updated_at = datetime.datetime.now().timestamp()
             session.commit()
