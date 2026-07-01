@@ -54,6 +54,8 @@ def _row_signature(row: SheetRow) -> Optional[tuple]:
             return ("youtube", _extract_video_id(row["url"]))
         if source == "bandcamp":
             return ("bandcamp", row["url"].strip().lower())
+        if source == "soundcloud":
+            return ("soundcloud", row["url"].strip().lower())
     if row["artist"] and row["title"]:
         return ("artist_title", row["artist"].strip().lower(), row["title"].strip().lower())
     if row["raw_note"]:
@@ -67,6 +69,8 @@ def _item_signature(item: dict) -> Optional[tuple]:
         return ("youtube", item["youtube_video_id"])
     if item.get("bandcamp_url"):
         return ("bandcamp", item["bandcamp_url"].strip().lower())
+    if item.get("soundcloud_url"):
+        return ("soundcloud", item["soundcloud_url"].strip().lower())
     if item.get("artist") and item.get("title"):
         return ("artist_title", item["artist"].strip().lower(), item["title"].strip().lower())
     if item.get("raw_note"):
@@ -221,6 +225,7 @@ class SheetSyncService:
                             "youtube_url": track.get("youtube_url"),
                             "youtube_video_id": track.get("youtube_video_id"),
                             "bandcamp_url": track.get("bandcamp_url"),
+                            "soundcloud_url": track.get("soundcloud_url"),
                         }
                         for track in tracks
                     ],
@@ -233,10 +238,12 @@ class SheetSyncService:
                 artist = row["artist"] or (metadata["artist"] if metadata else None)
                 title = row["title"] or (metadata["title"] if metadata else None)
 
-                youtube_url = youtube_video_id = bandcamp_url = None
+                youtube_url = youtube_video_id = bandcamp_url = soundcloud_url = None
                 if source == "youtube":
                     youtube_url = row["url"]
                     youtube_video_id = _extract_video_id(row["url"])
+                elif source == "soundcloud":
+                    soundcloud_url = row["url"]
                 else:
                     bandcamp_url = row["url"]
 
@@ -248,6 +255,7 @@ class SheetSyncService:
                     youtube_url=youtube_url,
                     youtube_video_id=youtube_video_id,
                     bandcamp_url=bandcamp_url,
+                    soundcloud_url=soundcloud_url,
                 )
                 logger.info(f"sheet sync: row {row_index} for user {username} imported via {source} url")
         elif row["artist"] and row["title"]:

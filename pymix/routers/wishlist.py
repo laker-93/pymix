@@ -69,6 +69,7 @@ async def create_wishlist_item(
         youtube_video_id=body.youtube_video_id,
         youtube_url=body.youtube_url,
         bandcamp_url=body.bandcamp_url,
+        soundcloud_url=body.soundcloud_url,
         status=body.initial_status,
     )
     return {"item": item}

@@ -623,6 +623,7 @@ class DbController:
             youtube_video_id: Optional[str] = None,
             youtube_url: Optional[str] = None,
             bandcamp_url: Optional[str] = None,
+            soundcloud_url: Optional[str] = None,
     ) -> dict:
         user = self.get_user(username)
         user_id = user['user_id']
@@ -640,6 +641,7 @@ class DbController:
                 youtube_video_id=youtube_video_id,
                 youtube_url=youtube_url,
                 bandcamp_url=bandcamp_url,
+                soundcloud_url=soundcloud_url,
                 created_at=now,
                 updated_at=now,
             )
@@ -667,6 +669,7 @@ class DbController:
                     youtube_video_id=item.get('youtube_video_id'),
                     youtube_url=item.get('youtube_url'),
                     bandcamp_url=item.get('bandcamp_url'),
+                    soundcloud_url=item.get('soundcloud_url'),
                     created_at=now,
                     updated_at=now,
                 )

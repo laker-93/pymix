@@ -134,6 +134,7 @@ class WishlistRow(Base):
     youtube_video_id = Column(String)
     youtube_url = Column(String)
     bandcamp_url = Column(String)
+    soundcloud_url = Column(String)
 
     linked_subbox_id = Column(String)
 

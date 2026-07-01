@@ -34,6 +34,7 @@ class WishlistItem:
     youtube_video_id: Optional[str] = None
     youtube_url: Optional[str] = None
     bandcamp_url: Optional[str] = None
+    soundcloud_url: Optional[str] = None
     linked_subbox_id: Optional[str] = None
     created_at: Optional[float] = None
     updated_at: Optional[float] = None
