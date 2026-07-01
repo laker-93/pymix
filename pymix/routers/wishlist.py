@@ -161,8 +161,8 @@ async def reconcile_wishlist(
     username = _resolve_username(db_controller, session_id, username)
 
     user = db_controller.get_user(username)
-    resolved = await wishlist_reconcile_service.reconcile_user(user)
-    return {"resolved": resolved}
+    result = await wishlist_reconcile_service.reconcile_user(user)
+    return {"resolved": result.resolved}
 
 
 @router.get("/wishlist/{wishlist_id}", tags=["wishlist"])

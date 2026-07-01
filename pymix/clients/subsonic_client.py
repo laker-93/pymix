@@ -152,7 +152,9 @@ class SubsonicClient(BaseAPIClient):
         try:
             resp = response['subsonic-response'][search_result]['song']
         except KeyError:
-            logger.error(f'no songs found in response {response}')
+            # An empty search result is a normal outcome (e.g. a wishlist item whose
+            # track isn't in the library yet), not an error — keep it at debug.
+            logger.debug(f'no songs found in response {response}')
             resp = []
         n_items = len(resp)
         return [
@@ -282,36 +284,47 @@ class SubsonicClient(BaseAPIClient):
             yield tracks
             offset += batch_size
 
-    async def _get_best_track_match(self, title: str, artist: str, album: Optional[str], tracks: List[SubBoxTrack], similarity_threshold: float) -> \
+    async def _get_best_track_match(self, title: str, artist: str, album: Optional[str], tracks: List[SubBoxTrack], similarity_threshold: float, log: bool = True) -> \
     Optional[tuple[SubBoxTrack, float]]:
         match = None
-        if len(tracks) > 1:
+        if len(tracks) > 1 and log:
             logger.info(f'found multiple matches for {title} by {artist} in subsonic')
         if len(tracks) >= 1:
-            match = await self._find_best_match(title, artist, tracks, album, similarity_threshold)
+            match = await self._find_best_match(title, artist, tracks, album, similarity_threshold, log=log)
         return match
 
-    async def get_track_match(self, user: dict, title: str, artist: str, album: Optional[str] = None) -> Optional[
+    async def get_track_match(self, user: dict, title: str, artist: str, album: Optional[str] = None, log: bool = True) -> Optional[
         tuple[SubBoxTrack, float]]:
+        """Find the best Navidrome track for ``title``/``artist``.
+
+        ``log`` gates this method's per-item search logging (the progressive
+        "no matches querying by ..." / "failed to find match" lines and the
+        similarity diagnostics in the helpers). Callers that run this in a tight loop
+        over many items — e.g. the background wishlist reconcile sweep — pass
+        ``log=False`` and emit a single aggregated summary instead.
+        """
         clean_title = extract_track_name(title, artist, album)
         if clean_title is None:
-            logger.error(f'failed to clean track name from {title} by {artist} and {album}')
+            if log:
+                logger.error(f'failed to clean track name from {title} by {artist} and {album}')
         else:
             title = clean_title
 
         candidate_tracks = await self.query_tracks_by(user, title, artist)
         match = await self._get_best_track_match(title, artist, album,
-                                                candidate_tracks, 0.8)
+                                                candidate_tracks, 0.8, log=log)
         if match:
             return match
 
-        logger.info(f'no matches querying by {title} and {artist}. Querying on title only...')
+        if log:
+            logger.info(f'no matches querying by {title} and {artist}. Querying on title only...')
         candidate_tracks = await self.query_track_by_name(user, title)
-        match = await self._get_best_track_match(title, artist, album, candidate_tracks, 0.6)
+        match = await self._get_best_track_match(title, artist, album, candidate_tracks, 0.6, log=log)
         if match:
             return match
 
-        logger.info(f'no matches querying by {title}. Querying on tokens of title...')
+        if log:
+            logger.info(f'no matches querying by {title}. Querying on tokens of title...')
         candidate_tracks = []
         for token in title.split():
             # skip common words that will give false positives
@@ -320,11 +333,12 @@ class SubsonicClient(BaseAPIClient):
             candidate_tracks.extend(
                 await self.query_track_by_name(user, token)
             )
-        match = await self._get_best_track_match(title, artist, album, candidate_tracks, 0.4)
+        match = await self._get_best_track_match(title, artist, album, candidate_tracks, 0.4, log=log)
         if match:
             return match
 
-        logger.error(f'failed to find match on {title} or any of its tokens')
+        if log:
+            logger.info(f'failed to find match on {title} or any of its tokens')
         return None
 
     async def query_tracks_by(self, user: dict, title: str, artist: str) -> List[SubBoxTrack]:
@@ -363,7 +377,7 @@ class SubsonicClient(BaseAPIClient):
             raise KeyError(f'unable to parse tracks from url query {url}') from ex
         return tracks
 
-    async def _find_best_match(self, title: str, artist: str, tracks: List[SubBoxTrack], album: Optional[str], similarity_threshold: float) -> \
+    async def _find_best_match(self, title: str, artist: str, tracks: List[SubBoxTrack], album: Optional[str], similarity_threshold: float, log: bool = True) -> \
     Optional[tuple[SubBoxTrack, float]]:
         results = {}
 
@@ -399,7 +413,7 @@ class SubsonicClient(BaseAPIClient):
 
             if fallback_similarity >= similarity_threshold:
                 results[fallback_similarity] = track
-            else:
+            elif log:
                 logger.warning(
                     f"No good match ({fallback_similarity:.3f} < {similarity_threshold}) for '{title}' by '{artist}' against track '{track}'"
                 )
@@ -408,7 +422,8 @@ class SubsonicClient(BaseAPIClient):
 
         max_similarity = max(results.keys())
         result = results[max_similarity]
-        logger.info(f'matched query of {title} by {artist} to {result} with similarity {max_similarity} out of {len(results)} candidates')
+        if log:
+            logger.info(f'matched query of {title} by {artist} to {result} with similarity {max_similarity} out of {len(results)} candidates')
         return result, max_similarity
 
 

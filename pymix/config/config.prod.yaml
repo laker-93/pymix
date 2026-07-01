@@ -46,3 +46,8 @@ subsonic:
 google_sheets:
   credentials_path: /subbox/secrets/google-sheets-service-account.json
   poll_interval_s: 300
+wishlist:
+  # how often the background loop re-checks open wishlist items against each
+  # user's Navidrome library (catches tracks that only become queryable after
+  # Navidrome finishes scanning a fresh import)
+  reconcile_interval_s: 90

@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import List, Optional
 import mediafile
 import music_tag
-import taglib
 from beets.plugins import BeetsPlugin
 from beets.library import Item
 from python_on_whales import docker
@@ -194,11 +193,8 @@ class RekordboxXMLController:
                     logger.warning(f"Could not resolve path for beet_id={beet_id}, skipping.")
                     continue
                 logger.info(f"Resolved path with special chars: {p}")
-            with taglib.File(p) as song:
-                subbox_tag = song.tags.get("SUBBOX_ID")
-            if subbox_tag:
-                subbox_id = subbox_tag[0]
-            else:
+            subbox_id = get_subbox_id(p)
+            if not subbox_id:
                 logger.warning(f"No subbox_id tag found for {p}, skipping.")
                 continue
             # 4️⃣ Add mapping to DB
@@ -265,9 +261,8 @@ class RekordboxXMLController:
             if not f.is_file():
                 continue
             try:
-                with taglib.File(str(f), save_on_exit=False) as song:
-                    subbox_tag = song.tags.get("SUBBOX_ID")
-                    tag_val = subbox_tag[0] if subbox_tag else "<MISSING>"
+                subbox_id = get_subbox_id(f)
+                tag_val = subbox_id if subbox_id else "<MISSING>"
                 logger.info(f'[{label}] {f.name} → SUBBOX_ID={tag_val}')
             except Exception:
                 logger.info(f'[{label}] {f.name} → <UNREADABLE>')

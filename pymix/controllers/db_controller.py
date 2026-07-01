@@ -41,7 +41,23 @@ class DbController:
                 ).first()
 
                 if existing:
-                    raise ValueError(f"already got entry with subbox id {subbox_id}")
+                    # A subbox_id is a stable, unique track identity, so re-seeing one
+                    # means the track was already mapped on an earlier import. Treat this
+                    # idempotently rather than raising: a single already-mapped track must
+                    # not fail the whole import. Refresh the beet_id if beets re-imported
+                    # the track under a new id.
+                    if existing.beet_id != beet_id:
+                        logger.info(
+                            f"updating beet mapping for {username}: "
+                            f"{subbox_id} {existing.beet_id} → {beet_id}"
+                        )
+                        existing.beet_id = beet_id
+                        session.commit()
+                    else:
+                        logger.warning(
+                            f"beet mapping already present for {username}: {subbox_id} → {beet_id}"
+                        )
+                    return _row_to_dict(existing)
 
                 new_record = SubboxBeetsMapRow(
                     user_id=user_id,
@@ -730,6 +746,23 @@ class DbController:
         """
         with self._session_factory() as session:
             rows = session.query(WishlistRow).filter(WishlistRow.status.in_(statuses)).all()
+            return [_row_to_dict(r) for r in rows]
+
+    def get_users_with_open_wishlist_items(self, statuses: tuple[str, ...]) -> list[dict]:
+        """Return the full user records (username + password) for every user that has
+        at least one wishlist item in one of the given statuses.
+
+        Used by the background reconcile loop to know which users are worth re-checking
+        against Navidrome, without loading every user's items up front.
+        """
+        with self._session_factory() as session:
+            rows = (
+                session.query(UserRow)
+                .join(WishlistRow, WishlistRow.user_id == UserRow.user_id)
+                .filter(WishlistRow.status.in_(statuses))
+                .distinct()
+                .all()
+            )
             return [_row_to_dict(r) for r in rows]
 
     def mark_wishlist_item_available(self, wishlist_id: str, linked_subbox_id: str):

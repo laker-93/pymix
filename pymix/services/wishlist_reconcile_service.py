@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 
 from pymix.clients.subsonic_client import SubsonicClient
@@ -11,6 +12,24 @@ logger = logging.getLogger(__name__)
 # artist/title to query on); ``available`` / ``ignored`` are terminal so we never
 # re-scan them.
 _OPEN_STATUSES = (WishlistStatus.WISHLIST.value, WishlistStatus.DOWNLOADED.value)
+
+
+@dataclasses.dataclass
+class ReconcileResult:
+    """Per-user outcome of one reconcile pass, for the caller to log/aggregate.
+
+    ``matched`` / ``unmatched`` hold ``"artist - title"`` labels; ``skipped`` counts
+    items with no clean artist/title to query on.
+    """
+
+    username: str
+    matched: list[str] = dataclasses.field(default_factory=list)
+    unmatched: list[str] = dataclasses.field(default_factory=list)
+    skipped: int = 0
+
+    @property
+    def resolved(self) -> int:
+        return len(self.matched)
 
 
 class WishlistReconcileService:
@@ -27,13 +46,19 @@ class WishlistReconcileService:
         self._db = db_controller
         self._subsonic = subsonic_client
 
-    async def reconcile_user(self, user: dict) -> int:
+    async def reconcile_user(self, user: dict, quiet: bool = False) -> ReconcileResult:
         """Reconcile one user's open wishlist items against their Navidrome library.
 
-        Returns the number of items flipped to ``available``. A single failed search is
-        logged and skipped — it must never abort the sweep (or an import that triggered
-        it). ``user`` must be the full record (username + password) so the Subsonic
-        client can authenticate.
+        Returns a :class:`ReconcileResult` describing what was matched, left unmatched,
+        and skipped. A single failed search is logged and skipped — it must never abort
+        the sweep (or an import that triggered it). ``user`` must be the full record
+        (username + password) so the Subsonic client can authenticate.
+
+        When ``quiet`` is set (the background sweep over every open item), all per-item
+        logging — both this method's and the underlying Subsonic search's — is
+        suppressed; the caller is expected to emit one aggregated summary from the
+        returned result instead. Import-triggered calls leave ``quiet`` False so each
+        match is logged inline.
         """
         username = user["username"]
         items = [
@@ -41,20 +66,28 @@ class WishlistReconcileService:
             for status in _OPEN_STATUSES
             for item in self._db.get_wishlist_items(username, status=status)
         ]
-        logger.info(f"reconciling {len(items)} open wishlist item(s) for user {username}")
+        if not quiet:
+            logger.info(f"reconciling {len(items)} open wishlist item(s) for user {username}")
 
-        resolved = 0
+        result = ReconcileResult(username=username)
         for item in items:
             artist = item.get("artist")
             title = item.get("title")
             if not artist or not title:
+                result.skipped += 1
                 continue
+            label = f"{artist} - {title}"
             try:
-                match = await self._subsonic.get_track_match(user, title, artist, item.get("album"))
+                match = await self._subsonic.get_track_match(
+                    user, title, artist, item.get("album"), log=not quiet
+                )
             except Exception:
-                logger.exception(f"reconcile: Navidrome search failed for {artist} - {title}")
+                # A real error (not a no-match) — always surface it, even when quiet.
+                logger.exception(f"reconcile: Navidrome search failed for {label}")
+                result.unmatched.append(label)
                 continue
             if not match:
+                result.unmatched.append(label)
                 continue
 
             track, _score = match
@@ -64,10 +97,11 @@ class WishlistReconcileService:
                 item["wishlist_id"],
                 {"status": WishlistStatus.AVAILABLE.value, "linked_subbox_id": subbox_id},
             )
-            resolved += 1
-            logger.info(
-                f"reconcile: marked wishlist item {item['wishlist_id']} ({artist} - {title}) "
-                f"available, linked subbox_id {subbox_id}"
-            )
+            result.matched.append(label)
+            if not quiet:
+                logger.info(
+                    f"reconcile: marked wishlist item {item['wishlist_id']} ({label}) "
+                    f"available, linked subbox_id {subbox_id}"
+                )
 
-        return resolved
+        return result

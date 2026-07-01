@@ -12,7 +12,9 @@ For each wishlist item, it asks your Navidrome instance (which serves directly o
 your beets collection) whether the track already exists by searching its index on
 artist/title. Only items with no match are considered missing. For each missing item
 it then searches Soulseek through slskd, picks the best available file, enqueues the
-download, waits for it to finish, and moves the finished file into ``--download-dir``.
+download and waits for it to finish. slskd writes the file into the directory it's
+configured with (point that at your Subbox watch dir), and Subbox's watch importer
+ingests it from there — this script never touches the download directory itself.
 
 Querying Navidrome's search per item -- rather than pulling the whole collection and
 diffing locally -- keeps this cheap on large libraries: it's a handful of indexed,
@@ -41,11 +43,19 @@ Easiest: use the helper script for your platform — they sit alongside this one
     scripts/run-slskd-macos-x64.sh       # macOS, Intel
     scripts/run-slskd-windows.ps1        # Windows
 
-On first run it downloads slskd; every run it prompts for your credentials, launches
-slskd, verifies the login, and prints the exact ``download_wishlist.py`` command to
-copy — pre-filled with the matching ``--slskd-url``, ``--slskd-username`` and
-``--slskd-downloads-dir``. It also caches the credentials so later runs don't
-re-prompt, and leaves slskd at http://localhost:5030 (your ``--slskd-url``).
+On first run it downloads slskd; every run it prompts for your credentials and the
+directory you want finished tracks in (your Subbox watch dir), launches slskd pointed
+at that dir, verifies the login, and prints the exact ``download_wishlist.py`` command
+to copy — pre-filled with the matching ``--slskd-url`` and ``--slskd-username``. It
+also caches the credentials and dir so later runs don't re-prompt, and leaves slskd at
+http://127.0.0.1:5030 (your ``--slskd-url``).
+
+This script never touches the download directory itself — it only talks to the pymix,
+Navidrome and slskd HTTP APIs. slskd is the one that writes files, so you tell *slskd*
+where they go (the run script does this for you via its prompt; an slskd you run by
+hand needs its ``downloads`` dir set to your watch dir). Once a download completes,
+Subbox's watch importer picks it up from there, including from slskd's per-uploader
+subfolder, so no move step is needed.
 
 You enter ONE username/password and the run script uses it for both credentials slskd
 needs — keep the distinction in mind if you ever configure slskd by hand:
@@ -65,7 +75,6 @@ also works and takes precedence over the web login if both are given.)
 Usage (minimal):
 
     python3 scripts/download_wishlist.py \
-        --download-dir ~/Music/wishlist \
         --username alice \
         --password "$SUBBOX_PASSWORD" \
         --slskd-username "$SLSKD_USERNAME" \
@@ -76,9 +85,13 @@ long command lines:
 
     PYMIX_URL, PYMIX_USERNAME, PYMIX_PASSWORD, PYMIX_SESSION_ID,
     NAVIDROME_URL,
-    SLSKD_URL, SLSKD_USERNAME, SLSKD_PASSWORD, SLSKD_API_KEY, SLSKD_DOWNLOADS_DIR
+    SLSKD_URL, SLSKD_USERNAME, SLSKD_PASSWORD, SLSKD_API_KEY
 
 Use ``--dry-run`` to see what *would* be downloaded without enqueuing anything.
+
+By default the script waits for the enqueued transfers to finish and reports the
+result (slskd writes the files itself); pass ``--no-wait`` to enqueue and exit,
+letting slskd finish them in the background.
 
 Add ``--watch`` to keep it running: after each pass it sleeps ``--interval`` seconds
 (default 300) and re-checks the wishlist, picking up anything newly added or still
@@ -94,7 +107,6 @@ import json
 import os
 import random
 import re
-import shutil
 import ssl
 import string
 import sys
@@ -141,10 +153,19 @@ def http_request(
     headers: Optional[dict] = None,
     cookies: Optional[dict] = None,
     timeout: float = 30.0,
+    retries: int = 4,
+    retry_backoff: float = 1.0,
 ) -> Any:
     """Make an HTTP request and return parsed JSON (or ``None`` for empty bodies).
 
     Raises ``RuntimeError`` with a readable message on non-2xx responses.
+
+    Connection-level failures (refused/reset/dropped, vs. an HTTP error status) are
+    retried up to ``retries`` times with exponential backoff. slskd in particular
+    intermittently resets its API connections when it's busy distributing a search
+    across the Soulseek network or starting a transfer — a brief wait and retry rides
+    over that, where a single attempt would spuriously fail the whole item. HTTP error
+    *statuses* (4xx/5xx) are deterministic and are not retried.
     """
     if params:
         url = f"{url}?{urllib.parse.urlencode(params)}"
@@ -158,14 +179,27 @@ def http_request(
         headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
-            raw = resp.read()
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")
-        raise RuntimeError(f"{method} {url} -> HTTP {exc.code}: {body[:500]}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"{method} {url} -> connection failed: {exc.reason}") from exc
+    attempt = 0
+    while True:
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
+                raw = resp.read()
+            break
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", "replace")
+            raise RuntimeError(f"{method} {url} -> HTTP {exc.code}: {body[:500]}") from exc
+        except OSError as exc:
+            # Covers URLError (connect failures) and bare socket errors such as
+            # ConnectionResetError / RemoteDisconnected raised *during* the response
+            # read. Retry with backoff; give up (as a RuntimeError, which callers treat
+            # as a recoverable per-item failure) once attempts are exhausted.
+            attempt += 1
+            if attempt > retries:
+                reason = getattr(exc, "reason", exc)
+                raise RuntimeError(
+                    f"{method} {url} -> connection error after {attempt} attempt(s): {reason}"
+                ) from exc
+            time.sleep(retry_backoff * (2 ** (attempt - 1)))
 
     if not raw:
         return None
@@ -513,52 +547,29 @@ def pick_file(responses: list[dict], item: WishItem) -> Optional[tuple[str, dict
 
 
 # --------------------------------------------------------------------------- #
-# Completion + moving finished files
+# Waiting for downloads to complete
 # --------------------------------------------------------------------------- #
-def default_slskd_downloads_dir() -> Optional[Path]:
-    """Best-effort guess of slskd's default downloads dir when --slskd-downloads-dir
-    isn't given.
-
-    slskd stores downloads at ``<app-dir>/downloads``, and its app-dir defaults to the
-    platform's application-data location:
-      - Windows: ``%APPDATA%\\slskd``                  (Roaming)
-      - macOS:   ``~/Library/Application Support/slskd``
-      - Linux:   ``~/.local/share/slskd``
-
-    The run-slskd-* launch scripts pass an explicit ``--downloads`` (and tell you to
-    pass the matching ``--slskd-downloads-dir``), so this is only the fallback for a
-    stock slskd started some other way.
-    """
-    if sys.platform == "win32":
-        base = os.environ.get("APPDATA")
-        cand = Path(base) / "slskd" / "downloads" if base else None
-    elif sys.platform == "darwin":
-        cand = Path.home() / "Library" / "Application Support" / "slskd" / "downloads"
-    else:
-        cand = Path.home() / ".local" / "share" / "slskd" / "downloads"
-    return cand if cand and cand.exists() else None
-
-
 def remote_basename(filename: str) -> str:
     return Path(filename.replace("\\", "/")).name
 
 
-def wait_and_move(
+def wait_for_downloads(
     slskd: Slskd,
     pending: list[tuple[str, dict, WishItem]],
-    download_dir: Path,
-    slskd_downloads_dir: Optional[Path],
     timeout: float,
     poll: float = 3.0,
 ) -> tuple[int, int]:
-    """Wait for enqueued transfers to complete, then move finished files into download_dir.
+    """Poll slskd until the enqueued transfers finish, reporting each outcome.
 
-    Returns (moved, completed_but_not_moved).
+    slskd writes the files itself (into the dir it's configured with — your watch
+    dir), so there's nothing to move; we just watch the transfer state for feedback.
+
+    Returns (completed, failed). Anything still in flight when ``timeout`` elapses is
+    reported as timed out and counted as neither.
     """
-    download_dir.mkdir(parents=True, exist_ok=True)
     remaining = {(u, remote_basename(f["filename"])): item for (u, f, item) in pending}
-    moved = 0
-    completed_unmoved = 0
+    completed = 0
+    failed = 0
     deadline = time.monotonic() + timeout
 
     while remaining and time.monotonic() < deadline:
@@ -576,35 +587,17 @@ def wait_and_move(
                 if key not in remaining:
                     continue
                 if "Completed" in state and "Succeeded" in state:
-                    if _move_finished(base, download_dir, slskd_downloads_dir):
-                        moved += 1
-                    else:
-                        completed_unmoved += 1
+                    print(f"  ✓ downloaded {base!r} from {username}")
+                    completed += 1
                     remaining.pop(key, None)
                 elif "Completed" in state and ("Errored" in state or "Cancelled" in state or "Rejected" in state):
                     print(f"  ! transfer failed for {base!r} from {username}: {state}")
+                    failed += 1
                     remaining.pop(key, None)
 
     for (username, base) in remaining:
         print(f"  … timed out waiting for {base!r} from {username}")
-    return moved, completed_unmoved
-
-
-def _move_finished(basename: str, download_dir: Path, slskd_downloads_dir: Optional[Path]) -> bool:
-    if not slskd_downloads_dir:
-        print(f"  ✓ downloaded {basename!r} (left in slskd; pass --slskd-downloads-dir to auto-move)")
-        return False
-    for found in slskd_downloads_dir.rglob(basename):
-        dest = download_dir / found.name
-        try:
-            shutil.move(str(found), str(dest))
-            print(f"  ✓ {found.name} -> {dest}")
-            return True
-        except OSError as exc:
-            print(f"  ! could not move {found}: {exc}")
-            return False
-    print(f"  ? completed {basename!r} but not found under {slskd_downloads_dir}")
-    return False
+    return completed, failed
 
 
 # --------------------------------------------------------------------------- #
@@ -615,8 +608,6 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         description="Download wishlist tracks you don't already own (per Navidrome) via Soulseek (slskd).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--download-dir", required=True, type=Path, help="Where finished files are placed.")
-
     # pymix / wishlist
     p.add_argument("--pymix-url", default=os.environ.get("PYMIX_URL", "http://pymix.docker.localhost/pymix"),
                    help="Base pymix URL (including the /pymix prefix if behind the proxy).")
@@ -636,18 +627,17 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
                    help="How many song hits to inspect per search before deciding a track is owned.")
 
     # slskd
-    p.add_argument("--slskd-url", default=os.environ.get("SLSKD_URL", "http://localhost:5030"),
-                   help="slskd base URL. Defaults to local (port 5030); set to a remote host "
-                        "if slskd runs elsewhere, e.g. https://slskd.example.com.")
+    p.add_argument("--slskd-url", default=os.environ.get("SLSKD_URL", "http://127.0.0.1:5030"),
+                   help="slskd base URL. Defaults to the IPv4 loopback on port 5030 (a "
+                        "'localhost' URL is rewritten to 127.0.0.1 to avoid IPv6-loopback "
+                        "connection resets against slskd); set to a remote host if slskd runs "
+                        "elsewhere, e.g. https://slskd.example.com.")
     p.add_argument("--slskd-api-key", default=os.environ.get("SLSKD_API_KEY"),
                    help="slskd API key. Alternative to --slskd-username/--slskd-password.")
     p.add_argument("--slskd-username", default=os.environ.get("SLSKD_USERNAME"),
                    help="slskd web login username (slskd.yml web.authentication, NOT your Soulseek login).")
     p.add_argument("--slskd-password", default=os.environ.get("SLSKD_PASSWORD"),
                    help="slskd web login password. Used with --slskd-username if no API key is given.")
-    p.add_argument("--slskd-downloads-dir",
-                   default=os.environ.get("SLSKD_DOWNLOADS_DIR"), type=lambda s: Path(s) if s else None,
-                   help="slskd's own downloads dir, so finished files can be moved into --download-dir.")
 
     # behaviour
     p.add_argument("--match-threshold", type=float, default=0.85,
@@ -660,7 +650,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--download-timeout", type=float, default=600.0,
                    help="Max seconds to wait for all transfers to finish.")
     p.add_argument("--no-wait", action="store_true",
-                   help="Enqueue downloads and exit without waiting/moving.")
+                   help="Enqueue downloads and exit without waiting; slskd finishes them in the background.")
     p.add_argument("--watch", action="store_true",
                    help="Run continuously: after each pass, sleep --interval and check the "
                         "wishlist again, downloading anything newly added or still missing. "
@@ -675,21 +665,39 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def _ipv4_localhost(url: str) -> str:
+    """Rewrite a ``localhost`` slskd URL to the IPv4 loopback ``127.0.0.1``.
+
+    slskd binds IPv6 dual-stack (it logs ``Listening ... at http://:::5030/``). On
+    macOS ``localhost`` resolves to ``::1`` as well as ``127.0.0.1``, and connecting to
+    slskd's socket over the IPv6 loopback gets the connection reset before the request
+    reaches slskd's handlers ("Connection reset by peer" / "Remote end closed
+    connection") — so a run that talks to slskd over ``localhost`` fails almost every
+    call. Forcing IPv4 avoids it entirely. Non-localhost hosts (a remote slskd reached
+    by DNS) are left untouched.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.hostname == "localhost":
+        netloc = parsed.netloc.replace("localhost", "127.0.0.1", 1)
+        return urllib.parse.urlunsplit(parsed._replace(netloc=netloc))
+    return url
+
+
 def build_slskd(args: argparse.Namespace) -> Optional[Slskd]:
     """Construct an Slskd client from whichever credentials were supplied, else None."""
+    url = _ipv4_localhost(args.slskd_url)
     if args.slskd_api_key:
-        return Slskd(args.slskd_url, api_key=args.slskd_api_key)
+        return Slskd(url, api_key=args.slskd_api_key)
     if args.slskd_username and args.slskd_password:
-        return Slskd(args.slskd_url, username=args.slskd_username, password=args.slskd_password)
+        return Slskd(url, username=args.slskd_username, password=args.slskd_password)
     return None
 
 
 def run_once(
     args: argparse.Namespace,
     navidrome_url: str,
-    slskd_downloads_dir: Optional[Path],
 ) -> int:
-    """Do one full pass: fetch wishlist → diff against the library → search/enqueue/move.
+    """Do one full pass: fetch wishlist → diff against the library → search/enqueue.
 
     Returns a process exit code. In --watch mode the caller ignores it and keeps
     looping, so a transient failure here (wishlist fetch, Navidrome ping) ends only
@@ -773,14 +781,12 @@ def run_once(
     print(f"\nqueued {len(pending)} download(s).")
     if not pending or args.no_wait:
         if args.no_wait and pending:
-            print("(--no-wait) files will land in slskd's downloads dir.")
+            print("(--no-wait) slskd will finish these into its configured downloads dir.")
         return 0
 
     print("waiting for downloads to complete…")
-    moved, unmoved = wait_and_move(
-        slskd, pending, args.download_dir, slskd_downloads_dir, args.download_timeout
-    )
-    print(f"\ndone: {moved} moved to {args.download_dir}, {unmoved} completed but left in slskd.")
+    completed, failed = wait_for_downloads(slskd, pending, args.download_timeout)
+    print(f"\ndone: {completed} completed, {failed} failed.")
     return 0
 
 
@@ -808,10 +814,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
 
     navidrome_url = args.navidrome_url or default_navidrome_url(args.username)
-    slskd_downloads_dir = args.slskd_downloads_dir or default_slskd_downloads_dir()
-
     if not args.watch:
-        return run_once(args, navidrome_url, slskd_downloads_dir)
+        return run_once(args, navidrome_url)
 
     # --watch: loop forever, surviving per-pass errors, until the user interrupts.
     print(f"watch mode: checking the wishlist every {args.interval:.0f}s (Ctrl-C to stop)\n")
@@ -819,7 +823,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         started = time.strftime("%Y-%m-%d %H:%M:%S")
         print(f"=== pass @ {started} ===")
         try:
-            run_once(args, navidrome_url, slskd_downloads_dir)
+            run_once(args, navidrome_url)
         except RuntimeError as exc:
             # run_once already handles its own expected failures; this is a backstop
             # so an unexpected one ends the pass, not the watcher.

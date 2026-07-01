@@ -39,12 +39,24 @@ $ErrorActionPreference = 'Stop'
 $repo = 'slskd/slskd'
 $archTag = 'win-x64'
 $bin = Join-Path $InstallDir 'slskd.exe'
-$baseUrl = "http://localhost:$Port"
+# IPv4 loopback, not "localhost": slskd binds IPv6 dual-stack, and connecting over the
+# IPv6 loopback (::1, which "localhost" can resolve to) gets reset. Using 127.0.0.1 keeps
+# both the login check and the printed --slskd-url reliable.
+$baseUrl = "http://127.0.0.1:$Port"
 
-# Force a deterministic downloads dir so it's the same on every OS and matches what
-# we tell the wishlist script (--slskd-downloads-dir). Otherwise slskd picks an
-# OS-specific default under its app-dir that's easy to get wrong.
-$downloadsDir = $(if ($env:SLSKD_DOWNLOADS_DIR) { $env:SLSKD_DOWNLOADS_DIR } else { Join-Path $InstallDir 'downloads' })
+# Where slskd writes finished downloads. We point slskd at this dir so the user
+# configures ONE directory (their Subbox watch dir) and finished tracks land straight in
+# it - the wishlist script never needs it. Resolved highest-priority-first:
+# the SLSKD_DOWNLOADS_DIR env override, the cached value, or an interactive prompt that
+# defaults to <install-dir>\downloads. Finalised by the credential flow below.
+$defaultDownloadsDir = Join-Path $InstallDir 'downloads'
+$downloadsDir = $env:SLSKD_DOWNLOADS_DIR
+
+# Which directory slskd SHARES back to the Soulseek network. Soulseek peers commonly
+# refuse to queue downloads for users who share nothing, so we prompt for a folder to
+# share. Resolved like $downloadsDir: the SLSKD_SHARE_DIR env override, the cached value,
+# or an interactive prompt that defaults to the downloads dir. Finalised below.
+$shareDir = $env:SLSKD_SHARE_DIR
 
 # Credentials are cached here (alongside the script) so later runs skip the prompt.
 # Plaintext, so it's locked down to the current user and git-ignored; removed if a
@@ -53,20 +65,49 @@ $credFile = $(if ($env:SLSKD_CRED_FILE) { $env:SLSKD_CRED_FILE } else { Join-Pat
 
 function Import-SavedCredentials {
     if (-not (Test-Path $credFile)) { return $null }
-    $u = $null; $p = $null
+    $u = $null; $p = $null; $d = $null; $s = $null
     foreach ($line in Get-Content $credFile) {
         if ($line -match '^\s*SLSKD_RUN_USERNAME=(.*)$') { $u = $Matches[1] }
         elseif ($line -match '^\s*SLSKD_RUN_PASSWORD=(.*)$') { $p = $Matches[1] }
+        elseif ($line -match '^\s*SLSKD_RUN_DOWNLOADS_DIR=(.*)$') { $d = $Matches[1] }
+        elseif ($line -match '^\s*SLSKD_RUN_SHARE_DIR=(.*)$') { $s = $Matches[1] }
     }
-    if ($u -and $p) { return @{ Username = $u; Password = $p } }
+    if ($u -and $p) { return @{ Username = $u; Password = $p; DownloadsDir = $d; ShareDir = $s } }
     return $null
 }
 
 function Save-Credentials {
-    param($u, $p)
-    @("SLSKD_RUN_USERNAME=$u", "SLSKD_RUN_PASSWORD=$p") | Set-Content -Path $credFile -Encoding ascii
+    param($u, $p, $d, $s)
+    @("SLSKD_RUN_USERNAME=$u", "SLSKD_RUN_PASSWORD=$p", "SLSKD_RUN_DOWNLOADS_DIR=$d", "SLSKD_RUN_SHARE_DIR=$s") |
+        Set-Content -Path $credFile -Encoding ascii
     # Best-effort: restrict to the current user only.
     try { icacls $credFile /inheritance:r /grant:r "$($env:USERNAME):F" | Out-Null } catch {}
+}
+
+# Prompt for the directory finished downloads go into — your Subbox watch dir, so tracks
+# import automatically. Defaults to $default (the cached dir, else <install-dir>\downloads).
+function Read-DownloadsDir {
+    param($default)
+    Write-Host ''
+    Write-Host 'Where should finished downloads go? Use your Subbox watch directory so tracks'
+    Write-Host 'import automatically - slskd will download straight into it.'
+    $d = Read-Host "  Download dir [$default]"
+    if (-not $d) { $d = $default }
+    return $d
+}
+
+# Prompt for a directory to SHARE on Soulseek. Sharing is effectively required: many peers
+# won't queue downloads for users who share nothing. Defaults to $default (the cached dir,
+# else the downloads dir) so finished tracks are shared back automatically.
+function Read-ShareDir {
+    param($default)
+    Write-Host ''
+    Write-Host 'Which directory should you SHARE on Soulseek? Soulseek often blocks or throttles'
+    Write-Host 'downloads for users who do not share anything back, so pick a folder of music to'
+    Write-Host 'share - your downloads dir is a fine default.'
+    $s = Read-Host "  Share dir [$default]"
+    if (-not $s) { $s = $default }
+    return $s
 }
 
 function Install-Slskd {
@@ -135,11 +176,12 @@ function Start-SlskdAndVerify {
     $env:SLSKD_USERNAME = $u;      $env:SLSKD_PASSWORD = $p
 
     New-Item -ItemType Directory -Force -Path $downloadsDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $shareDir | Out-Null
 
     Write-Host ''
     Write-Host 'Starting slskd...'
     $proc = Start-Process -FilePath $bin -PassThru -NoNewWindow `
-        -ArgumentList '--downloads', $downloadsDir `
+        -ArgumentList '--downloads', $downloadsDir, '--shared', $shareDir `
         -RedirectStandardOutput $log -RedirectStandardError $errLog
 
     try {
@@ -169,9 +211,10 @@ function Start-SlskdAndVerify {
         Write-Host "    Web UI:    $baseUrl"
         Write-Host "    Logs:      $log"
         Write-Host "    Downloads: $downloadsDir"
+        Write-Host "    Sharing:   $shareDir"
         Write-Host "    Wishlist: python download_wishlist.py --slskd-url $baseUrl ``"
-        Write-Host "                  --slskd-username '$u' --slskd-password <same password> ``"
-        Write-Host "                  --slskd-downloads-dir '$downloadsDir'"
+        Write-Host "                  --slskd-username '$u' --slskd-password <same password>"
+        Write-Host "              (finished tracks land in $downloadsDir - slskd writes them; no dir flag needed)"
         Write-Host ''
         Write-Host "Watch the log for 'logged in' to confirm the Soulseek connection."
         Write-Host 'Leave this window open. Press Ctrl-C to stop slskd.'
@@ -194,9 +237,33 @@ $cred = Import-SavedCredentials
 if ($cred) {
     Write-Host "Using saved credentials for '$($cred.Username)' from $credFile"
     Write-Host "  (delete that file to re-enter; it's auto-removed if the login is rejected)"
+    # Older caches predate the download-dir / share-dir prompts; ask for whichever is
+    # missing and re-save (unless the matching env override is in play, which wins).
+    $needSave = $false
+    if (-not $downloadsDir -and -not $cred.DownloadsDir) {
+        $cred.DownloadsDir = Read-DownloadsDir $defaultDownloadsDir
+        $needSave = $true
+    }
+    if (-not $shareDir -and -not $cred.ShareDir) {
+        $shareDefault = if ($downloadsDir) { $downloadsDir } elseif ($cred.DownloadsDir) { $cred.DownloadsDir } else { $defaultDownloadsDir }
+        $cred.ShareDir = Read-ShareDir $shareDefault
+        $needSave = $true
+    }
+    if ($needSave) { Save-Credentials $cred.Username $cred.Password $cred.DownloadsDir $cred.ShareDir }
 } else {
     $cred = Read-Credentials
-    Save-Credentials $cred.Username $cred.Password
+    $cred.DownloadsDir = Read-DownloadsDir $defaultDownloadsDir
+    $shareDefault = if ($downloadsDir) { $downloadsDir } else { $cred.DownloadsDir }
+    $cred.ShareDir = Read-ShareDir $shareDefault
+    Save-Credentials $cred.Username $cred.Password $cred.DownloadsDir $cred.ShareDir
     Write-Host "Saved credentials to $credFile - future runs won't prompt."
+}
+# Env override always wins; otherwise the cached/prompted dir, then the default.
+if (-not $downloadsDir) {
+    $downloadsDir = if ($cred.DownloadsDir) { $cred.DownloadsDir } else { $defaultDownloadsDir }
+}
+# Share dir falls back to the downloads dir so the user always shares something.
+if (-not $shareDir) {
+    $shareDir = if ($cred.ShareDir) { $cred.ShareDir } else { $downloadsDir }
 }
 Start-SlskdAndVerify $cred.Username $cred.Password
