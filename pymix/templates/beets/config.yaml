@@ -64,9 +64,6 @@ fetchart:
 replaygain:
     auto: no
 
-scrub:
-    auto: yes
-
 replace:
     '^\.': _
     '[\x00-\x1f]': _
