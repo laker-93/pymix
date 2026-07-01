@@ -16,6 +16,12 @@ download and waits for it to finish. slskd writes the file into the directory it
 configured with (point that at your Subbox watch dir), and Subbox's watch importer
 ingests it from there — this script never touches the download directory itself.
 
+Once a file is pulled, this script flips its wishlist item to ``downloaded`` via the
+pymix API (``PATCH /wishlist/{id}``). That's what stops the same track being fetched
+again every pass: the next pass only pulls ``wishlist``-status items, and pymix's own
+reconcile loop promotes ``downloaded`` -> ``available`` once beets has imported the
+file and Navidrome can match it. This script never writes ``available`` itself.
+
 Querying Navidrome's search per item -- rather than pulling the whole collection and
 diffing locally -- keeps this cheap on large libraries: it's a handful of indexed,
 server-side searches instead of a full-library download plus an O(items x tracks)
@@ -117,7 +123,7 @@ import urllib.request
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 # Audio file extensions we're willing to download, best-preferred first. FLAC
 # (lossless) ranks top, then MP3; the remaining formats are fallbacks. Within a
@@ -312,6 +318,36 @@ def fetch_wishlist(pymix_url: str, username: Optional[str], session_id: Optional
             )
         )
     return out
+
+
+# pymix wishlist status we flip an item to once we've pulled its file (mirrors
+# pymix's WishlistStatus.DOWNLOADED = "downloaded": "file has landed but not yet in
+# beets"). pymix's reconcile loop later promotes it to "available" once beets has
+# imported the file and Navidrome can match it. We never write "available" ourselves.
+WISHLIST_STATUS_DOWNLOADED = "downloaded"
+
+
+def set_wishlist_status(
+    pymix_url: str,
+    username: Optional[str],
+    session_id: Optional[str],
+    wishlist_id: str,
+    status: str,
+) -> None:
+    """PATCH {pymix_url}/wishlist/{wishlist_id} to set its status. Auth as fetch_wishlist."""
+    params = {}
+    cookies = None
+    if username:
+        params["username"] = username
+    if session_id:
+        cookies = {"session_id": session_id}
+    http_request(
+        "PATCH",
+        f"{pymix_url.rstrip('/')}/wishlist/{urllib.parse.quote(wishlist_id)}",
+        params=params or None,
+        json_body={"status": status},
+        cookies=cookies,
+    )
 
 
 def default_navidrome_url(username: str) -> str:
@@ -509,8 +545,18 @@ class Slskd:
         return files
 
 
-def pick_file(responses: list[dict], item: WishItem) -> Optional[tuple[str, dict]]:
-    """Choose the best (username, file) for a wishlist item, or None if nothing fits."""
+def pick_file(responses: list[dict], item: WishItem, min_file_score: float = 0.6) -> Optional[tuple[str, dict]]:
+    """Choose the best (username, file) for a wishlist item, or None if nothing fits.
+
+    A candidate file is rejected outright if its filename similarity to the wishlist
+    item falls below ``min_file_score``. This score compares against the *filename stem*
+    (which carries track numbers like ``02. ``, ``(Original Mix)`` suffixes and other
+    uploader/album noise), so it is deliberately looser than the tag-based
+    ``--match-threshold`` used to decide a track is already owned. Set it too low and
+    the script downloads near-random files that can never reconcile back to
+    ``available`` and so get re-downloaded every pass; too high and legitimately-named
+    files with noisy stems get skipped.
+    """
     target = track_key(item.artist, item.title)
     candidates: list[tuple[tuple, str, dict]] = []
     for resp in responses:
@@ -524,7 +570,7 @@ def pick_file(responses: list[dict], item: WishItem) -> Optional[tuple[str, dict
             if ext not in FORMAT_RANK:
                 continue
             name_score = similar(target, normalise(Path(name.replace("\\", "/")).stem))
-            if name_score < 0.4:
+            if name_score < min_file_score:
                 continue
             bitrate = f.get("bitRate") or 0
             # Sort key: free slot first, then closer filename, better format,
@@ -558,11 +604,17 @@ def wait_for_downloads(
     pending: list[tuple[str, dict, WishItem]],
     timeout: float,
     poll: float = 3.0,
+    on_downloaded: Optional["Callable[[WishItem], None]"] = None,
 ) -> tuple[int, int]:
     """Poll slskd until the enqueued transfers finish, reporting each outcome.
 
     slskd writes the files itself (into the dir it's configured with — your watch
     dir), so there's nothing to move; we just watch the transfer state for feedback.
+
+    ``on_downloaded`` (if given) is called with the ``WishItem`` each time a transfer
+    succeeds — used to flip that item to ``downloaded`` in pymix so it isn't
+    re-downloaded on the next pass. It's invoked once per item, right after the success
+    is observed, so a long wait still records progress as it happens.
 
     Returns (completed, failed). Anything still in flight when ``timeout`` elapses is
     reported as timed out and counted as neither.
@@ -589,7 +641,9 @@ def wait_for_downloads(
                 if "Completed" in state and "Succeeded" in state:
                     print(f"  ✓ downloaded {base!r} from {username}")
                     completed += 1
-                    remaining.pop(key, None)
+                    item = remaining.pop(key, None)
+                    if item is not None and on_downloaded is not None:
+                        on_downloaded(item)
                 elif "Completed" in state and ("Errored" in state or "Cancelled" in state or "Rejected" in state):
                     print(f"  ! transfer failed for {base!r} from {username}: {state}")
                     failed += 1
@@ -642,6 +696,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     # behaviour
     p.add_argument("--match-threshold", type=float, default=0.85,
                    help="Fuzzy similarity (0-1) above which a wishlist item counts as already owned.")
+    p.add_argument("--min-file-score", type=float, default=0.6,
+                   help="Minimum filename similarity (0-1) for a Soulseek file to be a "
+                        "download candidate. Looser than --match-threshold because it scores "
+                        "against the filename stem (track numbers, '(Original Mix)', album "
+                        "noise) rather than tags. Raise it if the script keeps grabbing poor "
+                        "matches that never reconcile to 'available' and so re-download each pass.")
     p.add_argument("--max-downloads", type=int, default=0, help="Cap the number of downloads (0 = no cap).")
     p.add_argument("--search-wait", type=float, default=30.0,
                    help="Hard cap (seconds) on gathering Soulseek search results per item. "
@@ -746,7 +806,7 @@ def run_once(
             line = f"- {it.artist} - {it.title}"
             if slskd:
                 try:
-                    chosen = pick_file(slskd.search(it.query, args.search_wait), it)
+                    chosen = pick_file(slskd.search(it.query, args.search_wait), it, args.min_file_score)
                     line += f"  =>  {chosen[1]['filename']}" if chosen else "  =>  (no match found)"
                 except RuntimeError as exc:
                     line += f"  =>  (search failed: {exc})"
@@ -765,7 +825,7 @@ def run_once(
         except RuntimeError as exc:
             print(f"  ! search failed: {exc}")
             continue
-        chosen = pick_file(responses, it)
+        chosen = pick_file(responses, it, args.min_file_score)
         if not chosen:
             print("  - no suitable file found")
             continue
@@ -778,14 +838,39 @@ def run_once(
         print(f"  + queued {remote_basename(f['filename'])} from {username}")
         pending.append((username, f, it))
 
+    def mark_downloaded(item: WishItem) -> None:
+        """Flip a pulled item to ``downloaded`` in pymix so it isn't re-fetched.
+
+        The next pass fetches ``--status wishlist`` and so skips it; pymix's reconcile
+        loop promotes it to ``available`` once beets imports the file. A failure here is
+        non-fatal — the file is already downloaded — so we warn and move on (worst case
+        the item is retried next pass, i.e. the old behaviour).
+        """
+        if not item.wishlist_id:
+            print(f"  ! can't mark {item.artist} - {item.title} downloaded: no wishlist_id")
+            return
+        try:
+            set_wishlist_status(
+                args.pymix_url, args.username, args.session_id,
+                item.wishlist_id, WISHLIST_STATUS_DOWNLOADED,
+            )
+        except RuntimeError as exc:
+            print(f"  ! failed to mark {item.artist} - {item.title} downloaded: {exc}")
+
     print(f"\nqueued {len(pending)} download(s).")
     if not pending or args.no_wait:
         if args.no_wait and pending:
+            # Can't confirm completion in --no-wait, so mark optimistically: the
+            # alternative is leaving them 'wishlist' and re-downloading them next pass.
+            for _u, _f, it in pending:
+                mark_downloaded(it)
             print("(--no-wait) slskd will finish these into its configured downloads dir.")
         return 0
 
     print("waiting for downloads to complete…")
-    completed, failed = wait_for_downloads(slskd, pending, args.download_timeout)
+    completed, failed = wait_for_downloads(
+        slskd, pending, args.download_timeout, on_downloaded=mark_downloaded
+    )
     print(f"\ndone: {completed} completed, {failed} failed.")
     return 0
 
