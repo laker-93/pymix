@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -6,6 +7,7 @@ import pytest
 from pymix.model.subboxtrack import SubBoxTrack
 from pymix.services import wishlist_reconcile_service as svc_module
 from pymix.services.wishlist_reconcile_service import WishlistReconcileService
+from pymix.utils.quiet_logging import suppress_match_logging
 
 USER = {"username": "alice", "password": "secret"}
 
@@ -30,7 +32,7 @@ async def test_match_marks_available_with_linked_subbox_id(monkeypatch):
 
     assert result.resolved == 1
     assert result.matched == ["Binary Digit - Overdozza"]
-    subsonic.get_track_match.assert_awaited_once_with(USER, "Overdozza", "Binary Digit", None, log=True)
+    subsonic.get_track_match.assert_awaited_once_with(USER, "Overdozza", "Binary Digit", None)
     db.update_wishlist_item.assert_called_once_with(
         "alice", "w1", {"status": "available", "linked_subbox_id": "subbox-123"}
     )
@@ -84,15 +86,33 @@ async def test_items_without_artist_or_title_are_skipped():
 
 
 @pytest.mark.asyncio
-async def test_quiet_suppresses_per_item_search_logging(monkeypatch):
+async def test_per_item_logging_can_be_suppressed_via_context(monkeypatch, caplog):
     item = {"wishlist_id": "w1", "artist": "Binary Digit", "title": "Overdozza", "album": None}
     track = SubBoxTrack(name="Overdozza", artist="Binary Digit", album="x",
                         pymix_path=Path("/music/alice/track.mp3"))
     service, _db, subsonic = _make_service({"wishlist": [item], "downloaded": []}, (track, 0.95))
     monkeypatch.setattr(svc_module, "get_subbox_id", lambda p: "subbox-123")
 
-    result = await service.reconcile_user(USER, quiet=True)
+    # Inside the suppression context the per-item chatter is dropped; the match still happens
+    # and the matcher API carries no log/quiet flag.
+    with caplog.at_level(logging.INFO, logger=svc_module.__name__):
+        with suppress_match_logging():
+            result = await service.reconcile_user(USER)
 
     assert result.matched == ["Binary Digit - Overdozza"]
-    # quiet mode must tell the Subsonic search to stay silent per item
-    subsonic.get_track_match.assert_awaited_once_with(USER, "Overdozza", "Binary Digit", None, log=False)
+    subsonic.get_track_match.assert_awaited_once_with(USER, "Overdozza", "Binary Digit", None)
+    assert [r for r in caplog.records if r.name == svc_module.__name__] == []
+
+
+@pytest.mark.asyncio
+async def test_per_item_logging_emitted_without_suppression(monkeypatch, caplog):
+    item = {"wishlist_id": "w1", "artist": "Binary Digit", "title": "Overdozza", "album": None}
+    track = SubBoxTrack(name="Overdozza", artist="Binary Digit", album="x",
+                        pymix_path=Path("/music/alice/track.mp3"))
+    service, _db, _subsonic = _make_service({"wishlist": [item], "downloaded": []}, (track, 0.95))
+    monkeypatch.setattr(svc_module, "get_subbox_id", lambda p: "subbox-123")
+
+    with caplog.at_level(logging.INFO, logger=svc_module.__name__):
+        await service.reconcile_user(USER)
+
+    assert any(r.name == svc_module.__name__ for r in caplog.records)

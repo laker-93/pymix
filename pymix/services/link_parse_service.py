@@ -6,6 +6,8 @@ from urllib.parse import urlparse
 
 from yt_dlp import YoutubeDL
 
+from pymix.services.musicbrainz_match_service import MusicBrainzMatchService
+
 logger = logging.getLogger(__name__)
 
 _YDL_OPTS = {
@@ -25,12 +27,22 @@ _YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be",
 _SOUNDCLOUD_HOSTS = {"soundcloud.com", "www.soundcloud.com", "m.soundcloud.com", "on.soundcloud.com"}
 
 
+# How artist/title were arrived at, surfaced to the client so it can flag a low-trust
+# guess for the user to confirm:
+#   "structured"   - yt-dlp gave real music metadata; trusted verbatim.
+#   "musicbrainz"  - the string-split guess was refined by a MusicBrainz match.
+#   "string"       - the "Artist - Title" heuristic (or bare channel name); least certain.
+MatchSource = str
+
+
 class LinkMetadata(TypedDict):
     source: str
     is_collection: bool
     artist: str
     title: str
     album: Optional[str]
+    match_source: MatchSource
+    confidence: Optional[int]
     youtube_video_id: Optional[str]
     youtube_url: Optional[str]
     bandcamp_url: Optional[str]
@@ -43,6 +55,11 @@ class LinkCollectionMetadata(TypedDict):
     tracks: List[LinkMetadata]
 
 
+# This "Artist - Title" splitter is the canonical implementation. scripts/
+# download_wishlist.py carries a stdlib-only MIRROR of it (that script must run under a
+# bare `python3`, so it can't import this module) -- keep the two in sync: same
+# separator, same noise keywords.
+#
 # The standard "Artist - Title" convention, allowing hyphen, en dash or em dash
 # as the separator. Only the first separator splits (maxsplit=1) so titles like
 # "Artist - Song - Remix" keep the remainder in the title.
@@ -124,7 +141,15 @@ class LinkParseService:
     underlying library YoutubeMatchService uses for search-based matching. A link
     that resolves to a playlist or album is returned as a collection of tracks
     rather than a single track.
+
+    For a single track whose artist/title had to be guessed from the video title (no
+    structured metadata), the guess is refined against MusicBrainz. Collections skip that
+    refinement: they usually carry structured album metadata already, and MusicBrainz's
+    1 req/sec limit makes a per-track lookup across a whole album/playlist too slow.
     """
+
+    def __init__(self, musicbrainz_match_service: MusicBrainzMatchService):
+        self._musicbrainz = musicbrainz_match_service
 
     async def extract(self, url: str) -> Union[LinkMetadata, LinkCollectionMetadata]:
         source = detect_link_source(url)
@@ -151,7 +176,34 @@ class LinkParseService:
             ]
             return LinkCollectionMetadata(source=source, is_collection=True, tracks=tracks)
 
-        return self._track_from_info(info, source, fallback_url=url)
+        track = self._track_from_info(info, source, fallback_url=url)
+        return await self._refine_with_musicbrainz(track, info)
+
+    async def _refine_with_musicbrainz(self, track: LinkMetadata, info: dict) -> LinkMetadata:
+        """Upgrade a string-guessed track's artist/title with a MusicBrainz match.
+
+        No-op for tracks whose metadata was already structured (match_source other than
+        "string"). Queries MusicBrainz with the noise-stripped raw video title — the same
+        messy string the string heuristic saw — which handles the no-separator case
+        (where the "artist" is really just the channel name) far better than re-querying
+        on that guessed artist. A miss or a low-confidence result leaves the track's
+        original guess untouched.
+        """
+        if track["match_source"] != "string":
+            return track
+
+        query = _strip_noise((info.get("title") or "").strip()).strip() or track["title"]
+        match = await self._musicbrainz.match(query)
+        if match is None:
+            return track
+
+        track["artist"] = match["artist"]
+        track["title"] = match["title"]
+        if match["album"] and not track["album"]:
+            track["album"] = match["album"]
+        track["match_source"] = "musicbrainz"
+        track["confidence"] = match["score"]
+        return track
 
     def _track_from_info(self, info: dict, source: str, fallback_url: str) -> LinkMetadata:
         structured_title = info.get("track")
@@ -163,12 +215,15 @@ class LinkParseService:
             # yt-dlp surfaced real music metadata — trust it verbatim.
             title = structured_title
             artist = structured_artist or uploader
+            match_source = "structured"
         else:
             # No structured metadata (typical for fan/DJ uploads): parse the video
             # title before falling back to `uploader`, so we don't record the
-            # channel that posted the video as the track's artist.
+            # channel that posted the video as the track's artist. This guess is the
+            # one extract() then tries to refine against MusicBrainz.
             parsed_artist, title = _split_artist_title(info.get("title") or "")
             artist = structured_artist or parsed_artist or uploader
+            match_source = "string"
 
         result = LinkMetadata(
             source=source,
@@ -176,6 +231,8 @@ class LinkParseService:
             artist=artist,
             title=title,
             album=album,
+            match_source=match_source,
+            confidence=None,
             youtube_video_id=None,
             youtube_url=None,
             bandcamp_url=None,

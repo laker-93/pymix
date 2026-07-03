@@ -23,6 +23,7 @@ from pymix.orchestrators.services_orchestrator import ServicesOrchestrator
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
 from pymix.services.google_sheets_service import GoogleSheetsService
 from pymix.services.link_parse_service import LinkParseService
+from pymix.services.musicbrainz_match_service import MusicBrainzMatchService
 from pymix.services.sheet_sync_service import SheetSyncService
 from pymix.services.wishlist_reconcile_service import WishlistReconcileService
 from pymix.services.youtube_match_service import YoutubeMatchService
@@ -178,8 +179,13 @@ class Container(containers.DeclarativeContainer):
         YoutubeMatchService,
     )
 
+    musicbrainz_match_service = providers.Singleton(
+        MusicBrainzMatchService,
+    )
+
     link_parse_service = providers.Singleton(
         LinkParseService,
+        musicbrainz_match_service,
     )
 
     google_sheets_service = providers.Singleton(

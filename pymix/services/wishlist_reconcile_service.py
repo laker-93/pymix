@@ -1,17 +1,19 @@
 import dataclasses
 import logging
 
+import anyio
+
 from pymix.clients.subsonic_client import SubsonicClient
 from pymix.controllers.db_controller import DbController
-from pymix.model.wishlist import WishlistStatus
+from pymix.model.wishlist import OPEN_WISHLIST_STATUSES, WishlistStatus
+from pymix.utils.quiet_logging import make_logger_suppressible
 from pymix.utils.tag_subbox_id import get_subbox_id
 
 logger = logging.getLogger(__name__)
-
-# Open statuses worth re-checking against the library. ``inbox`` is skipped (no clean
-# artist/title to query on); ``available`` / ``ignored`` are terminal so we never
-# re-scan them.
-_OPEN_STATUSES = (WishlistStatus.WISHLIST.value, WishlistStatus.DOWNLOADED.value)
+# Per-item reconcile lines are silenced during the background sweep via
+# quiet_logging.suppress_match_logging(); the sweep emits one aggregated summary. Errors
+# (e.g. a search that raised, logged below with logger.exception) still surface.
+make_logger_suppressible(logger)
 
 
 @dataclasses.dataclass
@@ -46,7 +48,7 @@ class WishlistReconcileService:
         self._db = db_controller
         self._subsonic = subsonic_client
 
-    async def reconcile_user(self, user: dict, quiet: bool = False) -> ReconcileResult:
+    async def reconcile_user(self, user: dict) -> ReconcileResult:
         """Reconcile one user's open wishlist items against their Navidrome library.
 
         Returns a :class:`ReconcileResult` describing what was matched, left unmatched,
@@ -54,20 +56,19 @@ class WishlistReconcileService:
         the sweep (or an import that triggered it). ``user`` must be the full record
         (username + password) so the Subsonic client can authenticate.
 
-        When ``quiet`` is set (the background sweep over every open item), all per-item
-        logging — both this method's and the underlying Subsonic search's — is
-        suppressed; the caller is expected to emit one aggregated summary from the
-        returned result instead. Import-triggered calls leave ``quiet`` False so each
-        match is logged inline.
+        Per-item progress is logged inline. The background sweep over every open item
+        wraps this call in ``quiet_logging.suppress_match_logging()`` to drop that
+        chatter (both this method's lines and the underlying Subsonic search's) and emit
+        one aggregated summary instead; a failed search still surfaces via
+        ``logger.exception`` regardless.
         """
         username = user["username"]
         items = [
             item
-            for status in _OPEN_STATUSES
+            for status in OPEN_WISHLIST_STATUSES
             for item in self._db.get_wishlist_items(username, status=status)
         ]
-        if not quiet:
-            logger.info(f"reconciling {len(items)} open wishlist item(s) for user {username}")
+        logger.info(f"reconciling {len(items)} open wishlist item(s) for user {username}")
 
         result = ReconcileResult(username=username)
         for item in items:
@@ -79,10 +80,11 @@ class WishlistReconcileService:
             label = f"{artist} - {title}"
             try:
                 match = await self._subsonic.get_track_match(
-                    user, title, artist, item.get("album"), log=not quiet
+                    user, title, artist, item.get("album")
                 )
             except Exception:
-                # A real error (not a no-match) — always surface it, even when quiet.
+                # A real error (not a no-match) — always surface it, even mid-sweep
+                # (logger.exception is ERROR level, above the suppression threshold).
                 logger.exception(f"reconcile: Navidrome search failed for {label}")
                 result.unmatched.append(label)
                 continue
@@ -91,17 +93,22 @@ class WishlistReconcileService:
                 continue
 
             track, _score = match
-            subbox_id = get_subbox_id(track.pymix_path) if track.pymix_path else None
+            # get_subbox_id opens the file with taglib — a blocking call, so keep it off
+            # the event loop (see CLAUDE.md: blocking taglib/beets/fs work is offloaded).
+            subbox_id = (
+                await anyio.to_thread.run_sync(get_subbox_id, track.pymix_path)
+                if track.pymix_path
+                else None
+            )
             self._db.update_wishlist_item(
                 username,
                 item["wishlist_id"],
                 {"status": WishlistStatus.AVAILABLE.value, "linked_subbox_id": subbox_id},
             )
             result.matched.append(label)
-            if not quiet:
-                logger.info(
-                    f"reconcile: marked wishlist item {item['wishlist_id']} ({label}) "
-                    f"available, linked subbox_id {subbox_id}"
-                )
+            logger.info(
+                f"reconcile: marked wishlist item {item['wishlist_id']} ({label}) "
+                f"available, linked subbox_id {subbox_id}"
+            )
 
         return result

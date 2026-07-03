@@ -3,6 +3,18 @@ import dataclasses
 import enum
 
 
+class MetadataSource(str, enum.Enum):
+    """Provenance of a wishlist item's artist/title.
+
+    ``AUTO`` — extracted by pymix (link parse, string split, or MusicBrainz). ``USER`` —
+    edited/confirmed by the user in the client. Automatic re-matching must never
+    overwrite a ``USER`` item's artist/title.
+    """
+
+    AUTO = "auto"
+    USER = "user"
+
+
 class WishlistStatus(str, enum.Enum):
     """The states a wishlist item can occupy.
 
@@ -22,6 +34,14 @@ class WishlistStatus(str, enum.Enum):
 WISHLIST_STATUSES = tuple(s.value for s in WishlistStatus)
 
 
+# The "open" statuses worth re-checking against the library — items not yet known to
+# be in the collection. ``inbox`` is excluded (no clean artist/title to query on) and
+# ``available`` / ``ignored`` are terminal. Single source of truth for both the
+# reconcile service (which items to re-check) and the reconcile handler (which users
+# to sweep) so the two can never drift out of step.
+OPEN_WISHLIST_STATUSES = (WishlistStatus.WISHLIST.value, WishlistStatus.DOWNLOADED.value)
+
+
 @dataclasses.dataclass
 class WishlistItem:
     wishlist_id: str
@@ -31,6 +51,7 @@ class WishlistItem:
     title: Optional[str] = None
     album: Optional[str] = None
     raw_note: Optional[str] = None
+    metadata_source: str = MetadataSource.AUTO.value
     youtube_video_id: Optional[str] = None
     youtube_url: Optional[str] = None
     bandcamp_url: Optional[str] = None

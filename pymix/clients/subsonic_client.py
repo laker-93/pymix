@@ -15,10 +15,14 @@ from pymix.model.subboxplaylist import SubBoxPlaylist
 
 
 from pymix.model.subboxtrack import SubBoxTrack
+from pymix.utils.quiet_logging import make_logger_suppressible
 from pymix.utils.tag_subbox_id import get_subbox_id
 from pymix.utils.utility import add_url_params
 
 logger = logging.getLogger(__name__)
+# The per-item match diagnostics below are silenced during the background wishlist
+# reconcile sweep via quiet_logging.suppress_match_logging(); errors still surface.
+make_logger_suppressible(logger)
 
 
 IGNORED_TITLE_WORDS = {'remix'}
@@ -284,47 +288,45 @@ class SubsonicClient(BaseAPIClient):
             yield tracks
             offset += batch_size
 
-    async def _get_best_track_match(self, title: str, artist: str, album: Optional[str], tracks: List[SubBoxTrack], similarity_threshold: float, log: bool = True) -> \
+    async def _get_best_track_match(self, title: str, artist: str, album: Optional[str], tracks: List[SubBoxTrack], similarity_threshold: float) -> \
     Optional[tuple[SubBoxTrack, float]]:
         match = None
-        if len(tracks) > 1 and log:
+        if len(tracks) > 1:
             logger.info(f'found multiple matches for {title} by {artist} in subsonic')
         if len(tracks) >= 1:
-            match = await self._find_best_match(title, artist, tracks, album, similarity_threshold, log=log)
+            match = await self._find_best_match(title, artist, tracks, album, similarity_threshold)
         return match
 
-    async def get_track_match(self, user: dict, title: str, artist: str, album: Optional[str] = None, log: bool = True) -> Optional[
+    async def get_track_match(self, user: dict, title: str, artist: str, album: Optional[str] = None) -> Optional[
         tuple[SubBoxTrack, float]]:
         """Find the best Navidrome track for ``title``/``artist``.
 
-        ``log`` gates this method's per-item search logging (the progressive
-        "no matches querying by ..." / "failed to find match" lines and the
-        similarity diagnostics in the helpers). Callers that run this in a tight loop
-        over many items — e.g. the background wishlist reconcile sweep — pass
-        ``log=False`` and emit a single aggregated summary instead.
+        This method's per-item search logging (the progressive "no matches querying
+        by ..." / "failed to find match" lines and the similarity diagnostics in the
+        helpers) is emitted unconditionally. Callers that run it in a tight loop over
+        many items — e.g. the background wishlist reconcile sweep — wrap the loop in
+        ``quiet_logging.suppress_match_logging()`` to drop that chatter and emit a
+        single aggregated summary instead; real errors still surface.
         """
         clean_title = extract_track_name(title, artist, album)
         if clean_title is None:
-            if log:
-                logger.error(f'failed to clean track name from {title} by {artist} and {album}')
+            logger.error(f'failed to clean track name from {title} by {artist} and {album}')
         else:
             title = clean_title
 
         candidate_tracks = await self.query_tracks_by(user, title, artist)
         match = await self._get_best_track_match(title, artist, album,
-                                                candidate_tracks, 0.8, log=log)
+                                                candidate_tracks, 0.8)
         if match:
             return match
 
-        if log:
-            logger.info(f'no matches querying by {title} and {artist}. Querying on title only...')
+        logger.info(f'no matches querying by {title} and {artist}. Querying on title only...')
         candidate_tracks = await self.query_track_by_name(user, title)
-        match = await self._get_best_track_match(title, artist, album, candidate_tracks, 0.6, log=log)
+        match = await self._get_best_track_match(title, artist, album, candidate_tracks, 0.6)
         if match:
             return match
 
-        if log:
-            logger.info(f'no matches querying by {title}. Querying on tokens of title...')
+        logger.info(f'no matches querying by {title}. Querying on tokens of title...')
         candidate_tracks = []
         for token in title.split():
             # skip common words that will give false positives
@@ -333,12 +335,11 @@ class SubsonicClient(BaseAPIClient):
             candidate_tracks.extend(
                 await self.query_track_by_name(user, token)
             )
-        match = await self._get_best_track_match(title, artist, album, candidate_tracks, 0.4, log=log)
+        match = await self._get_best_track_match(title, artist, album, candidate_tracks, 0.4)
         if match:
             return match
 
-        if log:
-            logger.info(f'failed to find match on {title} or any of its tokens')
+        logger.info(f'failed to find match on {title} or any of its tokens')
         return None
 
     async def query_tracks_by(self, user: dict, title: str, artist: str) -> List[SubBoxTrack]:
@@ -377,7 +378,7 @@ class SubsonicClient(BaseAPIClient):
             raise KeyError(f'unable to parse tracks from url query {url}') from ex
         return tracks
 
-    async def _find_best_match(self, title: str, artist: str, tracks: List[SubBoxTrack], album: Optional[str], similarity_threshold: float, log: bool = True) -> \
+    async def _find_best_match(self, title: str, artist: str, tracks: List[SubBoxTrack], album: Optional[str], similarity_threshold: float) -> \
     Optional[tuple[SubBoxTrack, float]]:
         results = {}
 
@@ -413,7 +414,7 @@ class SubsonicClient(BaseAPIClient):
 
             if fallback_similarity >= similarity_threshold:
                 results[fallback_similarity] = track
-            elif log:
+            else:
                 logger.warning(
                     f"No good match ({fallback_similarity:.3f} < {similarity_threshold}) for '{title}' by '{artist}' against track '{track}'"
                 )
@@ -422,8 +423,7 @@ class SubsonicClient(BaseAPIClient):
 
         max_similarity = max(results.keys())
         result = results[max_similarity]
-        if log:
-            logger.info(f'matched query of {title} by {artist} to {result} with similarity {max_similarity} out of {len(results)} candidates')
+        logger.info(f'matched query of {title} by {artist} to {result} with similarity {max_similarity} out of {len(results)} candidates')
         return result, max_similarity
 
 

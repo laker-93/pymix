@@ -122,6 +122,10 @@ class WishlistRow(Base):
     album = Column(String)
     raw_note = Column(String)
 
+    # 'auto' | 'user' — see MetadataSource. 'user' locks artist/title against
+    # automatic re-matching (MusicBrainz refinement, reconcile, sheet sync).
+    metadata_source = Column(String, nullable=False, server_default='auto')
+
     status = Column(
         Enum(
             WishlistStatus,

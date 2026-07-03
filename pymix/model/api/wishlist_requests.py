@@ -40,6 +40,28 @@ class ParseLinkRequest(BaseModel):
     url: str
 
 
+class MatchMetadataRequest(BaseModel):
+    """Free-text metadata lookup. Either a raw ``query`` (e.g. an inbox raw_note) or an
+    ``artist``/``title`` pair the user has typed; the two are combined into one search
+    string server-side."""
+
+    query: Optional[str] = None
+    artist: Optional[str] = None
+    title: Optional[str] = None
+
+    @model_validator(mode="after")
+    def require_some_text(self) -> "MatchMetadataRequest":
+        if not (self.query or self.artist or self.title):
+            raise ValueError("query, artist, or title is required")
+        return self
+
+    @property
+    def search_query(self) -> str:
+        if self.query and self.query.strip():
+            return self.query.strip()
+        return " ".join(p.strip() for p in (self.artist, self.title) if p and p.strip())
+
+
 class UpdateWishlistRequest(BaseModel):
     artist: Optional[str] = None
     title: Optional[str] = None

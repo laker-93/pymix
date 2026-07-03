@@ -1,9 +1,27 @@
+import pytest
+
 from pymix.services.link_parse_service import (
     LinkParseService,
     _split_artist_title,
     _strip_noise,
     detect_link_source,
 )
+
+
+class _StubMusicBrainz:
+    """Records queries and returns a canned match (or None) for the given query."""
+
+    def __init__(self, result=None):
+        self._result = result
+        self.queries = []
+
+    async def match(self, query):
+        self.queries.append(query)
+        return self._result
+
+
+def _service(mb=None):
+    return LinkParseService(mb or _StubMusicBrainz())
 
 
 def test_detect_link_source():
@@ -16,7 +34,7 @@ def test_detect_link_source():
 
 
 def test_track_from_info_soundcloud_sets_soundcloud_url():
-    svc = LinkParseService()
+    svc = _service()
     info = {
         "track": "Flickermood",
         "artist": "Forss",
@@ -85,7 +103,7 @@ def test_split_artist_title_noise_only_title_is_preserved():
 
 
 def test_track_from_info_uses_structured_metadata_when_present():
-    svc = LinkParseService()
+    svc = _service()
     info = {
         "track": "Lite Spots",
         "artist": "Kaytranada",
@@ -99,7 +117,7 @@ def test_track_from_info_uses_structured_metadata_when_present():
 
 
 def test_track_from_info_parses_title_when_metadata_missing():
-    svc = LinkParseService()
+    svc = _service()
     info = {
         "track": None,
         "artist": None,
@@ -113,7 +131,7 @@ def test_track_from_info_parses_title_when_metadata_missing():
 
 
 def test_track_from_info_falls_back_to_uploader_without_separator():
-    svc = LinkParseService()
+    svc = _service()
     info = {
         "track": None,
         "artist": None,
@@ -124,3 +142,79 @@ def test_track_from_info_falls_back_to_uploader_without_separator():
     result = svc._track_from_info(info, "youtube", fallback_url="http://x")
     assert result["artist"] == "Some Channel"
     assert result["title"] == "My DJ Set 2024"
+
+
+def test_track_from_info_marks_structured_source():
+    svc = _service()
+    info = {"track": "Lite Spots", "artist": "Kaytranada", "title": "x", "id": "abc"}
+    result = svc._track_from_info(info, "youtube", fallback_url="http://x")
+    assert result["match_source"] == "structured"
+    assert result["confidence"] is None
+
+
+def test_track_from_info_marks_string_source():
+    svc = _service()
+    info = {"track": None, "artist": None, "title": "Kaytranada - Lite spots", "id": "abc"}
+    result = svc._track_from_info(info, "youtube", fallback_url="http://x")
+    assert result["match_source"] == "string"
+
+
+@pytest.mark.asyncio
+async def test_refine_upgrades_string_guess_with_musicbrainz():
+    mb = _StubMusicBrainz(
+        {"artist": "KAYTRANADA", "title": "Lite Spots", "album": "99.9%", "score": 100}
+    )
+    svc = _service(mb)
+    info = {"track": None, "artist": None, "title": "kaytranada lite spots (Official Audio)", "id": "abc"}
+    track = svc._track_from_info(info, "youtube", fallback_url="http://x")
+
+    refined = await svc._refine_with_musicbrainz(track, info)
+
+    assert refined["artist"] == "KAYTRANADA"
+    assert refined["title"] == "Lite Spots"
+    assert refined["album"] == "99.9%"
+    assert refined["match_source"] == "musicbrainz"
+    assert refined["confidence"] == 100
+    # MusicBrainz is queried with the noise-stripped raw video title, not the guessed artist.
+    assert mb.queries == ["kaytranada lite spots"]
+
+
+@pytest.mark.asyncio
+async def test_refine_is_noop_for_structured_metadata():
+    mb = _StubMusicBrainz({"artist": "Wrong", "title": "Wrong", "album": None, "score": 100})
+    svc = _service(mb)
+    info = {"track": "Flickermood", "artist": "Forss", "title": "x", "id": "abc"}
+    track = svc._track_from_info(info, "youtube", fallback_url="http://x")
+
+    refined = await svc._refine_with_musicbrainz(track, info)
+
+    assert refined["artist"] == "Forss"
+    assert refined["title"] == "Flickermood"
+    assert refined["match_source"] == "structured"
+    assert mb.queries == []  # never called
+
+
+@pytest.mark.asyncio
+async def test_refine_keeps_string_guess_when_no_match():
+    svc = _service(_StubMusicBrainz(None))
+    info = {"track": None, "artist": None, "title": "Kaytranada - Lite spots", "id": "abc"}
+    track = svc._track_from_info(info, "youtube", fallback_url="http://x")
+
+    refined = await svc._refine_with_musicbrainz(track, info)
+
+    assert refined["artist"] == "Kaytranada"
+    assert refined["title"] == "Lite spots"
+    assert refined["match_source"] == "string"
+    assert refined["confidence"] is None
+
+
+@pytest.mark.asyncio
+async def test_refine_does_not_overwrite_existing_album():
+    mb = _StubMusicBrainz({"artist": "A", "title": "T", "album": "MB Album", "score": 95})
+    svc = _service(mb)
+    info = {"track": None, "artist": None, "title": "A - T", "album": "Original Album", "id": "abc"}
+    track = svc._track_from_info(info, "youtube", fallback_url="http://x")
+
+    refined = await svc._refine_with_musicbrainz(track, info)
+
+    assert refined["album"] == "Original Album"

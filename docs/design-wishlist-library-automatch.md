@@ -40,9 +40,18 @@ VALUE …` migration.
    `ignored`.
 2. For each item, ask the user's **Navidrome** whether the track already exists, via
    `SubsonicClient.get_track_match(user, title, artist, album)`
-   (`clients/subsonic_client.py`). This is the same Subsonic-search presence-check that
-   `scripts/download_wishlist.py` performs (`is_in_collection`), reusing pymix's
-   existing, more capable fuzzy matcher rather than a second implementation.
+   (`clients/subsonic_client.py`). This asks the *same question* as
+   `scripts/download_wishlist.py`'s `is_in_collection` — "is this track in the user's
+   Navidrome?" — but is **not** the same implementation. The download script is
+   deliberately stdlib-only (it runs under a bare `python3` on a user's laptop), so it
+   carries its own single-query `SequenceMatcher` check; pymix, with no such
+   constraint, uses its richer multi-stage matcher (`get_track_match`: query by
+   title+artist, then title, then title tokens, with weighted title/artist/album
+   similarity and bracket-stripping fallbacks). The two are intentionally-parallel
+   presence checks that should stay behaviourally aligned; they can't share code across
+   the stdlib boundary. (The pure "Artist - Title" title split *is* mirrored between
+   the two — see `link_parse_service._split_artist_title` and the script's
+   `split_youtube_artist_title`.)
 3. On a hit → set the item's status to `available` and `linked_subbox_id` to the
    matched track's `subbox_id`. The search result carries `pymix_path` but not the
    tag-derived `subbox_id`, so the service reads it with `get_subbox_id(track.pymix_path)`
@@ -51,11 +60,12 @@ VALUE …` migration.
 ### Why Navidrome search rather than a beets `fuzzy` query
 
 An earlier draft proposed matching with the beets `fuzzy` plugin via `beet ls
-artist:~ title:~` per item. We instead reuse `SubsonicClient.get_track_match`: it
-already exists, is the exact check the wishlist download script relies on, and needs no
-per-user beets-config migration (the `fuzzy` plugin would have had to be enabled and
-every user's `beets{user}` container re-rendered). Navidrome is the user's library
-index, so it is the right source of truth for "do I have this yet?".
+artist:~ title:~` per item. We instead use `SubsonicClient.get_track_match`: it
+already exists, applies the same "search Navidrome" presence check the wishlist
+download script relies on, and needs no per-user beets-config migration (the `fuzzy`
+plugin would have had to be enabled and every user's `beets{user}` container
+re-rendered). Navidrome is the user's library index, so it is the right source of truth
+for "do I have this yet?".
 
 ### Edge cases
 

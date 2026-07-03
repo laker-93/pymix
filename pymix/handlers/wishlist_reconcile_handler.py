@@ -3,15 +3,11 @@ import logging
 import anyio
 
 from pymix.controllers.db_controller import DbController
-from pymix.model.wishlist import WishlistStatus
+from pymix.model.wishlist import OPEN_WISHLIST_STATUSES
 from pymix.services.wishlist_reconcile_service import ReconcileResult, WishlistReconcileService
+from pymix.utils.quiet_logging import suppress_match_logging
 
 logger = logging.getLogger(__name__)
-
-# Mirror the open statuses the reconcile service itself re-checks. ``inbox`` has no
-# clean artist/title to query on; ``available`` / ``ignored`` are terminal.
-_OPEN_STATUSES = (WishlistStatus.WISHLIST.value, WishlistStatus.DOWNLOADED.value)
-
 
 # How many unmatched items to name inline before truncating to a "+N more" count.
 # Matched items are always listed in full — they're the actionable, low-volume signal.
@@ -58,21 +54,23 @@ async def wishlist_reconcile_loop(
     eventually flip once the track becomes searchable, without depending on the timing
     of any single import.
 
-    Per-item logging is suppressed (``quiet=True``); the cycle ends with a single
-    aggregated summary line via :func:`_log_cycle_summary`.
+    Per-item logging is suppressed via :func:`suppress_match_logging`; the cycle ends
+    with a single aggregated summary line via :func:`_log_cycle_summary`. Errors still
+    surface (they're above the suppression threshold).
     """
     while True:
-        users = db_controller.get_users_with_open_wishlist_items(_OPEN_STATUSES)
+        users = db_controller.get_users_with_open_wishlist_items(OPEN_WISHLIST_STATUSES)
         if not users:
             logger.debug("wishlist reconcile: no users with open items this cycle")
         else:
             results: list[ReconcileResult] = []
-            for user in users:
-                try:
-                    results.append(await reconcile_service.reconcile_user(user, quiet=True))
-                except Exception:
-                    logger.exception(
-                        f"wishlist reconcile: unexpected error reconciling user {user['username']}"
-                    )
+            with suppress_match_logging():
+                for user in users:
+                    try:
+                        results.append(await reconcile_service.reconcile_user(user))
+                    except Exception:
+                        logger.exception(
+                            f"wishlist reconcile: unexpected error reconciling user {user['username']}"
+                        )
             _log_cycle_summary(results)
         await anyio.sleep(poll_interval_s)
