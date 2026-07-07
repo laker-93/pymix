@@ -89,6 +89,12 @@ async def get_tracks_presence(
         user = db_controller.get_user_by_session_id(session_id)
         username = user["username"]
 
+    if not username:
+        raise HTTPException(
+            status_code=400,
+            detail="Must provide a username or session_id to identify user",
+        )
+
     presence = db_controller.get_subbox_ids_presence(username, body.subbox_ids)
     return TrackPresenceResponse(presence=presence)
 

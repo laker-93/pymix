@@ -23,5 +23,6 @@ jsonschema
 pytaglib==2.1.0
 rapidfuzz~=3.9
 yt-dlp>=2024.8.6
+musicbrainzngs~=0.7.1
 google-api-python-client~=2.100
 google-auth~=2.30

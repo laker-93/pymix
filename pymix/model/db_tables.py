@@ -1,5 +1,7 @@
-from sqlalchemy import Column, String, Integer, Boolean, Float, BigInteger, JSON
+from sqlalchemy import Column, String, Integer, Boolean, Float, BigInteger, JSON, Enum
 from sqlalchemy.orm import declarative_base
+
+from pymix.model.wishlist import WishlistStatus
 
 Base = declarative_base()
 
@@ -120,11 +122,30 @@ class WishlistRow(Base):
     album = Column(String)
     raw_note = Column(String)
 
-    status = Column(String, nullable=False)
+    # 'auto' | 'user' — see MetadataSource. 'user' locks artist/title against
+    # automatic re-matching (MusicBrainz refinement, reconcile, sheet sync).
+    metadata_source = Column(String, nullable=False, server_default='auto')
+
+    # 'pending' | 'resolved' | 'nomatch' — see ResolveState. Work-state for the async
+    # resolve loop: a 'pending' item has hand-typed artist/title still to be refined against
+    # MusicBrainz; a bare inbox raw note (no artist/title) is 'nomatch' — nothing to
+    # auto-resolve, left for the user. 'nomatch' is terminal. The (metadata_source,
+    # resolve_state) pair is indexed for the loop's selection query.
+    resolve_state = Column(String, nullable=False, server_default='pending')
+
+    status = Column(
+        Enum(
+            WishlistStatus,
+            name="wishlist_status",
+            values_callable=lambda e: [m.value for m in e],
+        ),
+        nullable=False,
+    )
 
     youtube_video_id = Column(String)
     youtube_url = Column(String)
     bandcamp_url = Column(String)
+    soundcloud_url = Column(String)
 
     linked_subbox_id = Column(String)
 

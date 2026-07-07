@@ -1,6 +1,7 @@
 import datetime
 import logging
 import re
+from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -11,6 +12,18 @@ from pymix.services.google_sheets_service import GoogleSheetsService, SheetRow
 from pymix.services.link_parse_service import LinkParseService, detect_link_source
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SheetSyncResult:
+    """Outcome of syncing one user's sheet, aggregated into a single per-cycle summary."""
+
+    username: str
+    status: str  # "ok" or "error"
+    rows_read: int = 0
+    imported: int = 0
+    errors: int = 0
+    error_message: Optional[str] = None
 
 
 def _describe_error(e: Exception) -> str:
@@ -41,6 +54,8 @@ def _row_signature(row: SheetRow) -> Optional[tuple]:
             return ("youtube", _extract_video_id(row["url"]))
         if source == "bandcamp":
             return ("bandcamp", row["url"].strip().lower())
+        if source == "soundcloud":
+            return ("soundcloud", row["url"].strip().lower())
     if row["artist"] and row["title"]:
         return ("artist_title", row["artist"].strip().lower(), row["title"].strip().lower())
     if row["raw_note"]:
@@ -54,6 +69,8 @@ def _item_signature(item: dict) -> Optional[tuple]:
         return ("youtube", item["youtube_video_id"])
     if item.get("bandcamp_url"):
         return ("bandcamp", item["bandcamp_url"].strip().lower())
+    if item.get("soundcloud_url"):
+        return ("soundcloud", item["soundcloud_url"].strip().lower())
     if item.get("artist") and item.get("title"):
         return ("artist_title", item["artist"].strip().lower(), item["title"].strip().lower())
     if item.get("raw_note"):
@@ -74,33 +91,43 @@ class SheetSyncService:
         self._google_sheets_service = google_sheets_service
         self._link_parse_service = link_parse_service
 
-    async def sync_user(self, user: dict) -> None:
+    async def sync_user(self, user: dict) -> SheetSyncResult:
         sheet_id = user["wishlist_sheet_id"]
         username = user["username"]
-        logger.info(f"sheet sync: syncing user {username} sheet={sheet_id}")
+        # Per-poll progress is DEBUG: a steady-state cycle that imports nothing is
+        # the common case and shouldn't fill the logs. The handler emits a single
+        # INFO summary per cycle, and actual imports below still log at INFO.
+        logger.debug(f"sheet sync: syncing user {username} sheet={sheet_id}")
 
         try:
             rows = self._google_sheets_service.read_rows(sheet_id)
         except Exception as e:
             logger.exception(f"sheet sync: failed to read sheet for user {username}")
-            self._db_controller.update_wishlist_sheet_status(
-                username=username,
-                status="error",
-                error=f"subbox cannot read this sheet — check it's shared with the service account. ({_describe_error(e)})",
+            error_message = (
+                f"subbox cannot read this sheet — check it's shared with the service account. "
+                f"({_describe_error(e)})"
             )
-            return
-        logger.info(f"sheet sync: read {len(rows)} row(s) for user {username}")
+            self._db_controller.update_wishlist_sheet_status(
+                username=username, status="error", error=error_message
+            )
+            return SheetSyncResult(username=username, status="error", error_message=error_message)
+        logger.debug(f"sheet sync: read {len(rows)} row(s) for user {username}")
 
+        status = "ok"
+        error_message = None
         try:
             self._google_sheets_service.check_write_access(sheet_id)
             self._db_controller.update_wishlist_sheet_status(username=username, status="ok", error=None)
         except Exception as e:
+            error_message = (
+                f"subbox can read but not edit this sheet — share it as Editor, not Viewer. "
+                f"({_describe_error(e)})"
+            )
             logger.exception(f"sheet sync: write-access check failed for user {username}")
             self._db_controller.update_wishlist_sheet_status(
-                username=username,
-                status="error",
-                error=f"subbox can read but not edit this sheet — share it as Editor, not Viewer. ({_describe_error(e)})",
+                username=username, status="error", error=error_message
             )
+            status = "error"
             # Don't return: rows can still be imported via the signature-based dedup
             # fallback below even without write-back access.
 
@@ -115,6 +142,8 @@ class SheetSyncService:
             if sig is not None
         }
 
+        imported = 0
+        errors = 0
         for row in rows:
             row_index = row["row_index"]
 
@@ -127,14 +156,14 @@ class SheetSyncService:
 
             signature = _row_signature(row)
             if signature is None:
-                logger.info(
+                logger.debug(
                     f"sheet sync: row {row_index} for user {username} has no url, artist+title, "
                     "or raw_note — treated as blank, not imported"
                 )
                 continue
 
             if signature in existing_signatures:
-                logger.info(
+                logger.debug(
                     f"sheet sync: row {row_index} for user {username} matches an existing wishlist item "
                     "— skipping import, writing status back"
                 )
@@ -149,11 +178,22 @@ class SheetSyncService:
             try:
                 await self._sync_row(username, sheet_id, row)
                 existing_signatures.add(signature)
+                imported += 1
             except Exception:
                 logger.exception(
                     f"sheet sync: failed to process row {row_index} for user {username}"
                 )
                 self._write_status(sheet_id, row_index, "Error - see logs")
+                errors += 1
+
+        return SheetSyncResult(
+            username=username,
+            status=status,
+            rows_read=len(rows),
+            imported=imported,
+            errors=errors,
+            error_message=error_message,
+        )
 
     async def _sync_row(self, username: str, sheet_id: str, row: SheetRow) -> None:
         row_index = row["row_index"]
@@ -185,6 +225,7 @@ class SheetSyncService:
                             "youtube_url": track.get("youtube_url"),
                             "youtube_video_id": track.get("youtube_video_id"),
                             "bandcamp_url": track.get("bandcamp_url"),
+                            "soundcloud_url": track.get("soundcloud_url"),
                         }
                         for track in tracks
                     ],
@@ -197,10 +238,12 @@ class SheetSyncService:
                 artist = row["artist"] or (metadata["artist"] if metadata else None)
                 title = row["title"] or (metadata["title"] if metadata else None)
 
-                youtube_url = youtube_video_id = bandcamp_url = None
+                youtube_url = youtube_video_id = bandcamp_url = soundcloud_url = None
                 if source == "youtube":
                     youtube_url = row["url"]
                     youtube_video_id = _extract_video_id(row["url"])
+                elif source == "soundcloud":
+                    soundcloud_url = row["url"]
                 else:
                     bandcamp_url = row["url"]
 
@@ -212,6 +255,7 @@ class SheetSyncService:
                     youtube_url=youtube_url,
                     youtube_video_id=youtube_video_id,
                     bandcamp_url=bandcamp_url,
+                    soundcloud_url=soundcloud_url,
                 )
                 logger.info(f"sheet sync: row {row_index} for user {username} imported via {source} url")
         elif row["artist"] and row["title"]:

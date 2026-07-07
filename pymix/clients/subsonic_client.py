@@ -15,10 +15,14 @@ from pymix.model.subboxplaylist import SubBoxPlaylist
 
 
 from pymix.model.subboxtrack import SubBoxTrack
+from pymix.utils.quiet_logging import make_logger_suppressible
 from pymix.utils.tag_subbox_id import get_subbox_id
 from pymix.utils.utility import add_url_params
 
 logger = logging.getLogger(__name__)
+# The per-item match diagnostics below are silenced during the background wishlist
+# reconcile sweep via quiet_logging.suppress_match_logging(); errors still surface.
+make_logger_suppressible(logger)
 
 
 IGNORED_TITLE_WORDS = {'remix'}
@@ -152,7 +156,9 @@ class SubsonicClient(BaseAPIClient):
         try:
             resp = response['subsonic-response'][search_result]['song']
         except KeyError:
-            logger.error(f'no songs found in response {response}')
+            # An empty search result is a normal outcome (e.g. a wishlist item whose
+            # track isn't in the library yet), not an error — keep it at debug.
+            logger.debug(f'no songs found in response {response}')
             resp = []
         n_items = len(resp)
         return [
@@ -293,6 +299,15 @@ class SubsonicClient(BaseAPIClient):
 
     async def get_track_match(self, user: dict, title: str, artist: str, album: Optional[str] = None) -> Optional[
         tuple[SubBoxTrack, float]]:
+        """Find the best Navidrome track for ``title``/``artist``.
+
+        This method's per-item search logging (the progressive "no matches querying
+        by ..." / "failed to find match" lines and the similarity diagnostics in the
+        helpers) is emitted unconditionally. Callers that run it in a tight loop over
+        many items — e.g. the background wishlist reconcile sweep — wrap the loop in
+        ``quiet_logging.suppress_match_logging()`` to drop that chatter and emit a
+        single aggregated summary instead; real errors still surface.
+        """
         clean_title = extract_track_name(title, artist, album)
         if clean_title is None:
             logger.error(f'failed to clean track name from {title} by {artist} and {album}')
@@ -324,7 +339,7 @@ class SubsonicClient(BaseAPIClient):
         if match:
             return match
 
-        logger.error(f'failed to find match on {title} or any of its tokens')
+        logger.info(f'failed to find match on {title} or any of its tokens')
         return None
 
     async def query_tracks_by(self, user: dict, title: str, artist: str) -> List[SubBoxTrack]:

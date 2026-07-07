@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import List, Optional
 import mediafile
 import music_tag
-import taglib
 from beets.plugins import BeetsPlugin
 from beets.library import Item
 from python_on_whales import docker
@@ -19,6 +18,7 @@ from pymix.handlers.rb_backup_file_handler import RBBackupFileHandler
 from pymix.model.subboxplaylist import SubBoxPlaylist
 from pymix.orchestrators.rekordbox_xml_orchestrator import RekordboxXMLOrchestrator
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
+from pymix.services.wishlist_reconcile_service import WishlistReconcileService
 from pyserato.encoders.serato_tags import clear_all_tags
 from pyserato.encoders.v2_mp3_encoder import V2Mp3Encoder
 from pyserato.model.hot_cue import HotCue
@@ -55,6 +55,7 @@ class RekordboxXMLController:
             file_browser_file_handler: FileBrowserFileHandler,
             subsonic_client: SubsonicClient,
             db_controller: DbController,
+            wishlist_reconcile_service: WishlistReconcileService,
             restored_db_output_root: str,
             local_user_music_stem: str,
             serving_music_path_base: str
@@ -64,6 +65,7 @@ class RekordboxXMLController:
         self._rb_backup_file_handler = rb_backup_file_handler
         self._file_browser_file_handler = file_browser_file_handler
         self._db_controller = db_controller
+        self._wishlist_reconcile_service = wishlist_reconcile_service
         self._restored_db_output_root = restored_db_output_root
         self._subsonic_client = subsonic_client
         self._local_user_music_stem = local_user_music_stem
@@ -191,11 +193,8 @@ class RekordboxXMLController:
                     logger.warning(f"Could not resolve path for beet_id={beet_id}, skipping.")
                     continue
                 logger.info(f"Resolved path with special chars: {p}")
-            with taglib.File(p) as song:
-                subbox_tag = song.tags.get("SUBBOX_ID")
-            if subbox_tag:
-                subbox_id = subbox_tag[0]
-            else:
+            subbox_id = get_subbox_id(p)
+            if not subbox_id:
                 logger.warning(f"No subbox_id tag found for {p}, skipping.")
                 continue
             # 4️⃣ Add mapping to DB
@@ -219,7 +218,17 @@ class RekordboxXMLController:
 
     # todo this controller is overloaded; this method has nothing to do with rekordbox xml and should live elsewhere.
     async def consume_from_filebrowser(self, username: str, public: bool, watch: bool = False) -> str:
-        return await anyio.to_thread.run_sync(self._consume_from_filebrowser, username, public, watch)
+        result = await anyio.to_thread.run_sync(self._consume_from_filebrowser, username, public, watch)
+        # Once the import has landed in beets (subbox_ids mapped), resolve any open
+        # wishlist items whose track now exists in the user's Navidrome. Only for the
+        # user's own (private) library — public imports don't reach a user's Navidrome.
+        if not public:
+            try:
+                user = self._db_controller.get_user(username)
+                await self._wishlist_reconcile_service.reconcile_user(user)
+            except Exception:
+                logger.exception(f"wishlist reconcile after import failed for {username}")
+        return result
 
     @staticmethod
     def _resolve_path_with_special_chars(p: Path) -> Optional[Path]:
@@ -252,9 +261,8 @@ class RekordboxXMLController:
             if not f.is_file():
                 continue
             try:
-                with taglib.File(str(f), save_on_exit=False) as song:
-                    subbox_tag = song.tags.get("SUBBOX_ID")
-                    tag_val = subbox_tag[0] if subbox_tag else "<MISSING>"
+                subbox_id = get_subbox_id(f)
+                tag_val = subbox_id if subbox_id else "<MISSING>"
                 logger.info(f'[{label}] {f.name} → SUBBOX_ID={tag_val}')
             except Exception:
                 logger.info(f'[{label}] {f.name} → <UNREADABLE>')

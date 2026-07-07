@@ -23,7 +23,10 @@ from pymix.orchestrators.services_orchestrator import ServicesOrchestrator
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
 from pymix.services.google_sheets_service import GoogleSheetsService
 from pymix.services.link_parse_service import LinkParseService
+from pymix.services.musicbrainz_match_service import MusicBrainzMatchService
 from pymix.services.sheet_sync_service import SheetSyncService
+from pymix.services.wishlist_reconcile_service import WishlistReconcileService
+from pymix.services.wishlist_resolve_service import WishlistResolveService
 from pymix.services.youtube_match_service import YoutubeMatchService
 
 
@@ -120,6 +123,12 @@ class Container(containers.DeclarativeContainer):
         db_controller,
     )
 
+    wishlist_reconcile_service = providers.Singleton(
+        WishlistReconcileService,
+        db_controller,
+        subsonic_client,
+    )
+
     rekordbox_xml_controller = providers.Singleton(
         RekordboxXMLController,
         subsonic_orchestrator,
@@ -128,6 +137,7 @@ class Container(containers.DeclarativeContainer):
         file_browser_file_handler,
         subsonic_client,
         db_controller,
+        wishlist_reconcile_service,
         config.rekordbox.restored_rb_output_root,
         config.local_user_music_stem,
         config.containers.subsonic.serving_music_path_base,
@@ -155,6 +165,7 @@ class Container(containers.DeclarativeContainer):
         rb_backup_file_handler,
         rekordbox_xml_controller,
         db_controller,
+        wishlist_reconcile_service,
         config.containers.subsonic.serving_music_path_base,
     )
 
@@ -169,8 +180,19 @@ class Container(containers.DeclarativeContainer):
         YoutubeMatchService,
     )
 
+    musicbrainz_match_service = providers.Singleton(
+        MusicBrainzMatchService,
+    )
+
     link_parse_service = providers.Singleton(
         LinkParseService,
+        musicbrainz_match_service,
+    )
+
+    wishlist_resolve_service = providers.Singleton(
+        WishlistResolveService,
+        db_controller,
+        musicbrainz_match_service,
     )
 
     google_sheets_service = providers.Singleton(

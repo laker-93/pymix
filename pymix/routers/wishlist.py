@@ -9,13 +9,16 @@ from pymix.controllers.db_controller import DbController
 from pymix.model.api.wishlist_requests import (
     CreateWishlistBulkRequest,
     CreateWishlistRequest,
+    MatchMetadataRequest,
     ParseLinkRequest,
     SetWishlistSheetRequest,
     UpdateWishlistRequest,
 )
-from pymix.model.wishlist import WISHLIST_STATUSES
+from pymix.model.wishlist import MetadataSource, RESOLVE_STATES, WISHLIST_STATUSES
 from pymix.services.link_parse_service import LinkParseService
+from pymix.services.musicbrainz_match_service import MusicBrainzMatchService
 from pymix.services.sheet_sync_service import SheetSyncService
+from pymix.services.wishlist_reconcile_service import WishlistReconcileService
 from pymix.services.youtube_match_service import YoutubeMatchService
 
 router = APIRouter()
@@ -37,6 +40,7 @@ def _resolve_username(db_controller: DbController, session_id: Optional[str], us
 @inject
 async def get_wishlist(
     status: Optional[str] = Query(None, description="Filter by wishlist status"),
+    resolve_state: Optional[str] = Query(None, description="Filter by resolve_state"),
     session_id: Optional[str] = Cookie(None),
     username: Optional[str] = Query(None, description="Username for authentication"),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
@@ -45,8 +49,10 @@ async def get_wishlist(
 
     if status is not None and status not in WISHLIST_STATUSES:
         raise HTTPException(status_code=400, detail=f"Invalid status '{status}'")
+    if resolve_state is not None and resolve_state not in RESOLVE_STATES:
+        raise HTTPException(status_code=400, detail=f"Invalid resolve_state '{resolve_state}'")
 
-    items = db_controller.get_wishlist_items(username=username, status=status)
+    items = db_controller.get_wishlist_items(username=username, status=status, resolve_state=resolve_state)
     return {"items": items}
 
 
@@ -68,6 +74,7 @@ async def create_wishlist_item(
         youtube_video_id=body.youtube_video_id,
         youtube_url=body.youtube_url,
         bandcamp_url=body.bandcamp_url,
+        soundcloud_url=body.soundcloud_url,
         status=body.initial_status,
     )
     return {"item": item}
@@ -112,6 +119,36 @@ async def parse_wishlist_link(
     return {"metadata": metadata}
 
 
+@router.post("/wishlist/match-metadata", tags=["wishlist"])
+@inject
+async def match_wishlist_metadata(
+    body: MatchMetadataRequest,
+    session_id: Optional[str] = Cookie(None),
+    username: Optional[str] = Query(None, description="Username for authentication"),
+    db_controller: DbController = Depends(Provide[Container.db_controller]),
+    musicbrainz_match_service: MusicBrainzMatchService = Depends(
+        Provide[Container.musicbrainz_match_service]
+    ),
+) -> dict:
+    """Look up a canonical artist/title for free-text the user typed or an inbox note.
+
+    Shares the MusicBrainz matcher used to refine link parsing, so the client gets the
+    same extraction quality on hand-entered text. A miss returns ``{"match": null}``
+    rather than an error — the caller keeps whatever it had.
+    """
+    _resolve_username(db_controller, session_id, username)
+
+    # A raw query is free text (an inbox note); an artist/title pair is fielded so the
+    # artist actually constrains the search — see MusicBrainzMatchService.match_fields.
+    if body.query and body.query.strip():
+        match = await musicbrainz_match_service.match(body.query.strip())
+    else:
+        match = await musicbrainz_match_service.match_fields(
+            artist=body.artist or "", title=body.title or ""
+        )
+    return {"match": match}
+
+
 @router.patch("/wishlist/sheet", tags=["wishlist"])
 @inject
 async def set_wishlist_sheet(
@@ -147,6 +184,23 @@ async def get_wishlist_sheet_status(
     }
 
 
+@router.post("/wishlist/reconcile", tags=["wishlist"])
+@inject
+async def reconcile_wishlist(
+    session_id: Optional[str] = Cookie(None),
+    username: Optional[str] = Query(None, description="Username for authentication"),
+    db_controller: DbController = Depends(Provide[Container.db_controller]),
+    wishlist_reconcile_service: WishlistReconcileService = Depends(
+        Provide[Container.wishlist_reconcile_service]
+    ),
+) -> dict:
+    username = _resolve_username(db_controller, session_id, username)
+
+    user = db_controller.get_user(username)
+    result = await wishlist_reconcile_service.reconcile_user(user)
+    return {"resolved": result.resolved}
+
+
 @router.get("/wishlist/{wishlist_id}", tags=["wishlist"])
 @inject
 async def get_wishlist_item(
@@ -180,6 +234,10 @@ async def update_wishlist_item(
     updates = body.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
+
+    # A user editing artist/title locks the item against future automatic re-matching.
+    if "artist" in updates or "title" in updates:
+        updates["metadata_source"] = MetadataSource.USER.value
 
     item = db_controller.update_wishlist_item(username=username, wishlist_id=wishlist_id, updates=updates)
     if item is None:
