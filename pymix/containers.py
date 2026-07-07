@@ -26,6 +26,7 @@ from pymix.services.link_parse_service import LinkParseService
 from pymix.services.musicbrainz_match_service import MusicBrainzMatchService
 from pymix.services.sheet_sync_service import SheetSyncService
 from pymix.services.wishlist_reconcile_service import WishlistReconcileService
+from pymix.services.wishlist_resolve_service import WishlistResolveService
 from pymix.services.youtube_match_service import YoutubeMatchService
 
 
@@ -185,6 +186,12 @@ class Container(containers.DeclarativeContainer):
 
     link_parse_service = providers.Singleton(
         LinkParseService,
+        musicbrainz_match_service,
+    )
+
+    wishlist_resolve_service = providers.Singleton(
+        WishlistResolveService,
+        db_controller,
         musicbrainz_match_service,
     )
 

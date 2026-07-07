@@ -13,7 +13,18 @@ from pymix.model.db_tables import (
     PlaylistPathRow, WishlistRow,
 )
 from pymix.model.original_track_meta import OriginalTracks
+from pymix.model.wishlist import MetadataSource, ResolveState
 from pymix.utils.get_available_port import get_available_port
+
+
+def _derive_resolve_state(youtube_url, bandcamp_url, soundcloud_url) -> str:
+    """A newly-created item is ``resolved`` when it carries a source URL (its metadata was
+    parsed from that link, or the URL itself is the exact-song identity the downloader
+    resolves), and ``pending`` when it's only free text (artist/title/raw_note) that the
+    async resolve loop still needs to refine against MusicBrainz. Single source of truth
+    for the client, bulk and Google-Sheet ingest paths, which all funnel through here."""
+    has_url = bool(youtube_url or bandcamp_url or soundcloud_url)
+    return ResolveState.RESOLVED.value if has_url else ResolveState.PENDING.value
 
 
 logger = logging.getLogger(__name__)
@@ -624,10 +635,14 @@ class DbController:
             youtube_url: Optional[str] = None,
             bandcamp_url: Optional[str] = None,
             soundcloud_url: Optional[str] = None,
+            resolve_state: Optional[str] = None,
     ) -> dict:
         user = self.get_user(username)
         user_id = user['user_id']
         now = datetime.datetime.now().timestamp()
+
+        if resolve_state is None:
+            resolve_state = _derive_resolve_state(youtube_url, bandcamp_url, soundcloud_url)
 
         with self._session_factory() as session:
             new_item = WishlistRow(
@@ -638,6 +653,7 @@ class DbController:
                 album=album,
                 raw_note=raw_note,
                 status=status,
+                resolve_state=resolve_state,
                 youtube_video_id=youtube_video_id,
                 youtube_url=youtube_url,
                 bandcamp_url=bandcamp_url,
@@ -666,6 +682,9 @@ class DbController:
                     album=item.get('album'),
                     raw_note=item.get('raw_note'),
                     status=item.get('status', 'wishlist'),
+                    resolve_state=item.get('resolve_state') or _derive_resolve_state(
+                        item.get('youtube_url'), item.get('bandcamp_url'), item.get('soundcloud_url')
+                    ),
                     youtube_video_id=item.get('youtube_video_id'),
                     youtube_url=item.get('youtube_url'),
                     bandcamp_url=item.get('bandcamp_url'),
@@ -681,7 +700,9 @@ class DbController:
             logger.info(f"Created {len(results)} wishlist items for user {username}")
             return results
 
-    def get_wishlist_items(self, username: str, status: Optional[str] = None) -> list[dict]:
+    def get_wishlist_items(
+        self, username: str, status: Optional[str] = None, resolve_state: Optional[str] = None
+    ) -> list[dict]:
         user = self.get_user(username)
         user_id = user['user_id']
 
@@ -689,6 +710,8 @@ class DbController:
             query = session.query(WishlistRow).filter(WishlistRow.user_id == user_id)
             if status is not None:
                 query = query.filter(WishlistRow.status == status)
+            if resolve_state is not None:
+                query = query.filter(WishlistRow.resolve_state == resolve_state)
             rows = query.all()
             return [_row_to_dict(r) for r in rows]
 
@@ -776,3 +799,53 @@ class DbController:
             row.updated_at = datetime.datetime.now().timestamp()
             session.commit()
             logger.info(f"Wishlist item {wishlist_id} matched to subbox_id {linked_subbox_id}")
+
+    def get_users_with_pending_resolve_items(self) -> list[dict]:
+        """Return the full user records for every user that has at least one auto-provenance
+        wishlist item still awaiting resolution (metadata_source='auto', resolve_state=
+        'pending'). Used by the background resolve loop to know which users to sweep."""
+        with self._session_factory() as session:
+            rows = (
+                session.query(UserRow)
+                .join(WishlistRow, WishlistRow.user_id == UserRow.user_id)
+                .filter(
+                    WishlistRow.metadata_source == MetadataSource.AUTO.value,
+                    WishlistRow.resolve_state == ResolveState.PENDING.value,
+                )
+                .distinct()
+                .all()
+            )
+            return [_row_to_dict(r) for r in rows]
+
+    def get_pending_resolve_items(self, username: str) -> list[dict]:
+        """Return one user's wishlist items awaiting resolution — auto-provenance and
+        resolve_state='pending'. User-edited ('user') items are excluded so the loop never
+        overwrites a title the user curated."""
+        user = self.get_user(username)
+        user_id = user['user_id']
+        with self._session_factory() as session:
+            rows = (
+                session.query(WishlistRow)
+                .filter(
+                    WishlistRow.user_id == user_id,
+                    WishlistRow.metadata_source == MetadataSource.AUTO.value,
+                    WishlistRow.resolve_state == ResolveState.PENDING.value,
+                )
+                .all()
+            )
+            return [_row_to_dict(r) for r in rows]
+
+    def resolve_wishlist_item(self, wishlist_id: str, updates: dict) -> Optional[dict]:
+        """Apply a resolve-loop update atomically, but only while the item is still
+        auto-provenance. A concurrent user edit (PATCH) flips metadata_source to 'user'
+        between the loop reading the item and writing it back, and that edit must win —
+        this re-checks inside the transaction and skips the write (returns None) if so."""
+        with self._session_factory() as session:
+            row = session.query(WishlistRow).filter(WishlistRow.wishlist_id == wishlist_id).first()
+            if row is None or row.metadata_source != MetadataSource.AUTO.value:
+                return None
+            for key, value in updates.items():
+                setattr(row, key, value)
+            row.updated_at = datetime.datetime.now().timestamp()
+            session.commit()
+            return _row_to_dict(row)

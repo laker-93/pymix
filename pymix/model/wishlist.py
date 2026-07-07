@@ -15,6 +15,26 @@ class MetadataSource(str, enum.Enum):
     USER = "user"
 
 
+class ResolveState(str, enum.Enum):
+    """Whether an item's artist/title has been resolved to a canonical form yet.
+
+    A new item starts ``pending`` — its artist/title is raw text the user typed (or an
+    unparsed URL) that the background resolve loop still needs to refine against
+    MusicBrainz (and, for a bare URL, yt-dlp). ``resolved`` means a confident match was
+    applied, or the item arrived already resolved (a parsed single link, or a collection
+    expansion). ``nomatch`` is terminal — resolution ran but found no confident match, so
+    the loop never retries it and the user's text is left as typed.
+    """
+
+    PENDING = "pending"
+    RESOLVED = "resolved"
+    NOMATCH = "nomatch"
+
+
+# Tuple of the string values, for membership-validation call-sites.
+RESOLVE_STATES = tuple(s.value for s in ResolveState)
+
+
 class WishlistStatus(str, enum.Enum):
     """The states a wishlist item can occupy.
 
@@ -52,6 +72,7 @@ class WishlistItem:
     album: Optional[str] = None
     raw_note: Optional[str] = None
     metadata_source: str = MetadataSource.AUTO.value
+    resolve_state: str = ResolveState.PENDING.value
     youtube_video_id: Optional[str] = None
     youtube_url: Optional[str] = None
     bandcamp_url: Optional[str] = None

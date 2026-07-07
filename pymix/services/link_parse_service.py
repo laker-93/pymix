@@ -2,7 +2,7 @@ import asyncio
 import logging
 import re
 from typing import List, Optional, Tuple, TypedDict, Union
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from yt_dlp import YoutubeDL
 
@@ -134,6 +134,27 @@ def detect_link_source(url: str) -> Optional[str]:
     return None
 
 
+def _is_youtube_auto_mix(url: str) -> bool:
+    """True for a `watch?v=X&list=RD...` link into a YouTube auto-generated Mix/radio.
+
+    Copying a YouTube link while a video auto-plays inside a "Mix" yields
+    `watch?v=X&list=RD...` (all radio/mix list ids start with `RD`). Unlike a real
+    playlist or album, a Mix is an endless, personalised continuation feed — video X
+    is just the current track, and the mix has hundreds of entries. The design
+    deliberately expands `watch?v=X&list=Y` for *real* playlists (see `_YDL_OPTS`),
+    but for a Mix that means enumerating a full metadata extraction of every entry,
+    which effectively hangs. The user meant the single playing track X, so these are
+    carved out to resolve X alone.
+    """
+    parsed = urlparse(url)
+    if (parsed.hostname or "").lower() not in _YOUTUBE_HOSTS:
+        return False
+    query = parse_qs(parsed.query)
+    if not query.get("v"):
+        return False
+    return any(list_id.startswith("RD") for list_id in query.get("list", []))
+
+
 class LinkParseService:
     """Resolves a pasted YouTube, Bandcamp or SoundCloud link into track metadata.
 
@@ -156,8 +177,12 @@ class LinkParseService:
         if source is None:
             raise ValueError(f"'{url}' is not a YouTube, Bandcamp or SoundCloud link")
 
+        # A YouTube auto-generated Mix (watch?v=X&list=RD...) is resolved as the single
+        # video X, not expanded — expanding a Mix's hundreds of entries hangs the request.
+        noplaylist = _is_youtube_auto_mix(url)
+
         loop = asyncio.get_running_loop()
-        info = await loop.run_in_executor(None, self._extract_info, url)
+        info = await loop.run_in_executor(None, self._extract_info, url, noplaylist)
 
         # With ignoreerrors=True, a single unavailable video resolves to None
         # rather than raising.
@@ -250,6 +275,7 @@ class LinkParseService:
             result["bandcamp_url"] = info.get("webpage_url") or fallback_url
         return result
 
-    def _extract_info(self, url: str) -> dict:
-        with YoutubeDL(_YDL_OPTS) as ydl:
+    def _extract_info(self, url: str, noplaylist: bool = False) -> dict:
+        opts = {**_YDL_OPTS, "noplaylist": True} if noplaylist else _YDL_OPTS
+        with YoutubeDL(opts) as ydl:
             return ydl.extract_info(url, download=False)

@@ -45,3 +45,8 @@ wishlist:
   # user's Navidrome library (catches tracks that only become queryable after
   # Navidrome finishes scanning a fresh import)
   reconcile_interval_s: 90
+  # how often the background loop resolves pending free-text items (hand-typed
+  # artist/title, or inbox raw notes) to a canonical MusicBrainz match, so a typo'd
+  # entry is corrected before the downloader searches Soulseek for it. MusicBrainz
+  # is rate-limited to ~1 req/s, so this is deliberately unhurried.
+  resolve_interval_s: 60

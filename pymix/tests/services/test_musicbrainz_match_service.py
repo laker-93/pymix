@@ -11,7 +11,7 @@ def _recording(title, artist_credit, score, releases=None):
     return rec
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_match_returns_best_scoring_recording(monkeypatch):
     def fake_search(query, limit):
         return {
@@ -32,7 +32,7 @@ async def test_match_returns_best_scoring_recording(monkeypatch):
     assert result == {"artist": "KAYTRANADA", "title": "Lite Spots", "album": "99.9%", "score": 99}
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_match_joins_multi_artist_credit(monkeypatch):
     credit = [
         {"artist": {"name": "Artist A"}},
@@ -49,7 +49,7 @@ async def test_match_joins_multi_artist_credit(monkeypatch):
     assert result["artist"] == "Artist A feat. Artist B"
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_match_discards_below_threshold(monkeypatch):
     monkeypatch.setattr(
         mb_module.musicbrainzngs,
@@ -61,7 +61,7 @@ async def test_match_discards_below_threshold(monkeypatch):
     assert result is None
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_match_returns_none_for_no_results(monkeypatch):
     monkeypatch.setattr(
         mb_module.musicbrainzngs,
@@ -71,13 +71,13 @@ async def test_match_returns_none_for_no_results(monkeypatch):
     assert await MusicBrainzMatchService().match("nothing here") is None
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_match_returns_none_on_empty_query():
     # No network call should happen for blank input.
     assert await MusicBrainzMatchService().match("   ") is None
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_match_swallows_search_errors(monkeypatch):
     def boom(query, limit):
         raise RuntimeError("network down")
@@ -87,7 +87,7 @@ async def test_match_swallows_search_errors(monkeypatch):
     assert await MusicBrainzMatchService().match("anything") is None
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_match_drops_result_missing_artist(monkeypatch):
     monkeypatch.setattr(
         mb_module.musicbrainzngs,
@@ -95,3 +95,56 @@ async def test_match_drops_result_missing_artist(monkeypatch):
         lambda query, limit: {"recording-list": [_recording("Song", [], 100)]},
     )
     assert await MusicBrainzMatchService().match("x") is None
+
+
+@pytest.mark.anyio
+async def test_match_fields_builds_fielded_fuzzy_query(monkeypatch):
+    # The reported bug: artist "Kahn" + title typo "Abatoir". A free-text search matches
+    # the exact typo'd title by unrelated artists; a fielded query keyed on the artist,
+    # with the title fuzzed, resolves to the right recording instead.
+    captured = {}
+
+    def fake_search(query, limit):
+        captured["query"] = query
+        return {"recording-list": [_recording("Abattoir", [{"artist": {"name": "Kahn"}}], 100)]}
+
+    monkeypatch.setattr(mb_module.musicbrainzngs, "search_recordings", fake_search)
+    result = await MusicBrainzMatchService().match_fields(artist="Kahn", title="Abatoir")
+
+    assert captured["query"] == "artist:(Kahn) AND recording:(Abatoir~)"
+    assert result == {"artist": "Kahn", "title": "Abattoir", "album": None, "score": 100}
+
+
+@pytest.mark.anyio
+async def test_match_fields_fuzzes_each_title_term_and_escapes(monkeypatch):
+    captured = {}
+
+    def fake_search(query, limit):
+        captured["query"] = query
+        return {"recording-list": []}
+
+    monkeypatch.setattr(mb_module.musicbrainzngs, "search_recordings", fake_search)
+    await MusicBrainzMatchService().match_fields(artist="A:B", title="two words")
+
+    # Reserved ":" is escaped in the artist; every title term is individually fuzzed.
+    assert captured["query"] == r"artist:(A\:B) AND recording:(two~ words~)"
+
+
+@pytest.mark.anyio
+async def test_match_fields_title_only(monkeypatch):
+    captured = {}
+
+    def fake_search(query, limit):
+        captured["query"] = query
+        return {"recording-list": []}
+
+    monkeypatch.setattr(mb_module.musicbrainzngs, "search_recordings", fake_search)
+    await MusicBrainzMatchService().match_fields(title="solo")
+
+    assert captured["query"] == "recording:(solo~)"
+
+
+@pytest.mark.anyio
+async def test_match_fields_returns_none_when_no_fields():
+    # No network call should happen when there's nothing to search on.
+    assert await MusicBrainzMatchService().match_fields(artist="  ", title="") is None

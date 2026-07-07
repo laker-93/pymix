@@ -2,6 +2,7 @@ import pytest
 
 from pymix.services.link_parse_service import (
     LinkParseService,
+    _is_youtube_auto_mix,
     _split_artist_title,
     _strip_noise,
     detect_link_source,
@@ -31,6 +32,34 @@ def test_detect_link_source():
     assert detect_link_source("https://soundcloud.com/forss/flickermood") == "soundcloud"
     assert detect_link_source("https://m.soundcloud.com/forss/flickermood") == "soundcloud"
     assert detect_link_source("https://open.spotify.com/track/x") is None
+
+
+def test_is_youtube_auto_mix_true_for_rd_list_with_video():
+    # watch?v=X&list=RD... — a link copied while a YouTube Mix auto-plays.
+    assert _is_youtube_auto_mix(
+        "https://www.youtube.com/watch?v=2g7CjPjrKNk&list=RDAnwiOdtLF3E&index=4"
+    )
+
+
+def test_is_youtube_auto_mix_false_for_real_playlist():
+    # A real user playlist (PL...) should still expand.
+    assert not _is_youtube_auto_mix(
+        "https://www.youtube.com/watch?v=abc&list=PL1234567890"
+    )
+    # Auto-generated album release playlist (OLAK5uy_) is not a Mix either.
+    assert not _is_youtube_auto_mix(
+        "https://www.youtube.com/watch?v=abc&list=OLAK5uy_1234"
+    )
+
+
+def test_is_youtube_auto_mix_false_without_video_id():
+    # A bare mix playlist URL has no single video to fall back to.
+    assert not _is_youtube_auto_mix("https://www.youtube.com/playlist?list=RDAnwiOdtLF3E")
+
+
+def test_is_youtube_auto_mix_false_for_plain_video_and_non_youtube():
+    assert not _is_youtube_auto_mix("https://www.youtube.com/watch?v=abc")
+    assert not _is_youtube_auto_mix("https://soundcloud.com/x/y?list=RDabc")
 
 
 def test_track_from_info_soundcloud_sets_soundcloud_url():
@@ -159,7 +188,7 @@ def test_track_from_info_marks_string_source():
     assert result["match_source"] == "string"
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_refine_upgrades_string_guess_with_musicbrainz():
     mb = _StubMusicBrainz(
         {"artist": "KAYTRANADA", "title": "Lite Spots", "album": "99.9%", "score": 100}
@@ -179,7 +208,7 @@ async def test_refine_upgrades_string_guess_with_musicbrainz():
     assert mb.queries == ["kaytranada lite spots"]
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_refine_is_noop_for_structured_metadata():
     mb = _StubMusicBrainz({"artist": "Wrong", "title": "Wrong", "album": None, "score": 100})
     svc = _service(mb)
@@ -194,7 +223,7 @@ async def test_refine_is_noop_for_structured_metadata():
     assert mb.queries == []  # never called
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_refine_keeps_string_guess_when_no_match():
     svc = _service(_StubMusicBrainz(None))
     info = {"track": None, "artist": None, "title": "Kaytranada - Lite spots", "id": "abc"}
@@ -208,7 +237,7 @@ async def test_refine_keeps_string_guess_when_no_match():
     assert refined["confidence"] is None
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_refine_does_not_overwrite_existing_album():
     mb = _StubMusicBrainz({"artist": "A", "title": "T", "album": "MB Album", "score": 95})
     svc = _service(mb)

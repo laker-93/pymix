@@ -17,6 +17,7 @@ from pymix.containers import Container
 from pymix.handlers.filebrowser_file_handler import poll_watchdir, trigger_processing
 from pymix.handlers.sheet_sync_handler import sheet_sync_loop
 from pymix.handlers.wishlist_reconcile_handler import wishlist_reconcile_loop
+from pymix.handlers.wishlist_resolve_handler import wishlist_resolve_loop
 from pymix.routers import maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, match_tracks, track, wishlist
 
 
@@ -104,12 +105,18 @@ async def lifespan(app: FastAPI, container):
     wishlist_reconcile_service = await container.wishlist_reconcile_service()
     reconcile_interval_s = container.config()['wishlist']['reconcile_interval_s']
 
+    wishlist_resolve_service = container.wishlist_resolve_service()
+    resolve_interval_s = container.config()['wishlist']['resolve_interval_s']
+
     async with anyio.create_task_group() as tg:
         tg.start_soon(poll_watchdir, user_root, watch_subdir, send_stream, db_controller)
         tg.start_soon(trigger_processing, receive_stream, rb_xml_controller, db_controller)
         tg.start_soon(sheet_sync_loop, sheet_sync_service, db_controller, poll_interval_s)
         tg.start_soon(
             wishlist_reconcile_loop, wishlist_reconcile_service, db_controller, reconcile_interval_s
+        )
+        tg.start_soon(
+            wishlist_resolve_loop, wishlist_resolve_service, db_controller, resolve_interval_s
         )
         yield
 

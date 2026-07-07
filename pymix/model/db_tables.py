@@ -126,6 +126,12 @@ class WishlistRow(Base):
     # automatic re-matching (MusicBrainz refinement, reconcile, sheet sync).
     metadata_source = Column(String, nullable=False, server_default='auto')
 
+    # 'pending' | 'resolved' | 'nomatch' — see ResolveState. Work-state for the async
+    # resolve loop: a 'pending' item has raw artist/title (or an unparsed URL) still to be
+    # refined against MusicBrainz / yt-dlp. 'nomatch' is terminal. The (metadata_source,
+    # resolve_state) pair is indexed for the loop's selection query.
+    resolve_state = Column(String, nullable=False, server_default='pending')
+
     status = Column(
         Enum(
             WishlistStatus,

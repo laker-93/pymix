@@ -41,9 +41,10 @@ class ParseLinkRequest(BaseModel):
 
 
 class MatchMetadataRequest(BaseModel):
-    """Free-text metadata lookup. Either a raw ``query`` (e.g. an inbox raw_note) or an
-    ``artist``/``title`` pair the user has typed; the two are combined into one search
-    string server-side."""
+    """Metadata lookup. Either a raw ``query`` (free text, e.g. an inbox raw_note) or an
+    ``artist``/``title`` pair the user has typed. The server routes the pair through a
+    fielded MusicBrainz search (artist as a constraint) rather than flattening it into
+    one string — see MusicBrainzMatchService.match_fields."""
 
     query: Optional[str] = None
     artist: Optional[str] = None
@@ -54,12 +55,6 @@ class MatchMetadataRequest(BaseModel):
         if not (self.query or self.artist or self.title):
             raise ValueError("query, artist, or title is required")
         return self
-
-    @property
-    def search_query(self) -> str:
-        if self.query and self.query.strip():
-            return self.query.strip()
-        return " ".join(p.strip() for p in (self.artist, self.title) if p and p.strip())
 
 
 class UpdateWishlistRequest(BaseModel):

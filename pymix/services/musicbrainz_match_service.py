@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from typing import Optional, TypedDict
 
 import musicbrainzngs
@@ -25,6 +26,15 @@ DEFAULT_MIN_SCORE = 90
 
 _SEARCH_LIMIT = 5
 
+# Lucene reserved characters. In a fielded query we build ourselves, an unescaped "(", ":"
+# or "-" in an artist/title would be parsed as query syntax and break (or silently skew)
+# the search, so every field value is escaped before it's dropped into a clause.
+_LUCENE_SPECIAL = re.compile(r'([+\-!(){}\[\]^"~*?:\\/]|&&|\|\|)')
+
+
+def _escape_lucene(text: str) -> str:
+    return _LUCENE_SPECIAL.sub(r"\\\1", text)
+
 
 class MusicBrainzMatch(TypedDict):
     artist: str
@@ -47,7 +57,13 @@ class MusicBrainzMatchService:
         self._min_score = min_score
 
     async def match(self, query: str) -> Optional[MusicBrainzMatch]:
-        """Return the best MusicBrainz recording match for ``query``, or None.
+        """Return the best MusicBrainz recording match for free-text ``query``, or None.
+
+        For genuinely unstructured input (a messy video title, an inbox raw note) where
+        there's no clean artist/title split to lean on. When the caller *does* have a
+        separate artist and title, use :meth:`match_fields` instead — a free-text query
+        can't enforce the artist, so a same-titled track by an unrelated artist outscores
+        the one you meant.
 
         None means either no result, a result below the confidence threshold, or a
         failed/raised search — in every case the caller should fall back to whatever it
@@ -56,12 +72,51 @@ class MusicBrainzMatchService:
         query = (query or "").strip()
         if not query:
             return None
+        return await self._run(query)
 
+    async def match_fields(self, artist: str = "", title: str = "") -> Optional[MusicBrainzMatch]:
+        """Return the best match for a known ``artist`` + ``title``, or None.
+
+        Unlike :meth:`match`, this constrains ``artist`` and ``recording`` as separate
+        Lucene fields, so the artist actually filters the result set instead of being
+        thrown into a free-text bag where a same-titled recording by an unrelated artist
+        can tie or beat it on score. Each title term is additionally fuzzy-matched (``~``)
+        so a small typo ("Abatoir" -> "Abattoir") still resolves to the right recording.
+
+        Returns None (like :meth:`match`) on no result, a below-threshold result, a failed
+        search, or when neither field carries any text to query on.
+        """
+        lucene = self._build_fielded_query((artist or "").strip(), (title or "").strip())
+        if not lucene:
+            return None
+        return await self._run(lucene)
+
+    @staticmethod
+    def _build_fielded_query(artist: str, title: str) -> str:
+        """Build a fielded Lucene query from an artist and/or title.
+
+        Title terms get a trailing ``~`` (edit-distance fuzzy) to tolerate typos; the
+        artist is matched exactly (escaped). Returns "" when there's nothing to search on.
+        """
+        clauses = []
+        if artist:
+            clauses.append(f"artist:({_escape_lucene(artist)})")
+        if title:
+            terms = " ".join(f"{_escape_lucene(term)}~" for term in title.split())
+            clauses.append(f"recording:({terms})")
+        return " AND ".join(clauses)
+
+    async def _run(self, lucene_query: str) -> Optional[MusicBrainzMatch]:
+        """Execute one search (free-text or fielded), score it, and return the best match.
+
+        Shared tail for :meth:`match` and :meth:`match_fields`: both hand it a ready Lucene
+        query string; only the query construction differs between them.
+        """
         loop = asyncio.get_running_loop()
         try:
-            result = await loop.run_in_executor(None, self._search, query)
+            result = await loop.run_in_executor(None, self._search, lucene_query)
         except Exception:
-            logger.warning(f"MusicBrainz search failed for {query!r}", exc_info=True)
+            logger.warning(f"MusicBrainz search failed for {lucene_query!r}", exc_info=True)
             return None
 
         recordings = (result or {}).get("recording-list", [])
@@ -72,7 +127,7 @@ class MusicBrainzMatchService:
         score = int(best.get("ext:score", 0))
         if score < self._min_score:
             logger.debug(
-                f"MusicBrainz best match for {query!r} scored {score} (< {self._min_score}), discarding"
+                f"MusicBrainz best match for {lucene_query!r} scored {score} (< {self._min_score}), discarding"
             )
             return None
 

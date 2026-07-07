@@ -14,7 +14,7 @@ from pymix.model.api.wishlist_requests import (
     SetWishlistSheetRequest,
     UpdateWishlistRequest,
 )
-from pymix.model.wishlist import MetadataSource, WISHLIST_STATUSES
+from pymix.model.wishlist import MetadataSource, RESOLVE_STATES, WISHLIST_STATUSES
 from pymix.services.link_parse_service import LinkParseService
 from pymix.services.musicbrainz_match_service import MusicBrainzMatchService
 from pymix.services.sheet_sync_service import SheetSyncService
@@ -40,6 +40,7 @@ def _resolve_username(db_controller: DbController, session_id: Optional[str], us
 @inject
 async def get_wishlist(
     status: Optional[str] = Query(None, description="Filter by wishlist status"),
+    resolve_state: Optional[str] = Query(None, description="Filter by resolve_state"),
     session_id: Optional[str] = Cookie(None),
     username: Optional[str] = Query(None, description="Username for authentication"),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
@@ -48,8 +49,10 @@ async def get_wishlist(
 
     if status is not None and status not in WISHLIST_STATUSES:
         raise HTTPException(status_code=400, detail=f"Invalid status '{status}'")
+    if resolve_state is not None and resolve_state not in RESOLVE_STATES:
+        raise HTTPException(status_code=400, detail=f"Invalid resolve_state '{resolve_state}'")
 
-    items = db_controller.get_wishlist_items(username=username, status=status)
+    items = db_controller.get_wishlist_items(username=username, status=status, resolve_state=resolve_state)
     return {"items": items}
 
 
@@ -135,7 +138,14 @@ async def match_wishlist_metadata(
     """
     _resolve_username(db_controller, session_id, username)
 
-    match = await musicbrainz_match_service.match(body.search_query)
+    # A raw query is free text (an inbox note); an artist/title pair is fielded so the
+    # artist actually constrains the search — see MusicBrainzMatchService.match_fields.
+    if body.query and body.query.strip():
+        match = await musicbrainz_match_service.match(body.query.strip())
+    else:
+        match = await musicbrainz_match_service.match_fields(
+            artist=body.artist or "", title=body.title or ""
+        )
     return {"match": match}
 
 
