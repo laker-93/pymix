@@ -38,15 +38,16 @@ class WishlistResolveService:
     """Resolve free-text wishlist items to a canonical artist/title in the background.
 
     This is the async, off-the-critical-path counterpart to the client's old synchronous
-    "Find metadata match" button: for every auto-provenance item still ``pending`` (raw
-    text the user typed, or an inbox raw note), it asks the same
+    "Find metadata match" button: for every auto-provenance item still ``pending`` (a
+    hand-typed artist/title, typos and all), it asks the same
     :class:`MusicBrainzMatchService` for a confident match and applies it, so a typo'd
     entry becomes the correct canonical track before ``download_wishlist.py`` searches
     Soulseek for it.
 
     Items that carry a source URL are resolved at create time (their metadata came from
     parsing the link, or the URL itself is the exact-song identity the downloader uses),
-    so they never reach this loop — ``pending`` items are always pure free text.
+    and a bare inbox raw note with no artist/title is left for the user to complete — so
+    neither reaches this loop; ``pending`` items are always hand-typed artist/title.
     """
 
     def __init__(self, db_controller: DbController, musicbrainz_match_service: MusicBrainzMatchService):
@@ -76,24 +77,24 @@ class WishlistResolveService:
     async def _resolve_item(self, username: str, item: dict, result: ResolveResult) -> None:
         artist = (item.get("artist") or "").strip()
         title = (item.get("title") or "").strip()
-        raw_note = (item.get("raw_note") or "").strip()
         wishlist_id = item["wishlist_id"]
 
-        # Prefer a fielded artist/title match (the artist constrains the search, so a
-        # same-titled track by an unrelated artist can't outscore the one the user meant);
-        # fall back to a free-text search of a bare inbox raw note.
-        if artist or title:
-            query = " ".join(p for p in (artist, title) if p)
-            match = await self._mb.match_fields(artist=artist, title=title)
-        elif raw_note:
-            query = raw_note
-            match = await self._mb.match(raw_note)
-        else:
-            # Nothing to search on (shouldn't happen — create requires identifying info).
-            # Mark nomatch so it isn't reselected every cycle.
-            self._db.resolve_wishlist_item(wishlist_id, {"resolve_state": ResolveState.NOMATCH.value})
+        # Only hand-typed artist/title are refined. A bare inbox raw note (no artist/title)
+        # is left for the user: we don't guess a canonical track from an ambiguous free-text
+        # note, so mark it terminal and let it wait in the inbox prompting for more info,
+        # rather than querying MusicBrainz. Newly-created raw notes are already non-pending
+        # (see _derive_resolve_state); this also settles any that predate that.
+        if not (artist or title):
+            self._db.resolve_wishlist_item(
+                wishlist_id, {"resolve_state": ResolveState.NOMATCH.value}
+            )
             result.skipped += 1
             return
+
+        # Fielded match: the artist constrains the search, so a same-titled track by an
+        # unrelated artist can't outscore the one the user meant.
+        query = " ".join(p for p in (artist, title) if p)
+        match = await self._mb.match_fields(artist=artist, title=title)
 
         if match is None:
             updated = self._db.resolve_wishlist_item(
@@ -112,8 +113,8 @@ class WishlistResolveService:
         }
         if match["album"] and not (item.get("album") or "").strip():
             updates["album"] = match["album"]
-        # A raw-note inbox item that MusicBrainz has now given a real artist + title is a
-        # usable wishlist entry — promote it out of the inbox.
+        # A partial-metadata inbox item (e.g. only a title) that MusicBrainz has now given
+        # a real artist + title is a usable wishlist entry — promote it out of the inbox.
         if item.get("status") == WishlistStatus.INBOX.value:
             updates["status"] = WishlistStatus.WISHLIST.value
 

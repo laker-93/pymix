@@ -17,14 +17,22 @@ from pymix.model.wishlist import MetadataSource, ResolveState
 from pymix.utils.get_available_port import get_available_port
 
 
-def _derive_resolve_state(youtube_url, bandcamp_url, soundcloud_url) -> str:
-    """A newly-created item is ``resolved`` when it carries a source URL (its metadata was
-    parsed from that link, or the URL itself is the exact-song identity the downloader
-    resolves), and ``pending`` when it's only free text (artist/title/raw_note) that the
-    async resolve loop still needs to refine against MusicBrainz. Single source of truth
-    for the client, bulk and Google-Sheet ingest paths, which all funnel through here."""
-    has_url = bool(youtube_url or bandcamp_url or soundcloud_url)
-    return ResolveState.RESOLVED.value if has_url else ResolveState.PENDING.value
+def _derive_resolve_state(youtube_url, bandcamp_url, soundcloud_url, artist=None, title=None) -> str:
+    """Resolve-state for a newly-created item.
+
+    ``resolved`` when it carries a source URL (its metadata was parsed from that link, or
+    the URL itself is the exact-song identity the downloader resolves). ``pending`` when
+    it's hand-typed artist/title free text that the async resolve loop should refine
+    against MusicBrainz. ``nomatch`` (terminal) when there's nothing to refine — a bare
+    inbox raw note with no artist/title: we don't guess a canonical track from an ambiguous
+    note, so the item waits in the inbox for the user to supply artist/title rather than
+    entering the resolve loop. Single source of truth for the client, bulk and Google-Sheet
+    ingest paths, which all funnel through here."""
+    if youtube_url or bandcamp_url or soundcloud_url:
+        return ResolveState.RESOLVED.value
+    if (artist or "").strip() or (title or "").strip():
+        return ResolveState.PENDING.value
+    return ResolveState.NOMATCH.value
 
 
 logger = logging.getLogger(__name__)
@@ -642,7 +650,9 @@ class DbController:
         now = datetime.datetime.now().timestamp()
 
         if resolve_state is None:
-            resolve_state = _derive_resolve_state(youtube_url, bandcamp_url, soundcloud_url)
+            resolve_state = _derive_resolve_state(
+                youtube_url, bandcamp_url, soundcloud_url, artist=artist, title=title
+            )
 
         with self._session_factory() as session:
             new_item = WishlistRow(
@@ -683,7 +693,8 @@ class DbController:
                     raw_note=item.get('raw_note'),
                     status=item.get('status', 'wishlist'),
                     resolve_state=item.get('resolve_state') or _derive_resolve_state(
-                        item.get('youtube_url'), item.get('bandcamp_url'), item.get('soundcloud_url')
+                        item.get('youtube_url'), item.get('bandcamp_url'), item.get('soundcloud_url'),
+                        artist=item.get('artist'), title=item.get('title')
                     ),
                     youtube_video_id=item.get('youtube_video_id'),
                     youtube_url=item.get('youtube_url'),
