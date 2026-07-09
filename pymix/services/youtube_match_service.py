@@ -5,6 +5,8 @@ from typing import Optional, TypedDict
 from rapidfuzz import fuzz
 from yt_dlp import YoutubeDL
 
+from pymix.services.ytdlp_support import resolve_cookiefile
+
 logger = logging.getLogger(__name__)
 
 
@@ -23,6 +25,11 @@ _YDL_OPTS = {
     "skip_download": True,
     "default_search": f"ytsearch{_MAX_CANDIDATES}",
     "noplaylist": True,
+    # Metadata-only search: YouTube's signature/n challenge can't be solved without a
+    # JS runtime in the container, so format resolution finds nothing and yt-dlp would
+    # raise "Requested format is not available". We only read the result title/id, so
+    # make missing formats non-fatal (like --ignore-no-formats-error).
+    "ignore_no_formats_error": True,
 }
 
 
@@ -32,6 +39,11 @@ class YoutubeMatchService:
     Uses a plain "{artist} {title}" search query against YouTube via
     yt-dlp, with no API key required.
     """
+
+    def __init__(self, cookies_path: Optional[str] = None):
+        # YouTube also bot-challenges anonymous ytsearch from datacenter IPs; the same
+        # cookies file used for link parsing gets search past it. None when unconfigured.
+        self._cookiefile = resolve_cookiefile(cookies_path)
 
     async def match_track(self, artist: str, title: str) -> list[YoutubeMatch]:
         query = f"{artist} {title}"
@@ -65,7 +77,10 @@ class YoutubeMatchService:
         return matches
 
     def _search(self, query: str) -> Optional[dict]:
-        with YoutubeDL(_YDL_OPTS) as ydl:
+        opts = {**_YDL_OPTS}
+        if self._cookiefile:
+            opts["cookiefile"] = self._cookiefile
+        with YoutubeDL(opts) as ydl:
             return ydl.extract_info(query, download=False)
 
     def _confidence(self, query: str, result_title: str) -> float:

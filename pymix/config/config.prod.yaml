@@ -56,3 +56,10 @@ wishlist:
   # entry is corrected before the downloader searches Soulseek for it. MusicBrainz
   # is rate-limited to ~1 req/s, so this is deliberately unhurried.
   resolve_interval_s: 60
+  # Netscape-format cookies.txt yt-dlp reads when resolving/searching pasted links.
+  # Prod runs on a cloud droplet, whose datacenter IP YouTube blocks with a "confirm
+  # you're not a bot" challenge unless the request carries authenticated cookies. One
+  # file may also hold soundcloud.com / bandcamp.com cookies, so it covers every link
+  # source. Export from a logged-in browser and drop it at this path (same /subbox/secrets
+  # mount as the google-sheets cred). Missing file → parsing falls back to anonymous.
+  ytdlp_cookies_path: /subbox/secrets/ytdlp-cookies.txt
