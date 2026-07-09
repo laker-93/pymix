@@ -28,6 +28,11 @@ class Track(BaseModel):
     fromTag: bool = True
     fileExtension: Optional[str] = None
     album: Optional[str] = None
+    # SUBBOX_ID read off the local file's tags, when the client has it. When present,
+    # sync_plan matches on it directly (O(1) exact match) instead of fuzzy title/artist
+    # matching. Absent for local tracks never tagged (e.g. imported from elsewhere and
+    # not yet synced through subbox) — those still fall back to fuzzy matching.
+    subboxId: Optional[str] = None
 
 class MatchedTrack(BaseModel):
     title: str
@@ -234,23 +239,84 @@ async def sync_plan(
         bool(request.options and request.options.get("includeMetadata")),
     )
 
+    # Resolved once for the whole request: each local track is matched against every
+    # selected playlist, so re-deriving (title, artist) from the same Track for every
+    # playlist was pure waste. Skipped entirely for tracks with a subboxId — they're
+    # matched by id below and never touch the fuzzy (title, artist) path.
+    resolved_locals = [
+        (local, None, None)
+        if local.subboxId
+        else (local, *_resolve_local_track_for_matching(local))
+        for local in request.localTracks
+    ]
+    n_subbox_id_locals = sum(1 for local, *_ in resolved_locals if local.subboxId)
+    if n_subbox_id_locals:
+        logger.info(
+            "sync_plan: %s/%s local tracks carry a subboxId and will be matched exactly",
+            n_subbox_id_locals,
+            len(resolved_locals),
+        )
+
+    # subboxIds that matched a server track somewhere in this plan. A tagged local whose
+    # id never appears here is the divergence case flagged in review: because tagged
+    # locals no longer fall back to fuzzy matching, a local file re-tagged (or from a
+    # different pressing) with a subboxId the server doesn't have will be treated as
+    # absent even if a fuzzily-similar server track exists — which can re-download a dup.
+    # We count these at request level (a per-playlist miss is just "not in that playlist"
+    # and is expected, so only a global miss is interesting).
+    subbox_id_matched: set[str] = set()
+
     async def _process_server_tracks(server_tracks: List, context_label: str):
         matched_server_track_ids: set[int] = set()
         summary["tracksRequested"] += len(server_tracks)
-        for local in request.localTracks:
-            local_title_for_match, local_artist_for_match = _resolve_local_track_for_matching(local)
-            match = await subsonic_client._get_best_track_match(
-                local_title_for_match,
-                local_artist_for_match,
-                local.album,
-                server_tracks,
-                similarity_threshold=0.6,
-            )
-            if not match:
+
+        # Local tracks tagged with a subboxId are matched directly against the server
+        # tracks' own (already-parsed) subbox_id — an O(1) dict lookup per local track,
+        # no fuzzy comparison needed. Only local tracks with no subboxId (never tagged)
+        # fall back to fuzzy title/artist matching below.
+        server_tracks_by_subbox_id = {
+            track.subbox_id: track for track in server_tracks if track.subbox_id
+        }
+
+        # Cleaned (title, artist, album, bracket-stripped title) depends only on the
+        # server track, not on which local track it's being compared to — precompute it
+        # once per server track instead of once per (local track, server track) pair.
+        # Only needed for the fuzzy fallback, so skip it if every local track has an id.
+        server_track_cleans = (
+            None
+            if n_subbox_id_locals == len(resolved_locals)
+            else [SubsonicClient._clean_track_for_match(track) for track in server_tracks]
+        )
+
+        for local, local_title_for_match, local_artist_for_match in resolved_locals:
+            matched_server_track = None
+            similarity = None
+            matched_via = "fuzzy"
+
+            if local.subboxId:
+                matched_via = "subbox_id"
+                matched_server_track = server_tracks_by_subbox_id.get(local.subboxId)
+                if matched_server_track:
+                    similarity = 1.0
+                    subbox_id_matched.add(local.subboxId)
+            else:
+                match = await subsonic_client._get_best_track_match(
+                    local_title_for_match,
+                    local_artist_for_match,
+                    local.album,
+                    server_tracks,
+                    similarity_threshold=0.6,
+                    track_cleans=server_track_cleans,
+                )
+                if match:
+                    matched_server_track, similarity = match
+
+            if not matched_server_track:
                 logger.info(
-                    "sync_plan local_track_unmatched: user=%s context=%s local_raw=(%r,%r,%r,fromTag=%s) local_for_match=(%r,%r,%r)",
+                    "sync_plan local_track_unmatched: user=%s context=%s via=%s local_raw=(%r,%r,%r,fromTag=%s) local_for_match=(%r,%r,%r)",
                     username,
                     context_label,
+                    matched_via,
                     local.title,
                     local.artist,
                     local.album,
@@ -261,12 +327,12 @@ async def sync_plan(
                 )
                 continue
 
-            matched_server_track, similarity = match
             matched_server_track_ids.add(id(matched_server_track))
             logger.info(
-                "sync_plan local_track_matched: user=%s context=%s local_raw=(%r,%r,%r,fromTag=%s) local_for_match=(%r,%r,%r) server=(%r,%r,%r) similarity=%.3f",
+                "sync_plan local_track_matched: user=%s context=%s via=%s local_raw=(%r,%r,%r,fromTag=%s) local_for_match=(%r,%r,%r) server=(%r,%r,%r) similarity=%.3f",
                 username,
                 context_label,
+                matched_via,
                 local.title,
                 local.artist,
                 local.album,
@@ -334,6 +400,22 @@ async def sync_plan(
                 "artist": track["artist"],
             })
             summary["metadataUpdates"] += 1
+
+    if n_subbox_id_locals:
+        n_subbox_id_never_matched = n_subbox_id_locals - len(subbox_id_matched)
+        # Error when any tagged local never matched by id: those get no fuzzy fallback,
+        # so subbox_id divergence can silently re-download a duplicate. Info otherwise —
+        # an all-matched summary is healthy, not worth an error.
+        log = logger.error if n_subbox_id_never_matched else logger.info
+        log(
+            "sync_plan subbox_id_match_summary: user=%s tagged_locals=%s matched_by_id=%s "
+            "never_matched_by_id=%s (never-matched tagged locals get no fuzzy fallback — "
+            "a nonzero count may mean subbox_id divergence and a re-downloaded duplicate)",
+            username,
+            n_subbox_id_locals,
+            len(subbox_id_matched),
+            n_subbox_id_never_matched,
+        )
 
     logger.info(
         "sync_plan complete: user=%s playlists=%s requested=%s existing=%s missing=%s metadata_updates=%s download_size_bytes=%s",
@@ -580,25 +662,69 @@ async def sync_playlists(
             return {"success": False, "reason": repr(ex)}
 
     if user:
+        # Resolved once for the whole request, same as sync_plan: skipped entirely for
+        # tracks with a subboxId, since those are matched by id below and never touch
+        # the fuzzy (title, artist) path.
+        resolved_locals = [
+            (local_track, None, None)
+            if local_track.subboxId
+            else (local_track, *_resolve_local_track_for_matching(local_track))
+            for local_track in request.localTracks
+        ]
+        n_subbox_id_locals = sum(1 for local_track, *_ in resolved_locals if local_track.subboxId)
+
+        # See sync_plan: subboxIds that matched a server track anywhere in this request.
+        # Tagged locals never matched by id get no fuzzy fallback, so a nonzero
+        # never-matched count may signal subbox_id divergence and a duplicate export.
+        subbox_id_matched: set[str] = set()
+
         for playlist in request.playlists:
             playlist_tracks = await subsonic_client.get_playlist_tracks(user, playlist["id"])
             matched_server_track_ids: set[int] = set()
-            for local_track in request.localTracks:
-                local_title_for_match, local_artist_for_match = _resolve_local_track_for_matching(local_track)
-                match = await subsonic_client._get_best_track_match(
-                    local_title_for_match,
-                    local_artist_for_match,
-                    local_track.album,
-                    playlist_tracks,
-                    similarity_threshold=0.6,
-                )
-                if match:
-                    matched_server_track, similarity = match
+
+            # Local tracks tagged with a subboxId are matched directly against the
+            # server tracks' own (already-parsed) subbox_id — an O(1) dict lookup, no
+            # fuzzy comparison needed. Only untagged local tracks fall back to fuzzy
+            # title/artist matching below.
+            playlist_tracks_by_subbox_id = {
+                track.subbox_id: track for track in playlist_tracks if track.subbox_id
+            }
+            playlist_track_cleans = (
+                None
+                if n_subbox_id_locals == len(resolved_locals)
+                else [SubsonicClient._clean_track_for_match(track) for track in playlist_tracks]
+            )
+
+            for local_track, local_title_for_match, local_artist_for_match in resolved_locals:
+                matched_server_track = None
+                similarity = None
+                matched_via = "fuzzy"
+
+                if local_track.subboxId:
+                    matched_via = "subbox_id"
+                    matched_server_track = playlist_tracks_by_subbox_id.get(local_track.subboxId)
+                    if matched_server_track:
+                        similarity = 1.0
+                        subbox_id_matched.add(local_track.subboxId)
+                else:
+                    match = await subsonic_client._get_best_track_match(
+                        local_title_for_match,
+                        local_artist_for_match,
+                        local_track.album,
+                        playlist_tracks,
+                        similarity_threshold=0.6,
+                        track_cleans=playlist_track_cleans,
+                    )
+                    if match:
+                        matched_server_track, similarity = match
+
+                if matched_server_track:
                     matched_server_track_ids.add(id(matched_server_track))
                     logger.info(
-                        "sync_playlists local_track_matched: user=%s playlist_id=%s local_raw=(%r,%r,%r,fromTag=%s) local_for_match=(%r,%r,%r) server=(%r,%r,%r) similarity=%.3f",
+                        "sync_playlists local_track_matched: user=%s playlist_id=%s via=%s local_raw=(%r,%r,%r,fromTag=%s) local_for_match=(%r,%r,%r) server=(%r,%r,%r) similarity=%.3f",
                         username,
                         playlist.get("id"),
+                        matched_via,
                         local_track.title,
                         local_track.artist,
                         local_track.album,
@@ -613,9 +739,10 @@ async def sync_playlists(
                     )
                 else:
                     logger.info(
-                        "sync_playlists local_track_unmatched: user=%s playlist_id=%s local_raw=(%r,%r,%r,fromTag=%s) local_for_match=(%r,%r,%r)",
+                        "sync_playlists local_track_unmatched: user=%s playlist_id=%s via=%s local_raw=(%r,%r,%r,fromTag=%s) local_for_match=(%r,%r,%r)",
                         username,
                         playlist.get("id"),
+                        matched_via,
                         local_track.title,
                         local_track.artist,
                         local_track.album,
@@ -630,6 +757,22 @@ async def sync_playlists(
                 if id(track) not in matched_server_track_ids
             ]
             all_tracks.extend(filtered_tracks)
+
+        if n_subbox_id_locals:
+            n_subbox_id_never_matched = n_subbox_id_locals - len(subbox_id_matched)
+            # Error when any tagged local never matched by id: those get no fuzzy
+            # fallback, so subbox_id divergence can silently re-export a duplicate.
+            # Info otherwise — an all-matched summary is healthy, not worth an error.
+            log = logger.error if n_subbox_id_never_matched else logger.info
+            log(
+                "sync_playlists subbox_id_match_summary: user=%s tagged_locals=%s matched_by_id=%s "
+                "never_matched_by_id=%s (never-matched tagged locals get no fuzzy fallback — "
+                "a nonzero count may mean subbox_id divergence and a duplicate export)",
+                username,
+                n_subbox_id_locals,
+                len(subbox_id_matched),
+                n_subbox_id_never_matched,
+            )
 
         n_tracks_zipped, zip_path = fb_file_handler.sync(
             username=username,

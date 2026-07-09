@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, urlparse
 from yt_dlp import YoutubeDL
 
 from pymix.services.musicbrainz_match_service import MusicBrainzMatchService
+from pymix.services.ytdlp_support import resolve_cookiefile
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,14 @@ _YDL_OPTS = {
     # it's X itself or one of Y's other entries — shouldn't abort extraction
     # of everything else.
     "ignoreerrors": True,
+    # We only ever read metadata (skip_download), never the media stream. But
+    # extract_info still runs format selection, and YouTube's current signature/n
+    # challenge can't be solved without a JS runtime in the container, so no playable
+    # formats resolve and yt-dlp raises "Requested format is not available". This makes
+    # a missing-formats situation non-fatal (the equivalent of --ignore-no-formats-error)
+    # so the metadata dict is still returned — the title/artist we need come from the
+    # page/API JSON, not from format resolution.
+    "ignore_no_formats_error": True,
 }
 
 _YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtu.be"}
@@ -169,8 +178,15 @@ class LinkParseService:
     1 req/sec limit makes a per-track lookup across a whole album/playlist too slow.
     """
 
-    def __init__(self, musicbrainz_match_service: MusicBrainzMatchService):
+    def __init__(
+        self,
+        musicbrainz_match_service: MusicBrainzMatchService,
+        cookies_path: Optional[str] = None,
+    ):
         self._musicbrainz = musicbrainz_match_service
+        # Authenticated cookies let yt-dlp past YouTube's datacenter-IP bot check; a
+        # single file also covers SoundCloud/Bandcamp. None when unconfigured/missing.
+        self._cookiefile = resolve_cookiefile(cookies_path)
 
     async def extract(self, url: str) -> Union[LinkMetadata, LinkCollectionMetadata]:
         source = detect_link_source(url)
@@ -276,6 +292,8 @@ class LinkParseService:
         return result
 
     def _extract_info(self, url: str, noplaylist: bool = False) -> dict:
-        opts = {**_YDL_OPTS, "noplaylist": True} if noplaylist else _YDL_OPTS
+        opts = {**_YDL_OPTS, "noplaylist": True} if noplaylist else {**_YDL_OPTS}
+        if self._cookiefile:
+            opts["cookiefile"] = self._cookiefile
         with YoutubeDL(opts) as ydl:
             return ydl.extract_info(url, download=False)

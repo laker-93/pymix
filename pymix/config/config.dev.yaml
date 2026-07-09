@@ -50,3 +50,7 @@ wishlist:
   # entry is corrected before the downloader searches Soulseek for it. MusicBrainz
   # is rate-limited to ~1 req/s, so this is deliberately unhurried.
   resolve_interval_s: 60
+  # Local dev runs from a residential IP that YouTube doesn't bot-challenge, so no
+  # cookies are needed. Uncomment (and drop a cookies.txt at the path) only to
+  # reproduce the prod cookie flow. See config.prod.yaml for details.
+  # ytdlp_cookies_path: /subbox/secrets/ytdlp-cookies.txt

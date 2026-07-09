@@ -178,6 +178,7 @@ class Container(containers.DeclarativeContainer):
 
     youtube_match_service = providers.Singleton(
         YoutubeMatchService,
+        cookies_path=config.wishlist.ytdlp_cookies_path,
     )
 
     musicbrainz_match_service = providers.Singleton(
@@ -187,6 +188,7 @@ class Container(containers.DeclarativeContainer):
     link_parse_service = providers.Singleton(
         LinkParseService,
         musicbrainz_match_service,
+        cookies_path=config.wishlist.ytdlp_cookies_path,
     )
 
     wishlist_resolve_service = providers.Singleton(
