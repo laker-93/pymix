@@ -49,7 +49,10 @@ def compute_similarity(title_a: str, artist_a: str, album_a: Optional[str], titl
     return total / weight
 
 def _read_subbox_id_or_raise(pymix_path: Path, entry: dict) -> Optional[str]:
-    assert pymix_path.is_file(), f"pymix_path does not exist on disk: {pymix_path} for entry {entry}"
+    # A real raise, not assert: this is a runtime disk check and asserts are stripped
+    # under `python -O`, which would let get_subbox_id run on a nonexistent path.
+    if not pymix_path.is_file():
+        raise FileNotFoundError(f"pymix_path does not exist on disk: {pymix_path} for entry {entry}")
     return get_subbox_id(pymix_path)
 
 def extract_track_name(full_string: str, artist: str, album=None) -> None | str:
