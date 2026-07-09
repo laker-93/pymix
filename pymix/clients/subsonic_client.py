@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Tuple, List, Optional, AsyncIterator, Union
 
 import aiohttp
+import anyio
 
 from pymix.clients.base_api_client import BaseAPIClient
 from pymix.model.subboxplaylist import SubBoxPlaylist
@@ -46,6 +47,10 @@ def compute_similarity(title_a: str, artist_a: str, album_a: Optional[str], titl
         weight += 0.5
 
     return total / weight
+
+def _read_subbox_id_or_raise(pymix_path: Path, entry: dict) -> Optional[str]:
+    assert pymix_path.is_file(), f"pymix_path does not exist on disk: {pymix_path} for entry {entry}"
+    return get_subbox_id(pymix_path)
 
 def extract_track_name(full_string: str, artist: str, album=None) -> None | str:
     """
@@ -174,16 +179,17 @@ class SubsonicClient(BaseAPIClient):
             ) for entry in resp
         ], n_items
 
-    def _parse_tracks(self, response: dict, username: str) -> List[SubBoxTrack]:
+    async def _parse_tracks(self, response: dict, username: str) -> List[SubBoxTrack]:
         resp_playlist = response['subsonic-response']['playlist'].get('entry', [])
         src_dir = self._serving_music_path_base.format(user=username)
 
-        tracks = []
-        for entry in resp_playlist:
+        async def _build(entry: dict) -> SubBoxTrack:
             pymix_path = Path(src_dir + (entry['path'].removeprefix(self._music_path_base_to_remove)))
-            assert pymix_path.is_file(), f"pymix_path does not exist on disk: {pymix_path} for entry {entry}"
-            subbox_id = get_subbox_id(pymix_path)
-            tracks.append(SubBoxTrack(
+            # is_file() + get_subbox_id() are blocking disk/taglib calls — offload them
+            # off the event loop (see CLAUDE.md: blocking taglib/fs work is offloaded),
+            # and run every track's read concurrently rather than one at a time.
+            subbox_id = await anyio.to_thread.run_sync(_read_subbox_id_or_raise, pymix_path, entry)
+            return SubBoxTrack(
                 name=entry['title'],
                 artist=entry['artist'],
                 path=Path(f"{self._local_user_music_stem}{entry['path'].removeprefix(self._music_path_base_to_remove)}"),
@@ -192,8 +198,9 @@ class SubsonicClient(BaseAPIClient):
                 rating=entry.get('userRating', 0),
                 genre=entry.get('genre'),
                 subbox_id=subbox_id,
-            ))
-        return tracks
+            )
+
+        return list(await asyncio.gather(*(_build(entry) for entry in resp_playlist)))
 
     async def scan(self, user: dict) -> bool:
         username = user['username']
@@ -246,7 +253,7 @@ class SubsonicClient(BaseAPIClient):
         )
         response = await self.get(url)
         assert response
-        tracks = self._parse_tracks(response, username=username)
+        tracks = await self._parse_tracks(response, username=username)
         return tracks
 
     async def get_track(self, user: dict, track_id: str):
@@ -288,13 +295,15 @@ class SubsonicClient(BaseAPIClient):
             yield tracks
             offset += batch_size
 
-    async def _get_best_track_match(self, title: str, artist: str, album: Optional[str], tracks: List[SubBoxTrack], similarity_threshold: float) -> \
-    Optional[tuple[SubBoxTrack, float]]:
+    async def _get_best_track_match(
+        self, title: str, artist: str, album: Optional[str], tracks: List[SubBoxTrack], similarity_threshold: float,
+        track_cleans: Optional[List[Tuple[str, str, Optional[str]]]] = None,
+    ) -> Optional[tuple[SubBoxTrack, float]]:
         match = None
         if len(tracks) > 1:
             logger.info(f'found multiple matches for {title} by {artist} in subsonic')
         if len(tracks) >= 1:
-            match = await self._find_best_match(title, artist, tracks, album, similarity_threshold)
+            match = await self._find_best_match(title, artist, tracks, album, similarity_threshold, track_cleans=track_cleans)
         return match
 
     async def get_track_match(self, user: dict, title: str, artist: str, album: Optional[str] = None) -> Optional[
@@ -378,18 +387,38 @@ class SubsonicClient(BaseAPIClient):
             raise KeyError(f'unable to parse tracks from url query {url}') from ex
         return tracks
 
-    async def _find_best_match(self, title: str, artist: str, tracks: List[SubBoxTrack], album: Optional[str], similarity_threshold: float) -> \
-    Optional[tuple[SubBoxTrack, float]]:
+    @staticmethod
+    def _clean_track_for_match(track: SubBoxTrack) -> Tuple[str, str, Optional[str], str]:
+        """Precompute the (title, artist, album, bracket-stripped title) cleaned strings
+        used to match against ``track``. These depend only on ``track`` itself, so a
+        caller matching the same candidate list against many queries (e.g. sync_plan
+        matching an entire local library against one playlist) should compute this once
+        per track up front and pass it back in via ``track_cleans``, instead of paying
+        for it again on every query."""
+        return (
+            clean(track.name, is_title=True),
+            clean(track.artist),
+            clean(track.album) if track.album else None,
+            clean(re.sub(r"[\(\[].*?[\)\]]", "", track.name.lower()), is_title=True),
+        )
+
+    async def _find_best_match(
+        self, title: str, artist: str, tracks: List[SubBoxTrack], album: Optional[str], similarity_threshold: float,
+        track_cleans: Optional[List[Tuple[str, str, Optional[str], str]]] = None,
+    ) -> Optional[tuple[SubBoxTrack, float]]:
         results = {}
 
         title_clean = clean(title, is_title=True)
         artist_clean = clean(artist)
         album_clean = clean(album) if album else None
+        title_no_brackets_clean = clean(re.sub(r"[\(\[].*?[\)\]]", "", title.lower()), is_title=True)
 
-        for track in tracks:
-            track_title_clean = clean(track.name, is_title=True)
-            track_artist_clean = clean(track.artist)
-            track_album_clean = clean(track.album) if track.album else None
+        for idx, track in enumerate(tracks):
+            if track_cleans is not None:
+                track_title_clean, track_artist_clean, track_album_clean, track_title_no_brackets_clean = track_cleans[idx]
+            else:
+                track_title_clean, track_artist_clean, track_album_clean, track_title_no_brackets_clean = \
+                    self._clean_track_for_match(track)
 
             # Primary similarity
             similarity = compute_similarity(
@@ -402,11 +431,6 @@ class SubsonicClient(BaseAPIClient):
                 continue
 
             # Fallback: try again with bracketed text removed from titles only
-            title_no_brackets = re.sub(r"[\(\[].*?[\)\]]", "", title.lower())
-            track_title_no_brackets = re.sub(r"[\(\[].*?[\)\]]", "", track.name.lower())
-            title_no_brackets_clean = clean(title_no_brackets, is_title=True)
-            track_title_no_brackets_clean = clean(track_title_no_brackets, is_title=True)
-
             fallback_similarity = compute_similarity(
                 title_no_brackets_clean, artist_clean, album_clean,
                 track_title_no_brackets_clean, track_artist_clean, track_album_clean
