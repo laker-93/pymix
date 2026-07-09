@@ -257,14 +257,20 @@ async def sync_plan(
             len(resolved_locals),
         )
 
-    # subboxIds that matched a server track somewhere in this plan. A tagged local whose
-    # id never appears here is the divergence case flagged in review: because tagged
-    # locals no longer fall back to fuzzy matching, a local file re-tagged (or from a
-    # different pressing) with a subboxId the server doesn't have will be treated as
-    # absent even if a fuzzily-similar server track exists — which can re-download a dup.
-    # We count these at request level (a per-playlist miss is just "not in that playlist"
-    # and is expected, so only a global miss is interesting).
-    subbox_id_matched: set[str] = set()
+    # subbox_ids of server tracks actually in the requested playlist(s) that carry a tag —
+    # informational only (logged at INFO below), scoped to what was requested rather than
+    # the user's whole local library (which is almost always much bigger than the
+    # playlist(s) being synced).
+    server_subbox_ids_seen: set[str] = set()
+
+    # The precise divergence signal: a server track that (a) carries a subbox_id and
+    # (b) still ends up classified "missing" after both the subbox_id fast path and the
+    # fuzzy fallback have had a chance to match it (see the "missing" branch in
+    # _process_server_tracks below). That combination is the only case that actually
+    # causes a re-download of a track the user already has — unlike simply "this
+    # server track's subbox_id wasn't found on any local file," which is equally true
+    # for a server track any untagged local file will still fuzzy-match just fine.
+    subbox_id_tagged_missing: set[str] = set()
 
     async def _process_server_tracks(server_tracks: List, context_label: str):
         matched_server_track_ids: set[int] = set()
@@ -277,6 +283,7 @@ async def sync_plan(
         server_tracks_by_subbox_id = {
             track.subbox_id: track for track in server_tracks if track.subbox_id
         }
+        server_subbox_ids_seen.update(server_tracks_by_subbox_id.keys())
 
         # Cleaned (title, artist, album, bracket-stripped title) depends only on the
         # server track, not on which local track it's being compared to — precompute it
@@ -298,7 +305,6 @@ async def sync_plan(
                 matched_server_track = server_tracks_by_subbox_id.get(local.subboxId)
                 if matched_server_track:
                     similarity = 1.0
-                    subbox_id_matched.add(local.subboxId)
             else:
                 match = await subsonic_client._get_best_track_match(
                     local_title_for_match,
@@ -357,6 +363,13 @@ async def sync_plan(
                 summary["tracksAlreadyPresent"] += 1
                 continue
 
+            if track.subbox_id:
+                # This exact track is already tagged (pymix has seen it before), yet
+                # neither the subbox_id fast path nor the fuzzy fallback found it among
+                # the local tracks we were sent — the one combination that actually
+                # causes a re-download of a track the user already has.
+                subbox_id_tagged_missing.add(track.subbox_id)
+
             file_size = 0
             if track.pymix_path and os.path.isfile(track.pymix_path):
                 file_size = os.path.getsize(track.pymix_path)
@@ -401,20 +414,29 @@ async def sync_plan(
             })
             summary["metadataUpdates"] += 1
 
-    if n_subbox_id_locals:
-        n_subbox_id_never_matched = n_subbox_id_locals - len(subbox_id_matched)
-        # Error when any tagged local never matched by id: those get no fuzzy fallback,
-        # so subbox_id divergence can silently re-download a duplicate. Info otherwise —
-        # an all-matched summary is healthy, not worth an error.
-        log = logger.error if n_subbox_id_never_matched else logger.info
-        log(
-            "sync_plan subbox_id_match_summary: user=%s tagged_locals=%s matched_by_id=%s "
-            "never_matched_by_id=%s (never-matched tagged locals get no fuzzy fallback — "
-            "a nonzero count may mean subbox_id divergence and a re-downloaded duplicate)",
+    if server_subbox_ids_seen:
+        # Informational visibility only, not an error signal — how many requested
+        # server tracks are tagged. See subbox_id_divergence below for the actual
+        # error-worthy signal.
+        logger.info(
+            "sync_plan subbox_id_summary: user=%s server_tracks_tagged=%s",
             username,
-            n_subbox_id_locals,
-            len(subbox_id_matched),
-            n_subbox_id_never_matched,
+            len(server_subbox_ids_seen),
+        )
+
+    if subbox_id_tagged_missing:
+        # The precise divergence signal: these specific tracks are tagged (pymix has
+        # seen them before) but ended up "missing" anyway — after both the subbox_id
+        # fast path *and* the fuzzy fallback had a chance to find them. This is the
+        # combination that actually causes a re-download of a track the user already
+        # has, unlike a bare "subbox_id not found locally" (which is equally true, and
+        # harmless, for any tagged server track whose local copy just isn't tagged).
+        logger.error(
+            "sync_plan subbox_id_divergence: user=%s count=%s tagged tracks ended up "
+            "missing despite fuzzy fallback — likely a stale/duplicate local SUBBOX_ID "
+            "tag, will be re-downloaded",
+            username,
+            len(subbox_id_tagged_missing),
         )
 
     logger.info(
@@ -673,10 +695,12 @@ async def sync_playlists(
         ]
         n_subbox_id_locals = sum(1 for local_track, *_ in resolved_locals if local_track.subboxId)
 
-        # See sync_plan: subboxIds that matched a server track anywhere in this request.
-        # Tagged locals never matched by id get no fuzzy fallback, so a nonzero
-        # never-matched count may signal subbox_id divergence and a duplicate export.
-        subbox_id_matched: set[str] = set()
+        # See sync_plan for the reasoning: server_subbox_ids_seen is informational only
+        # (scoped to what was requested); subbox_id_tagged_missing is the precise
+        # divergence signal (a tagged track that's still ending up re-exported despite
+        # both the subbox_id fast path and the fuzzy fallback having a chance at it).
+        server_subbox_ids_seen: set[str] = set()
+        subbox_id_tagged_missing: set[str] = set()
 
         for playlist in request.playlists:
             playlist_tracks = await subsonic_client.get_playlist_tracks(user, playlist["id"])
@@ -689,6 +713,7 @@ async def sync_playlists(
             playlist_tracks_by_subbox_id = {
                 track.subbox_id: track for track in playlist_tracks if track.subbox_id
             }
+            server_subbox_ids_seen.update(playlist_tracks_by_subbox_id.keys())
             playlist_track_cleans = (
                 None
                 if n_subbox_id_locals == len(resolved_locals)
@@ -705,7 +730,6 @@ async def sync_playlists(
                     matched_server_track = playlist_tracks_by_subbox_id.get(local_track.subboxId)
                     if matched_server_track:
                         similarity = 1.0
-                        subbox_id_matched.add(local_track.subboxId)
                 else:
                     match = await subsonic_client._get_best_track_match(
                         local_title_for_match,
@@ -756,22 +780,28 @@ async def sync_playlists(
                 track for track in playlist_tracks
                 if id(track) not in matched_server_track_ids
             ]
+            for track in filtered_tracks:
+                if track.subbox_id:
+                    # Tagged (pymix has seen it before) but still being re-exported —
+                    # the one combination that actually causes a duplicate export.
+                    subbox_id_tagged_missing.add(track.subbox_id)
             all_tracks.extend(filtered_tracks)
 
-        if n_subbox_id_locals:
-            n_subbox_id_never_matched = n_subbox_id_locals - len(subbox_id_matched)
-            # Error when any tagged local never matched by id: those get no fuzzy
-            # fallback, so subbox_id divergence can silently re-export a duplicate.
-            # Info otherwise — an all-matched summary is healthy, not worth an error.
-            log = logger.error if n_subbox_id_never_matched else logger.info
-            log(
-                "sync_playlists subbox_id_match_summary: user=%s tagged_locals=%s matched_by_id=%s "
-                "never_matched_by_id=%s (never-matched tagged locals get no fuzzy fallback — "
-                "a nonzero count may mean subbox_id divergence and a duplicate export)",
+        if server_subbox_ids_seen:
+            # Informational visibility only, not an error signal — see sync_plan.
+            logger.info(
+                "sync_playlists subbox_id_summary: user=%s server_tracks_tagged=%s",
                 username,
-                n_subbox_id_locals,
-                len(subbox_id_matched),
-                n_subbox_id_never_matched,
+                len(server_subbox_ids_seen),
+            )
+
+        if subbox_id_tagged_missing:
+            logger.error(
+                "sync_playlists subbox_id_divergence: user=%s count=%s tagged tracks "
+                "ended up re-exported despite fuzzy fallback — likely a stale/duplicate "
+                "local SUBBOX_ID tag",
+                username,
+                len(subbox_id_tagged_missing),
             )
 
         n_tracks_zipped, zip_path = fb_file_handler.sync(
