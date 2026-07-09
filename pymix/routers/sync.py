@@ -403,7 +403,11 @@ async def sync_plan(
 
     if n_subbox_id_locals:
         n_subbox_id_never_matched = n_subbox_id_locals - len(subbox_id_matched)
-        logger.info(
+        # Error when any tagged local never matched by id: those get no fuzzy fallback,
+        # so subbox_id divergence can silently re-download a duplicate. Info otherwise —
+        # an all-matched summary is healthy, not worth an error.
+        log = logger.error if n_subbox_id_never_matched else logger.info
+        log(
             "sync_plan subbox_id_match_summary: user=%s tagged_locals=%s matched_by_id=%s "
             "never_matched_by_id=%s (never-matched tagged locals get no fuzzy fallback — "
             "a nonzero count may mean subbox_id divergence and a re-downloaded duplicate)",
@@ -755,14 +759,19 @@ async def sync_playlists(
             all_tracks.extend(filtered_tracks)
 
         if n_subbox_id_locals:
-            logger.info(
+            n_subbox_id_never_matched = n_subbox_id_locals - len(subbox_id_matched)
+            # Error when any tagged local never matched by id: those get no fuzzy
+            # fallback, so subbox_id divergence can silently re-export a duplicate.
+            # Info otherwise — an all-matched summary is healthy, not worth an error.
+            log = logger.error if n_subbox_id_never_matched else logger.info
+            log(
                 "sync_playlists subbox_id_match_summary: user=%s tagged_locals=%s matched_by_id=%s "
                 "never_matched_by_id=%s (never-matched tagged locals get no fuzzy fallback — "
                 "a nonzero count may mean subbox_id divergence and a duplicate export)",
                 username,
                 n_subbox_id_locals,
                 len(subbox_id_matched),
-                n_subbox_id_locals - len(subbox_id_matched),
+                n_subbox_id_never_matched,
             )
 
         n_tracks_zipped, zip_path = fb_file_handler.sync(
