@@ -39,12 +39,22 @@ Grounded in `docs/workflows.md` / `docs/api.md` — check one off (link to its
 - [ ] Serato import/export (`/serato/import`, `/serato/export`)
 - [ ] Watch-dir auto-import (no endpoint — triggered by filesystem)
 - [ ] Sync (`/sync/plan`, `/sync`, `/sync/tracks`, `/sync/playlists`)
-- [ ] Metadata / cues / loops (`/track/metadata/*`)
+- [x] Metadata / cues / loops (`/track/metadata/*`) + `/tracks/presence` —
+      GET/update round-trip, schema validation, presence: `features/track-metadata-and-presence.md`
 - [ ] beets import (`routers/beets_import.py`)
 - [ ] Export progress reporting (`routers/export_progress.py`)
 - [ ] Track matching (`routers/match_tracks.py`, `routers/sync.py`)
 - [ ] Wishlist API (consumed by subbox-app `/wishlist` and by
       `subbox-slskd` — see root `CLAUDE.md`)
+
+**When every row is checked, the loop does not run out of work** — it switches to
+self-directed discovery (skill Step 1, tier 5): re-exercise the workflow whose
+`features/*.md` is oldest to catch regressions (refresh its verified date), probe
+the unhappy edges of a covered path (malformed request bodies, missing/oversized
+uploads, a busy/half-migrated container, a job that fails partway, concurrent
+requests), and add new rows here for any sub-flow that surfaces. Same conservative
+bar — find and fix/log, never add endpoints. Skim the last ~10 `log.md` lines and
+pick the least-recently-touched workflow so cycles don't repeat.
 
 ## Hard rules (do not relax these)
 
@@ -62,6 +72,14 @@ Grounded in `docs/workflows.md` / `docs/api.md` — check one off (link to its
   PR URL in this `bugs.md` `FIXED` entry. **Never merge, never force-push a shared
   branch.** The user merges on GitHub; the next daily run rebases this branch onto
   the updated `main` to pull the merged code in.
+- **Every bug gets a GitHub issue, and a closed issue means it's fixed.** When you
+  log a bug OPEN in `bugs.md`, file a tracking issue with
+  `../subbox-workspace/qa-runner/open-issue.sh <this worktree> "<title>" "<body>"`
+  (label `qa-bug`) and record its URL as an `Issue:` line in the entry — never
+  re-file one that already has the link. A fix commit/PR carries `Closes #<n>`, so
+  merging it closes the issue; the issue's closed state is the signal the bug is
+  fixed in `main`, which the loop reconciles back into `bugs.md` each cycle (skill
+  Step 1½). A cross-repo bug gets an issue on each affected repo, cross-linked.
 - **Never run Alembic migrations, never touch staging/prod DBs or
   containers.** Only the local dev stack (already-running `pymix` +
   `pymix-postgres` under `../traefik/docker-compose.yml`), and never write to

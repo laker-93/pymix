@@ -54,8 +54,12 @@ conservative auto-fix bar. Flagging for the user / a future cycle to decide.
 
 Single-repo (pymix), likely `rekordbox_xml_controller._map_subbox_id_beet_id`.
 
+Issue: https://github.com/laker-93/pymix/issues/24
+
 <!-- One entry per bug: date, workflow/endpoint, repro (request + response or
-     client symptom that led here), hypothesis, which repo(s) need to change. -->
+     client symptom that led here), hypothesis, which repo(s) need to change,
+     and an `Issue: <github url>` line (every bug gets a qa-bug tracking issue —
+     see README hard rules / skill Step 1½). -->
 
 ### `subbox_id_divergence` ERROR over-fires on ordinary not-yet-downloaded tracks
 
@@ -125,6 +129,8 @@ normal; or (b) restrict the ERROR to the metadata-duplicate case above; or
 
 Single-repo (pymix only). Logging-only; the sync *plan* output itself is
 correct (7 present / 2 missing is right — Oleo *should* be downloaded).
+
+Issue: https://github.com/laker-93/pymix/issues/23
 
 ## FIXED
 
