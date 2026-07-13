@@ -274,6 +274,12 @@ async def sync_plan(
 
     async def _process_server_tracks(server_tracks: List, context_label: str):
         matched_server_track_ids: set[int] = set()
+        # A playlist may legitimately list the same song more than once (e.g. a duplicate
+        # entry in Rekordbox). Each occurrence becomes its own server_tracks entry sharing
+        # one subbox_id, but only one local file can ever back that id — track matched ids
+        # by value too, so every duplicate entry is satisfied by a single local copy
+        # instead of the object-identity check above leaving all-but-one falsely "missing".
+        matched_subbox_ids: set[str] = set()
         summary["tracksRequested"] += len(server_tracks)
 
         # Local tracks tagged with a subboxId are matched directly against the server
@@ -334,6 +340,8 @@ async def sync_plan(
                 continue
 
             matched_server_track_ids.add(id(matched_server_track))
+            if matched_via == "subbox_id":
+                matched_subbox_ids.add(matched_server_track.subbox_id)
             logger.info(
                 "sync_plan local_track_matched: user=%s context=%s via=%s local_raw=(%r,%r,%r,fromTag=%s) local_for_match=(%r,%r,%r) server=(%r,%r,%r) similarity=%.3f",
                 username,
@@ -353,7 +361,9 @@ async def sync_plan(
             )
 
         for track in server_tracks:
-            if id(track) in matched_server_track_ids:
+            if id(track) in matched_server_track_ids or (
+                track.subbox_id and track.subbox_id in matched_subbox_ids
+            ):
                 tracks["existing"].append({
                     "title": track.name,
                     "artist": track.artist,
