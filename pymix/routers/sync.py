@@ -263,13 +263,11 @@ async def sync_plan(
     # playlist(s) being synced).
     server_subbox_ids_seen: set[str] = set()
 
-    # The precise divergence signal: a server track that (a) carries a subbox_id and
-    # (b) still ends up classified "missing" after both the subbox_id fast path and the
-    # fuzzy fallback have had a chance to match it (see the "missing" branch in
-    # _process_server_tracks below). That combination is the only case that actually
-    # causes a re-download of a track the user already has — unlike simply "this
-    # server track's subbox_id wasn't found on any local file," which is equally true
-    # for a server track any untagged local file will still fuzzy-match just fine.
+    # Tagged server tracks (carry a subbox_id) that still end up classified "missing"
+    # after both the subbox_id fast path and the fuzzy fallback — i.e. they'll be
+    # downloaded. This is the normal not-yet-downloaded case for essentially every
+    # tagged track, so it's logged at INFO, not treated as divergence (see the log
+    # near the end of the handler).
     subbox_id_tagged_missing: set[str] = set()
 
     async def _process_server_tracks(server_tracks: List, context_label: str):
@@ -374,10 +372,13 @@ async def sync_plan(
                 continue
 
             if track.subbox_id:
-                # This exact track is already tagged (pymix has seen it before), yet
-                # neither the subbox_id fast path nor the fuzzy fallback found it among
-                # the local tracks we were sent — the one combination that actually
-                # causes a re-download of a track the user already has.
+                # This server track is tagged (pymix has seen it before) but isn't
+                # present among the local tracks we were sent — i.e. the user simply
+                # hasn't downloaded it yet (the normal case), and it will be downloaded.
+                # NOTE: this is *not* by itself a divergence/stale-tag signal — a plain
+                # not-yet-downloaded track is tagged and missing too. See the INFO log
+                # below; distinguishing a genuine stale/duplicate-tag re-download would
+                # require fuzzy-matching missing tracks against the full local set.
                 subbox_id_tagged_missing.add(track.subbox_id)
 
             file_size = 0
@@ -425,9 +426,8 @@ async def sync_plan(
             summary["metadataUpdates"] += 1
 
     if server_subbox_ids_seen:
-        # Informational visibility only, not an error signal — how many requested
-        # server tracks are tagged. See subbox_id_divergence below for the actual
-        # error-worthy signal.
+        # Informational visibility only — how many requested server tracks are tagged.
+        # See subbox_id_missing below for the count that will actually be downloaded.
         logger.info(
             "sync_plan subbox_id_summary: user=%s server_tracks_tagged=%s",
             username,
@@ -435,16 +435,18 @@ async def sync_plan(
         )
 
     if subbox_id_tagged_missing:
-        # The precise divergence signal: these specific tracks are tagged (pymix has
-        # seen them before) but ended up "missing" anyway — after both the subbox_id
-        # fast path *and* the fuzzy fallback had a chance to find them. This is the
-        # combination that actually causes a re-download of a track the user already
-        # has, unlike a bare "subbox_id not found locally" (which is equally true, and
-        # harmless, for any tagged server track whose local copy just isn't tagged).
-        logger.error(
-            "sync_plan subbox_id_divergence: user=%s count=%s tagged tracks ended up "
-            "missing despite fuzzy fallback — likely a stale/duplicate local SUBBOX_ID "
-            "tag, will be re-downloaded",
+        # Informational only: these server tracks are tagged (pymix has seen them
+        # before) but aren't present among the local tracks we were sent, so they'll be
+        # downloaded. This is the normal not-yet-downloaded case for essentially every
+        # tagged track — NOT an error. It is *not* on its own a stale/duplicate-tag
+        # divergence signal: a genuine "user already has it but a differing SUBBOX_ID
+        # forces a re-download" case is indistinguishable here without fuzzy-matching
+        # each missing track against the full local set (a redesign, deliberately not
+        # done). Logged at INFO to avoid the library-wide false-alarm noise this
+        # produced when it was an ERROR.
+        logger.info(
+            "sync_plan subbox_id_missing: user=%s count=%s tagged server tracks not "
+            "present locally, will be downloaded",
             username,
             len(subbox_id_tagged_missing),
         )
@@ -792,8 +794,10 @@ async def sync_playlists(
             ]
             for track in filtered_tracks:
                 if track.subbox_id:
-                    # Tagged (pymix has seen it before) but still being re-exported —
-                    # the one combination that actually causes a duplicate export.
+                    # Tagged (pymix has seen it before) but not matched by any local
+                    # track, so it's included in this export. Normal for any tagged
+                    # track the user doesn't already have locally — not on its own a
+                    # stale/duplicate-tag signal (see sync_plan).
                     subbox_id_tagged_missing.add(track.subbox_id)
             all_tracks.extend(filtered_tracks)
 
@@ -806,10 +810,13 @@ async def sync_playlists(
             )
 
         if subbox_id_tagged_missing:
-            logger.error(
-                "sync_playlists subbox_id_divergence: user=%s count=%s tagged tracks "
-                "ended up re-exported despite fuzzy fallback — likely a stale/duplicate "
-                "local SUBBOX_ID tag",
+            # Informational only, not an error — see sync_plan subbox_id_missing. These
+            # tagged server tracks weren't matched by any local track and so are part of
+            # this export; that's the normal case for anything the user doesn't already
+            # have locally, so it's logged at INFO to avoid library-wide false alarms.
+            logger.info(
+                "sync_playlists subbox_id_missing: user=%s count=%s tagged server tracks "
+                "not matched locally, included in export",
                 username,
                 len(subbox_id_tagged_missing),
             )
