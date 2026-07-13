@@ -5,137 +5,67 @@ one-sided fixes for client-coupled issues.
 
 ## OPEN
 
-### (informational, low priority) 5 orphaned beets entries at `/downloads/…` paths, no `subbox_id`, re-warn on every import
-
-Added: 2026-07-09. Surfaced while driving the watch-dir import (sub-step 3 of
-the phone/Discord wishlist directive; see `features/watch-dir-import.md`).
-Workflow: `poll_watchdir` → `_map_subbox_id_beet_id`
-(`pymix/controllers/rekordbox_xml_controller.py`).
-
-**Symptom.** Every watch-dir import logs, before the real work:
-
-```
-Found 6 tracks with unset subbox_id.
-WARNING Could not resolve path for beet_id=105, skipping.
-WARNING Could not resolve path for beet_id=106, skipping.
-WARNING Could not resolve path for beet_id=107, skipping.
-WARNING Could not resolve path for beet_id=87,  skipping.
-WARNING Could not resolve path for beet_id=162, skipping.
-```
-
-**Evidence (verified).** `beet list -f '$id | $path' 'subbox_id::^$'` in
-`beetstest260526` returns exactly these 5 entries, all pointing at
-`/downloads/…` paths (a staging/transient location, not `/music/…`):
-
-```
-105 | /downloads/cloud formation master 04.06.23.mp3
-106 | /downloads/points break at break points master 30.05.23.mp3
-107 | /downloads/road runner master 04.06.23.mp3
- 87 | /downloads/Sacred (88Ninety's 'StellarMix8' Vox Remix).mp3
-162 | /downloads/LITE SPOTS.mp3
-```
-
-The `/downloads/` files no longer exist in the container, so
-`_map_subbox_id_beet_id` can't stat them and skips — meaning these 5 library
-entries are **permanently stuck without a `subbox_id`**. Consequences:
-- Recurring WARNING noise on every single import (cosmetic but misleading).
-- If the real audio for any of these lives elsewhere in `/music`, it can't be
-  matched via the `subbox_id` fast path (sync would fall back to fuzzy, or miss).
-- They're phantom rows: beets counts them, but Navidrome's `media_file` (77)
-  doesn't, since the files aren't under `/music` — part of the beets-vs-navidrome
-  count skew.
-
-**Why not fixed this cycle.** Pre-existing data hygiene, not a regression and
-not caused by the import under test. The right fix is a design call — purge
-beets entries whose path no longer resolves (a `beet remove` sweep, or making
-`_map_subbox_id_beet_id` prune unresolvable rows instead of skipping them
-every time) — and touches destructive beets-DB ops, which is above the
-conservative auto-fix bar. Flagging for the user / a future cycle to decide.
-
-Single-repo (pymix), likely `rekordbox_xml_controller._map_subbox_id_beet_id`.
-
-Issue: https://github.com/laker-93/pymix/issues/24
+(none)
 
 <!-- One entry per bug: date, workflow/endpoint, repro (request + response or
      client symptom that led here), hypothesis, which repo(s) need to change,
      and an `Issue: <github url>` line (every bug gets a qa-bug tracking issue —
      see README hard rules / skill Step 1½). -->
 
-### `subbox_id_divergence` ERROR over-fires on ordinary not-yet-downloaded tracks
-
-Added: 2026-07-09. Endpoint: `POST /sync/plan` (`pymix/routers/sync.py`
-line ~366 and the ERROR at ~434). Found while driving sub-step 3 of the
-sync-matching directive (fuzzy fallback for untagged locals) against
-`test260526`'s "Kodzo" playlist (9 tracks, 7 present locally in the isolated
-`subbox-dev/music`, 2 missing).
-
-**Symptom.** Every "Preview Download" on this healthy, partially-downloaded
-playlist logs `ERROR sync_plan subbox_id_divergence: count=2 tagged tracks
-ended up missing despite fuzzy fallback — likely a stale/duplicate local
-SUBBOX_ID tag, will be re-downloaded`. Of those 2, only **one** (the genuine
-"Damager (Hamdi Edit)" duplicate — see the informational entry in
-feishin-qa's `bugs.md`) is a real stale/duplicate case. The other is
-**"Oleo" by Pat Martino**, a track the user simply hasn't downloaded yet (it
-was moved out of `subbox-dev/music` in an earlier pruning test; no local
-copy, no metadata-identical local counterpart). Downloading Oleo is the
-correct, desired outcome — there is nothing stale or duplicate about it, yet
-it trips the ERROR with that misleading "stale/duplicate local SUBBOX_ID
-tag" wording.
-
-**Root cause.** The missing-track branch flags divergence purely from the
-*server* track's own tag:
-
-```python
-if track.subbox_id:            # line ~366
-    subbox_id_tagged_missing.add(track.subbox_id)
-```
-
-Every server track that has been through pymix ingest carries a `subbox_id`,
-so `track.subbox_id` is truthy for essentially all missing tracks. The
-signal therefore fires ERROR for *any* tagged server track the user doesn't
-have locally — i.e. for normal, not-yet-downloaded tracks. On a fresh sync
-(nothing downloaded), `count` would equal ~the whole playlist and every sync
-would log ERROR — the exact "library-wide noise" that the pymix#22 fix (see
-FIXED below) set out to eliminate. The `count=1 correctly scoped` conclusion
-in that FIXED entry held only because, at that moment, the single missing
-track happened to be the genuine duplicate; it wasn't tested with a plain
-absent-but-tagged track also missing.
-
-**Verified** (live, shared `pymix` container on `laker93/pymix:qa-local`,
-this branch's code): two consecutive `sync/plan` runs both logged
-`count=2`; the count is independent of a separate untagged-local test I ran
-in the same cycle (that track fuzzy-matched and stayed present). Oleo's
-server subbox_id (`f948441b-…`) has no local file carrying it.
-
-**Why not fixed this cycle (needs a design call, not a conservative fix).**
-The comment at line ~428 states the intended meaning: "tracks the user
-*already has* … but ended up missing anyway." Distinguishing that from a
-plain absent track is non-trivial:
-- A bare intersection with local subbox_ids would make the signal ~never
-  fire — a local file carrying the matching id would already have matched via
-  the fast path, so a *missing* server track's id is by construction not on
-  any local file.
-- The genuinely useful signal (the Damager case) is "a missing tagged server
-  track whose *metadata* matches a local file the user already has, but a
-  differing subbox_id forced a separate re-download." Detecting that means
-  fuzzy-matching missing tracks against the local set — new logic, arguably a
-  redesign, outside the conservative-fix bar.
-
-**Recommended options for the user to choose from** (any is a small change;
-picking one is the design call): (a) downgrade to INFO / reword to drop the
-"stale/duplicate" claim, since "tagged server track not present locally" is
-normal; or (b) restrict the ERROR to the metadata-duplicate case above; or
-(c) drop the signal entirely and rely on the existing `missing` count.
-
-Single-repo (pymix only). Logging-only; the sync *plan* output itself is
-correct (7 present / 2 missing is right — Oleo *should* be downloaded).
-
-Issue: https://github.com/laker-93/pymix/issues/23
-
 ## FIXED
 
 <!-- One entry per fix: date, one-line description, commit SHA on this
      branch, how it was re-verified. -->
+
+### `subbox_id_divergence` ERROR over-fired on ordinary not-yet-downloaded tracks
+
+Found: 2026-07-09. Fixed: 2026-07-13. Endpoints: `POST /sync/plan` and
+`POST /sync/playlists` (`pymix/routers/sync.py`). Issue #23.
+
+**Bug.** The missing-track branch added a track to `subbox_id_tagged_missing`
+purely from `if track.subbox_id:`. Essentially every ingested server track is
+tagged, so the `sync_plan subbox_id_divergence` ERROR ("likely a stale/duplicate
+local SUBBOX_ID tag") fired for *any* tagged track the user simply hadn't
+downloaded yet — on a fresh sync, ~the whole playlist. The `/sync/playlists`
+export path carried the identical bug. Logging-only; the plan/export output was
+already correct.
+
+**Fix.** Downgraded ERROR → INFO and renamed `subbox_id_divergence` →
+`subbox_id_missing` in both handlers, reworded to what it actually measures
+("N tagged server tracks not present locally, will be downloaded"), and dropped
+the false stale/duplicate wording. Distinguishing a genuine stale/duplicate-tag
+re-download would require fuzzy-matching every missing track against the full
+local set (a redesign, deliberately not done — noted in comments). Shipped as
+pymix PR #26 (`Closes #23`), branch `fix/sync-subbox-id-missing-info-log` off
+`main`.
+
+**Re-verified.** `pytest pymix/tests` (excluding the two pre-existing jinja2
+collection errors): 37 passed, 10 skipped — identical to baseline. `grep` confirms
+no `subbox_id_divergence` / no `logger.error` divergence call remains in sync.py.
+
+### 5 orphaned beets entries at `/downloads/…` paths re-warned on every import
+
+Found: 2026-07-09. Fixed: 2026-07-13.
+`rekordbox_xml_controller._map_subbox_id_beet_id`. Issue #24.
+
+**Bug.** 5 beets rows (ids 105, 106, 107, 87, 162) in `beetstest260526` pointed at
+deleted `/downloads/*.mp3` staging paths, so `_map_subbox_id_beet_id` couldn't
+stat them and re-logged `Found N tracks with unset subbox_id` +
+`Could not resolve path for beet_id=…, skipping` on every import. Phantom rows
+(beets-vs-Navidrome count skew). Pre-existing data hygiene, not a regression.
+
+**Fix (data cleanup, no code change).** Confirmed the `/downloads/` files are gone
+in-container (dir empty), then removed the 5 rows DB-only: `beet remove -f id:<n>`
+(no `-d`, so nothing on disk was touched). No real audio orphaned — the rows had
+no subbox_id and any real re-import lands as a separate `/music/` row. No
+auto-prune logic was added to the hot import path (running destructive
+`beet remove` every import to clean 5 one-off phantoms wasn't worth the risk).
+
+**Re-verified.** The exact query the import runs,
+`beet list -f '$id:$path' 'subbox_id::^$'`, now returns zero rows; `path::/downloads/`
+returns zero rows. Next import logs "Found 0 tracks with unset subbox_id" with no
+per-row warnings. Total library items: 560. Issue closed with a resolution
+comment.
 
 ### `subbox_id_match_summary` logged ERROR on almost every normal sync, not just real divergence
 
