@@ -18,7 +18,7 @@ from pymix.handlers.filebrowser_file_handler import poll_watchdir, trigger_proce
 from pymix.handlers.sheet_sync_handler import sheet_sync_loop
 from pymix.handlers.wishlist_reconcile_handler import wishlist_reconcile_loop
 from pymix.handlers.wishlist_resolve_handler import wishlist_resolve_loop
-from pymix.routers import maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, match_tracks, track, wishlist
+from pymix.routers import maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, wishlist
 
 
 logger = logging.getLogger(__name__)
@@ -145,7 +145,6 @@ def create_app(container):
     app.include_router(serato_import_export.router)
     app.include_router(export_progress.router)
     app.include_router(sync.router)
-    app.include_router(match_tracks.router)
     app.include_router(track.router)
     app.include_router(wishlist.router)
     return app
