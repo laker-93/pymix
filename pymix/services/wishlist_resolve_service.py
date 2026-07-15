@@ -125,4 +125,10 @@ class WishlistResolveService:
 
         label = f"{query} -> {match['artist']} - {match['title']}"
         result.matched.append(label)
-        logger.info(f"resolve: rewrote wishlist item {wishlist_id} ({label}) [score {match['score']}]")
+        # Log the local similarity, not MusicBrainz's ext:score: the score is a rank
+        # within one result set (~100 for any top hit), so it told us nothing about
+        # whether the rewrite was right. See MusicBrainzMatchService.
+        logger.info(
+            f"resolve: rewrote wishlist item {wishlist_id} ({label}) "
+            f"[similarity {match['similarity']}%, mb score {match['score']}]"
+        )
