@@ -10,6 +10,19 @@ from pymix.services.wishlist_resolve_service import WishlistResolveService
 USER = {"username": "alice", "password": "secret"}
 
 
+def _row(artist="", title="", status=WishlistStatus.INBOX.value, **urls):
+    """A wishlist row as _derive_artist_title_update sees it. URL fields default to None
+    so a test that cares about them has to say so explicitly."""
+    return SimpleNamespace(
+        artist=artist,
+        title=title,
+        status=status,
+        youtube_url=urls.get("youtube_url"),
+        bandcamp_url=urls.get("bandcamp_url"),
+        soundcloud_url=urls.get("soundcloud_url"),
+    )
+
+
 def _make_service(items, match_return=None):
     db = MagicMock()
     db.get_pending_resolve_items.return_value = items
@@ -151,7 +164,7 @@ def test_derive_artist_title_update_completing_inbox_item_reenters_resolve_loop(
     # Supplying the missing half of a still-incomplete item (only a title here) is the
     # same event as typing both fields at creation — it must be treated identically, not
     # locked out as a "user correction".
-    row = SimpleNamespace(artist="", title="Windowlicker", status=WishlistStatus.INBOX.value)
+    row = _row(title="Windowlicker")
 
     updates = _derive_artist_title_update(row, {"artist": "Aphex Twin"})
 
@@ -164,7 +177,7 @@ def test_derive_artist_title_update_completing_inbox_item_reenters_resolve_loop(
 
 
 def test_derive_artist_title_update_completing_bare_raw_note_reenters_resolve_loop():
-    row = SimpleNamespace(artist="", title="", status=WishlistStatus.INBOX.value)
+    row = _row()
 
     updates = _derive_artist_title_update(row, {"artist": "Aphex Twin", "title": "Windowlicker"})
 
@@ -173,10 +186,48 @@ def test_derive_artist_title_update_completing_bare_raw_note_reenters_resolve_lo
     assert updates["status"] == WishlistStatus.WISHLIST.value
 
 
+def test_derive_artist_title_update_completing_url_backed_item_stays_locked():
+    # A URL-only item (valid at creation) whose link-parse yielded no artist/title is
+    # resolve_state=resolved because the URL *is* its identity. Typing the text in must
+    # not re-queue it — the loop would MusicBrainz-overwrite what the user just typed.
+    row = _row(status=WishlistStatus.WISHLIST.value, youtube_url="https://youtu.be/x")
+
+    updates = _derive_artist_title_update(row, {"artist": "Skee Mask", "title": "Rio Dub"})
+
+    assert updates == {
+        "artist": "Skee Mask",
+        "title": "Rio Dub",
+        "metadata_source": MetadataSource.USER.value,
+    }
+
+
+def test_derive_artist_title_update_completing_partially_parsed_url_item_stays_locked():
+    # Same for a partial link-parse (artist, no title) on a bandcamp/soundcloud item.
+    row = _row(artist="Skee Mask", status=WishlistStatus.WISHLIST.value,
+               soundcloud_url="https://soundcloud.com/x/y")
+
+    updates = _derive_artist_title_update(row, {"title": "Rio Dub"})
+
+    assert updates == {"title": "Rio Dub", "metadata_source": MetadataSource.USER.value}
+
+
+def test_derive_artist_title_update_url_attached_in_same_patch_stays_locked():
+    # The PATCH may attach the link alongside the text, which makes the item URL-backed
+    # for the same reason — decide on the effective post-update URLs, not the stale row.
+    row = _row(title="Windowlicker")
+
+    updates = _derive_artist_title_update(
+        row, {"artist": "Aphex Twin", "youtube_url": "https://youtu.be/x"}
+    )
+
+    assert updates["metadata_source"] == MetadataSource.USER.value
+    assert "resolve_state" not in updates
+
+
 def test_derive_artist_title_update_respects_caller_supplied_status():
     # The completion path only defaults status to "wishlist" — it must not clobber a
     # status the caller explicitly set alongside the artist/title fix.
-    row = SimpleNamespace(artist="", title="Windowlicker", status=WishlistStatus.INBOX.value)
+    row = _row(title="Windowlicker")
 
     updates = _derive_artist_title_update(
         row, {"artist": "Aphex Twin", "status": WishlistStatus.IGNORED.value}
@@ -190,7 +241,7 @@ def test_derive_artist_title_update_correcting_complete_item_locks_to_user():
     # An item that already had both fields has already been through (or bypassed) the
     # resolve loop — editing it now is a correction, and must lock it against future
     # automatic re-matching, unchanged from the pre-existing behaviour.
-    row = SimpleNamespace(artist="Kahn", title="Abatoir", status=WishlistStatus.WISHLIST.value)
+    row = _row(artist="Kahn", title="Abatoir", status=WishlistStatus.WISHLIST.value)
 
     updates = _derive_artist_title_update(row, {"title": "Abattoir"})
 
@@ -200,7 +251,7 @@ def test_derive_artist_title_update_correcting_complete_item_locks_to_user():
 def test_derive_artist_title_update_still_incomplete_after_edit_locks_to_user():
     # Editing one field of a still-incomplete item (title added, artist still missing)
     # doesn't complete it, so it's a hand edit like any other — locked, not re-queued.
-    row = SimpleNamespace(artist="", title="", status=WishlistStatus.INBOX.value)
+    row = _row()
 
     updates = _derive_artist_title_update(row, {"title": "Windowlicker"})
 

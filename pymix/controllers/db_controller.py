@@ -17,6 +17,13 @@ from pymix.model.wishlist import MetadataSource, ResolveState, WishlistStatus
 from pymix.utils.get_available_port import get_available_port
 
 
+def _has_source_url(youtube_url, bandcamp_url, soundcloud_url) -> bool:
+    """Whether an item carries a source URL, and so is identified by that link rather than
+    by its artist/title free text. The two ``_derive_*`` helpers below must agree on this,
+    or an item the one treats as already-resolved gets re-queued by the other."""
+    return bool(youtube_url or bandcamp_url or soundcloud_url)
+
+
 def _derive_resolve_state(youtube_url, bandcamp_url, soundcloud_url, artist=None, title=None) -> str:
     """Resolve-state for a newly-created item.
 
@@ -29,7 +36,7 @@ def _derive_resolve_state(youtube_url, bandcamp_url, soundcloud_url, artist=None
     both artist and title rather than entering the resolve loop. Single source of truth for
     the client, bulk and Google-Sheet ingest paths, which all funnel through here. Mirrors
     ``CreateWishlistRequest.initial_status``, which sends the same items to ``inbox``."""
-    if youtube_url or bandcamp_url or soundcloud_url:
+    if _has_source_url(youtube_url, bandcamp_url, soundcloud_url):
         return ResolveState.RESOLVED.value
     if (artist or "").strip() and (title or "").strip():
         return ResolveState.PENDING.value
@@ -39,23 +46,35 @@ def _derive_resolve_state(youtube_url, bandcamp_url, soundcloud_url, artist=None
 def _derive_artist_title_update(row: WishlistRow, updates: dict) -> dict:
     """Provenance/resolve-state side effects of a PATCH that touches artist and/or title.
 
-    An item that didn't yet have both fields (an inbox item with a raw note, or only one
-    of artist/title) has never been through the resolve loop. Supplying the missing piece
-    is the same event as typing both fields at creation, so it's treated identically:
-    ``metadata_source`` stays ``auto`` and ``resolve_state`` goes to ``pending``, so it
-    enters the resolve loop and gets the same MusicBrainz refinement pass a freshly-typed
-    complete item would — and ``status`` moves to ``wishlist`` (mirrors
-    ``CreateWishlistRequest.initial_status``), independent of whether the caller already
-    set it.
+    A URL-less item that didn't yet have both fields (an inbox item with a raw note, or
+    only one of artist/title) has never been through the resolve loop. Supplying the
+    missing piece is the same event as typing both fields at creation, so it's treated
+    identically: ``metadata_source`` stays ``auto`` and ``resolve_state`` goes to
+    ``pending``, so it enters the resolve loop and gets the same MusicBrainz refinement
+    pass a freshly-typed complete item would — and ``status`` defaults to ``wishlist``
+    (mirrors ``CreateWishlistRequest.initial_status``) unless the caller set one itself.
 
-    Editing an item that already had both fields is a correction to already-resolved (or
-    already-pending) text, and locks it against future automatic re-matching, as before —
-    the resolve loop must never overwrite what the user just typed."""
+    An item carrying a source URL is excluded: the URL is its exact-song identity, so
+    ``_derive_resolve_state`` marks it ``resolved`` precisely so nothing ever re-matches
+    it. Filling in the artist/title of a URL-backed item is a hand edit like any other,
+    and must stay locked — otherwise the loop would MusicBrainz-overwrite text the user
+    just typed, against an item whose identity was never the text in the first place.
+
+    Editing an item that already had both fields is likewise a correction to
+    already-resolved (or already-pending) text, and locks it against future automatic
+    re-matching, as before — the resolve loop must never overwrite what the user just
+    typed."""
     new_artist = (updates.get("artist", row.artist) or "").strip()
     new_title = (updates.get("title", row.title) or "").strip()
     was_incomplete = not ((row.artist or "").strip() and (row.title or "").strip())
+    # Effective post-update URLs: the same PATCH may be attaching a link alongside the text.
+    has_url = _has_source_url(
+        updates.get("youtube_url", row.youtube_url),
+        updates.get("bandcamp_url", row.bandcamp_url),
+        updates.get("soundcloud_url", row.soundcloud_url),
+    )
 
-    if was_incomplete and new_artist and new_title:
+    if was_incomplete and not has_url and new_artist and new_title:
         updates.setdefault("status", WishlistStatus.WISHLIST.value)
         updates["metadata_source"] = MetadataSource.AUTO.value
         updates["resolve_state"] = ResolveState.PENDING.value
