@@ -8,6 +8,7 @@ from yt_dlp import YoutubeDL
 
 from pymix.services.musicbrainz_match_service import MusicBrainzMatchService
 from pymix.services.ytdlp_support import resolve_cookiefile
+from pymix.utils.text_noise import strip_noise as _strip_noise
 
 logger = logging.getLogger(__name__)
 
@@ -67,50 +68,12 @@ class LinkCollectionMetadata(TypedDict):
 # This "Artist - Title" splitter is the canonical implementation. scripts/
 # download_wishlist.py carries a stdlib-only MIRROR of it (that script must run under a
 # bare `python3`, so it can't import this module) -- keep the two in sync: same
-# separator, same noise keywords.
+# separator, same noise keywords (the latter now live in pymix.utils.text_noise).
 #
 # The standard "Artist - Title" convention, allowing hyphen, en dash or em dash
 # as the separator. Only the first separator splits (maxsplit=1) so titles like
 # "Artist - Song - Remix" keep the remainder in the title.
 _TITLE_SEPARATOR_RE = re.compile(r"\s+[-–—]\s+")
-
-# Trailing "(...)"/"[...]" production descriptors that aren't part of the track
-# name. Kept deliberately narrow so meaningful variants like "(Live)" or
-# "(Acoustic)" survive.
-_NOISE_GROUP_RE = re.compile(r"\s*[\(\[]([^)\]]*)[\)\]]\s*$")
-_NOISE_KEYWORDS = (
-    "official",
-    "lyric",
-    "lyrics",
-    "visualizer",
-    "audio",
-    "video",
-    "hd",
-    "hq",
-    "4k",
-    "mv",
-    "m/v",
-)
-
-
-def _strip_noise(text: str) -> str:
-    """Drop trailing production-descriptor brackets, e.g. '(Official Video)', '[HD]'.
-
-    Never strips the final group down to an empty string: a title that is *only* a
-    descriptor (e.g. a track literally named '[HD]') is kept verbatim rather than
-    blanked, so there's always something to fall back on.
-    """
-    while True:
-        match = _NOISE_GROUP_RE.search(text)
-        if not match:
-            break
-        remainder = text[: match.start()].rstrip()
-        inner = match.group(1).strip().lower()
-        if remainder and inner and any(keyword in inner.split() for keyword in _NOISE_KEYWORDS):
-            text = remainder
-        else:
-            break
-    return text
 
 
 def _split_artist_title(raw_title: str) -> Tuple[Optional[str], str]:

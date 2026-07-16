@@ -127,10 +127,10 @@ class WishlistRow(Base):
     metadata_source = Column(String, nullable=False, server_default='auto')
 
     # 'pending' | 'resolved' | 'nomatch' — see ResolveState. Work-state for the async
-    # resolve loop: a 'pending' item has hand-typed artist/title still to be refined against
-    # MusicBrainz; a bare inbox raw note (no artist/title) is 'nomatch' — nothing to
-    # auto-resolve, left for the user. 'nomatch' is terminal. The (metadata_source,
-    # resolve_state) pair is indexed for the loop's selection query.
+    # resolve loop: a 'pending' item has hand-typed artist AND title still to be refined
+    # against MusicBrainz; an inbox item with a raw note or only one of artist/title is
+    # 'nomatch' — nothing to auto-resolve, left for the user. 'nomatch' is terminal. The
+    # (metadata_source, resolve_state) pair is indexed for the loop's selection query.
     resolve_state = Column(String, nullable=False, server_default='pending')
 
     status = Column(

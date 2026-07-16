@@ -18,13 +18,13 @@ class MetadataSource(str, enum.Enum):
 class ResolveState(str, enum.Enum):
     """Whether an item's artist/title has been resolved to a canonical form yet.
 
-    A new item with hand-typed artist/title starts ``pending`` — free text the background
-    resolve loop still needs to refine against MusicBrainz. ``resolved`` means a confident
-    match was applied, or the item arrived already resolved (a parsed single link, or a
-    collection expansion). ``nomatch`` is terminal — either resolution ran but found no
-    confident match, or there was nothing to resolve (a bare inbox raw note with no
-    artist/title, which is left for the user to complete). In every terminal case the loop
-    never retries it and the user's text is left as typed.
+    A new item with hand-typed artist *and* title starts ``pending`` — free text the
+    background resolve loop still needs to refine against MusicBrainz. ``resolved`` means a
+    confident match was applied, or the item arrived already resolved (a parsed single link,
+    or a collection expansion). ``nomatch`` is terminal — either resolution ran but found no
+    confident match, or there was nothing to resolve (an inbox item with a raw note, or only
+    one of artist/title, which is left for the user to complete). In every terminal case the
+    loop never retries it and the user's text is left as typed.
     """
 
     PENDING = "pending"

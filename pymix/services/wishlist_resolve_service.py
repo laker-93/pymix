@@ -2,7 +2,7 @@ import dataclasses
 import logging
 
 from pymix.controllers.db_controller import DbController
-from pymix.model.wishlist import ResolveState, WishlistStatus
+from pymix.model.wishlist import ResolveState
 from pymix.services.musicbrainz_match_service import MusicBrainzMatchService
 from pymix.utils.quiet_logging import make_logger_suppressible
 
@@ -39,15 +39,16 @@ class WishlistResolveService:
 
     This is the async, off-the-critical-path counterpart to the client's old synchronous
     "Find metadata match" button: for every auto-provenance item still ``pending`` (a
-    hand-typed artist/title, typos and all), it asks the same
+    hand-typed artist *and* title, typos and all), it asks the same
     :class:`MusicBrainzMatchService` for a confident match and applies it, so a typo'd
     entry becomes the correct canonical track before ``download_wishlist.py`` searches
     Soulseek for it.
 
     Items that carry a source URL are resolved at create time (their metadata came from
-    parsing the link, or the URL itself is the exact-song identity the downloader uses),
-    and a bare inbox raw note with no artist/title is left for the user to complete — so
-    neither reaches this loop; ``pending`` items are always hand-typed artist/title.
+    parsing the link, or the URL itself is the exact-song identity the downloader uses), and
+    an inbox item that's missing artist, title, or both is left for the user to complete —
+    so none of those reach this loop; ``pending`` items always have both artist and title
+    hand-typed.
     """
 
     def __init__(self, db_controller: DbController, musicbrainz_match_service: MusicBrainzMatchService):
@@ -79,12 +80,13 @@ class WishlistResolveService:
         title = (item.get("title") or "").strip()
         wishlist_id = item["wishlist_id"]
 
-        # Only hand-typed artist/title are refined. A bare inbox raw note (no artist/title)
-        # is left for the user: we don't guess a canonical track from an ambiguous free-text
-        # note, so mark it terminal and let it wait in the inbox prompting for more info,
-        # rather than querying MusicBrainz. Newly-created raw notes are already non-pending
-        # (see _derive_resolve_state); this also settles any that predate that.
-        if not (artist or title):
+        # Only items with both artist and title hand-typed are refined. An inbox item
+        # missing either one is left for the user: we don't guess a canonical track from a
+        # single field or an ambiguous free-text note, so mark it terminal and let it wait
+        # in the inbox prompting for more info, rather than querying MusicBrainz.
+        # Newly-created items are already non-pending in this case (see
+        # _derive_resolve_state); this also settles any that predate that.
+        if not (artist and title):
             self._db.resolve_wishlist_item(
                 wishlist_id, {"resolve_state": ResolveState.NOMATCH.value}
             )
@@ -113,10 +115,6 @@ class WishlistResolveService:
         }
         if match["album"] and not (item.get("album") or "").strip():
             updates["album"] = match["album"]
-        # A partial-metadata inbox item (e.g. only a title) that MusicBrainz has now given
-        # a real artist + title is a usable wishlist entry — promote it out of the inbox.
-        if item.get("status") == WishlistStatus.INBOX.value:
-            updates["status"] = WishlistStatus.WISHLIST.value
 
         updated = self._db.resolve_wishlist_item(wishlist_id, updates)
         if updated is None:
@@ -125,4 +123,10 @@ class WishlistResolveService:
 
         label = f"{query} -> {match['artist']} - {match['title']}"
         result.matched.append(label)
-        logger.info(f"resolve: rewrote wishlist item {wishlist_id} ({label}) [score {match['score']}]")
+        # Log the local similarity, not MusicBrainz's ext:score: the score is a rank
+        # within one result set (~100 for any top hit), so it told us nothing about
+        # whether the rewrite was right. See MusicBrainzMatchService.
+        logger.info(
+            f"resolve: rewrote wishlist item {wishlist_id} ({label}) "
+            f"[similarity {match['similarity']}%, mb score {match['score']}]"
+        )

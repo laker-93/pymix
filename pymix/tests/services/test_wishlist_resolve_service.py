@@ -1,12 +1,26 @@
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from pymix.controllers.db_controller import _derive_resolve_state
-from pymix.model.wishlist import ResolveState
+from pymix.controllers.db_controller import _derive_artist_title_update, _derive_resolve_state
+from pymix.model.wishlist import MetadataSource, ResolveState, WishlistStatus
 from pymix.services.wishlist_resolve_service import WishlistResolveService
 
 USER = {"username": "alice", "password": "secret"}
+
+
+def _row(artist="", title="", status=WishlistStatus.INBOX.value, **urls):
+    """A wishlist row as _derive_artist_title_update sees it. URL fields default to None
+    so a test that cares about them has to say so explicitly."""
+    return SimpleNamespace(
+        artist=artist,
+        title=title,
+        status=status,
+        youtube_url=urls.get("youtube_url"),
+        bandcamp_url=urls.get("bandcamp_url"),
+        soundcloud_url=urls.get("soundcloud_url"),
+    )
 
 
 def _make_service(items, match_return=None):
@@ -21,7 +35,7 @@ def _make_service(items, match_return=None):
     return WishlistResolveService(db, mb), db, mb
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_raw_note_only_item_is_not_sent_to_musicbrainz():
     # A bare inbox note (no artist/title) must never be guessed against MusicBrainz — it
     # waits in the inbox for the user to supply more info.
@@ -44,7 +58,31 @@ async def test_raw_note_only_item_is_not_sent_to_musicbrainz():
     assert result.resolved == 0
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
+async def test_partial_inbox_item_is_not_sent_to_musicbrainz():
+    # An inbox item with only one of artist/title needs more info from the user before
+    # it's a usable wishlist entry — it must not be auto-completed via MusicBrainz, and
+    # must stay in the inbox so the client keeps prompting for the missing field.
+    item = {
+        "wishlist_id": "w1",
+        "artist": "",
+        "title": "Windowlicker",
+        "raw_note": None,
+        "album": None,
+        "status": "inbox",
+    }
+    service, db, mb = _make_service([item])
+
+    result = await service.resolve_user(USER)
+
+    mb.match.assert_not_awaited()
+    mb.match_fields.assert_not_awaited()
+    db.resolve_wishlist_item.assert_called_once_with("w1", {"resolve_state": ResolveState.NOMATCH.value})
+    assert result.skipped == 1
+    assert result.resolved == 0
+
+
+@pytest.mark.anyio
 async def test_hand_typed_artist_title_is_resolved():
     item = {
         "wishlist_id": "w1",
@@ -54,11 +92,20 @@ async def test_hand_typed_artist_title_is_resolved():
         "album": None,
         "status": "wishlist",
     }
-    match = {"artist": "Aphex Twin", "title": "Xtal", "album": "Selected Ambient Works", "score": 97}
+    match = {
+        "artist": "Aphex Twin",
+        "title": "Xtal",
+        "album": "Selected Ambient Works",
+        "score": 97,
+        "similarity": 94.0,
+    }
     service, db, mb = _make_service([item], match_return=match)
 
     result = await service.resolve_user(USER)
 
+    # resolve_user swallows per-item exceptions to keep the sweep going, so assert the
+    # item didn't fail — otherwise a crash after the match is applied still looks resolved.
+    assert result.failed == 0
     mb.match_fields.assert_awaited_once_with(artist="Afex Twin", title="Xtal")
     db.resolve_wishlist_item.assert_called_once_with(
         "w1",
@@ -72,28 +119,29 @@ async def test_hand_typed_artist_title_is_resolved():
     assert result.resolved == 1
 
 
-@pytest.mark.asyncio
-async def test_partial_inbox_item_is_resolved_and_promoted():
-    # An inbox item with only a title still has something to refine, and a confident match
-    # promotes it out of the inbox.
+@pytest.mark.anyio
+async def test_unverified_match_leaves_user_text_untouched():
+    # The #31 guarantee at the resolve layer: when the matcher can't verify a candidate it
+    # returns None, and the user's hand-typed text must survive as they wrote it. A VIP mix
+    # or white label that simply isn't in MusicBrainz has to stay searchable as typed —
+    # hand-typed items carry no raw_note to recover from once overwritten.
     item = {
         "wishlist_id": "w1",
-        "artist": "",
-        "title": "Windowlicker",
+        "artist": "Interplanetary Criminal",
+        "title": "Yeah Yeah (VIP Mix)",
         "raw_note": None,
         "album": None,
-        "status": "inbox",
+        "status": "wishlist",
     }
-    match = {"artist": "Aphex Twin", "title": "Windowlicker", "album": None, "score": 95}
-    service, db, mb = _make_service([item], match_return=match)
+    service, db, mb = _make_service([item], match_return=None)
 
     result = await service.resolve_user(USER)
 
-    mb.match_fields.assert_awaited_once_with(artist="", title="Windowlicker")
-    _wid, updates = db.resolve_wishlist_item.call_args.args
-    assert updates["status"] == "wishlist"
-    assert updates["resolve_state"] == ResolveState.RESOLVED.value
-    assert result.resolved == 1
+    db.resolve_wishlist_item.assert_called_once_with(
+        "w1", {"resolve_state": ResolveState.NOMATCH.value}
+    )
+    assert result.resolved == 0
+    assert result.nomatch == ["Interplanetary Criminal Yeah Yeah (VIP Mix)"]
 
 
 def test_derive_resolve_state_raw_note_is_terminal():
@@ -101,8 +149,110 @@ def test_derive_resolve_state_raw_note_is_terminal():
     # never picks it up and the client never shows a "resolving…" badge on it.
     assert _derive_resolve_state(None, None, None) == ResolveState.NOMATCH.value
     assert _derive_resolve_state(None, None, None, artist="", title="") == ResolveState.NOMATCH.value
-    # Hand-typed artist/title => pending (loop refines it).
-    assert _derive_resolve_state(None, None, None, artist="A", title="") == ResolveState.PENDING.value
-    assert _derive_resolve_state(None, None, None, artist="", title="T") == ResolveState.PENDING.value
+    # Only one of artist/title => also terminal: the item needs more info from the user
+    # before there's anything safe to refine, so it stays in the inbox rather than
+    # entering the resolve loop. Mirrors CreateWishlistRequest.initial_status.
+    assert _derive_resolve_state(None, None, None, artist="A", title="") == ResolveState.NOMATCH.value
+    assert _derive_resolve_state(None, None, None, artist="", title="T") == ResolveState.NOMATCH.value
+    # Hand-typed artist AND title => pending (loop refines it).
+    assert _derive_resolve_state(None, None, None, artist="A", title="T") == ResolveState.PENDING.value
     # A source URL => already resolved.
     assert _derive_resolve_state("https://youtu.be/x", None, None) == ResolveState.RESOLVED.value
+
+
+def test_derive_artist_title_update_completing_inbox_item_reenters_resolve_loop():
+    # Supplying the missing half of a still-incomplete item (only a title here) is the
+    # same event as typing both fields at creation — it must be treated identically, not
+    # locked out as a "user correction".
+    row = _row(title="Windowlicker")
+
+    updates = _derive_artist_title_update(row, {"artist": "Aphex Twin"})
+
+    assert updates == {
+        "artist": "Aphex Twin",
+        "status": WishlistStatus.WISHLIST.value,
+        "metadata_source": MetadataSource.AUTO.value,
+        "resolve_state": ResolveState.PENDING.value,
+    }
+
+
+def test_derive_artist_title_update_completing_bare_raw_note_reenters_resolve_loop():
+    row = _row()
+
+    updates = _derive_artist_title_update(row, {"artist": "Aphex Twin", "title": "Windowlicker"})
+
+    assert updates["metadata_source"] == MetadataSource.AUTO.value
+    assert updates["resolve_state"] == ResolveState.PENDING.value
+    assert updates["status"] == WishlistStatus.WISHLIST.value
+
+
+def test_derive_artist_title_update_completing_url_backed_item_stays_locked():
+    # A URL-only item (valid at creation) whose link-parse yielded no artist/title is
+    # resolve_state=resolved because the URL *is* its identity. Typing the text in must
+    # not re-queue it — the loop would MusicBrainz-overwrite what the user just typed.
+    row = _row(status=WishlistStatus.WISHLIST.value, youtube_url="https://youtu.be/x")
+
+    updates = _derive_artist_title_update(row, {"artist": "Skee Mask", "title": "Rio Dub"})
+
+    assert updates == {
+        "artist": "Skee Mask",
+        "title": "Rio Dub",
+        "metadata_source": MetadataSource.USER.value,
+    }
+
+
+def test_derive_artist_title_update_completing_partially_parsed_url_item_stays_locked():
+    # Same for a partial link-parse (artist, no title) on a bandcamp/soundcloud item.
+    row = _row(artist="Skee Mask", status=WishlistStatus.WISHLIST.value,
+               soundcloud_url="https://soundcloud.com/x/y")
+
+    updates = _derive_artist_title_update(row, {"title": "Rio Dub"})
+
+    assert updates == {"title": "Rio Dub", "metadata_source": MetadataSource.USER.value}
+
+
+def test_derive_artist_title_update_url_attached_in_same_patch_stays_locked():
+    # The PATCH may attach the link alongside the text, which makes the item URL-backed
+    # for the same reason — decide on the effective post-update URLs, not the stale row.
+    row = _row(title="Windowlicker")
+
+    updates = _derive_artist_title_update(
+        row, {"artist": "Aphex Twin", "youtube_url": "https://youtu.be/x"}
+    )
+
+    assert updates["metadata_source"] == MetadataSource.USER.value
+    assert "resolve_state" not in updates
+
+
+def test_derive_artist_title_update_respects_caller_supplied_status():
+    # The completion path only defaults status to "wishlist" — it must not clobber a
+    # status the caller explicitly set alongside the artist/title fix.
+    row = _row(title="Windowlicker")
+
+    updates = _derive_artist_title_update(
+        row, {"artist": "Aphex Twin", "status": WishlistStatus.IGNORED.value}
+    )
+
+    assert updates["status"] == WishlistStatus.IGNORED.value
+    assert updates["metadata_source"] == MetadataSource.AUTO.value
+
+
+def test_derive_artist_title_update_correcting_complete_item_locks_to_user():
+    # An item that already had both fields has already been through (or bypassed) the
+    # resolve loop — editing it now is a correction, and must lock it against future
+    # automatic re-matching, unchanged from the pre-existing behaviour.
+    row = _row(artist="Kahn", title="Abatoir", status=WishlistStatus.WISHLIST.value)
+
+    updates = _derive_artist_title_update(row, {"title": "Abattoir"})
+
+    assert updates == {"title": "Abattoir", "metadata_source": MetadataSource.USER.value}
+
+
+def test_derive_artist_title_update_still_incomplete_after_edit_locks_to_user():
+    # Editing one field of a still-incomplete item (title added, artist still missing)
+    # doesn't complete it, so it's a hand edit like any other — locked, not re-queued.
+    row = _row()
+
+    updates = _derive_artist_title_update(row, {"title": "Windowlicker"})
+
+    assert updates == {"title": "Windowlicker", "metadata_source": MetadataSource.USER.value}

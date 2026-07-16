@@ -11,25 +11,33 @@ def _recording(title, artist_credit, score, releases=None):
     return rec
 
 
+def _credit(name):
+    return [{"artist": {"name": name}}]
+
+
+def _returns(*recordings):
+    return lambda query, limit: {"recording-list": list(recordings)}
+
+
 @pytest.mark.anyio
 async def test_match_returns_best_scoring_recording(monkeypatch):
-    def fake_search(query, limit):
-        return {
-            "recording-list": [
-                _recording("Wrong", [{"artist": {"name": "Nope"}}], 60),
-                _recording(
-                    "Lite Spots",
-                    [{"artist": {"name": "KAYTRANADA"}}],
-                    99,
-                    releases=[{"title": "99.9%"}],
-                ),
-            ]
-        }
-
-    monkeypatch.setattr(mb_module.musicbrainzngs, "search_recordings", fake_search)
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(
+            _recording("Wrong", _credit("Nope"), 60),
+            _recording("Lite Spots", _credit("KAYTRANADA"), 99, releases=[{"title": "99.9%"}]),
+        ),
+    )
     result = await MusicBrainzMatchService().match("kaytranada lite spots")
 
-    assert result == {"artist": "KAYTRANADA", "title": "Lite Spots", "album": "99.9%", "score": 99}
+    assert result == {
+        "artist": "KAYTRANADA",
+        "title": "Lite Spots",
+        "album": "99.9%",
+        "score": 99,
+        "similarity": 100.0,
+    }
 
 
 @pytest.mark.anyio
@@ -42,32 +50,16 @@ async def test_match_joins_multi_artist_credit(monkeypatch):
     monkeypatch.setattr(
         mb_module.musicbrainzngs,
         "search_recordings",
-        lambda query, limit: {"recording-list": [_recording("Song", credit, 95)]},
+        _returns(_recording("Song", credit, 95)),
     )
-    result = await MusicBrainzMatchService().match("something")
+    result = await MusicBrainzMatchService().match("artist a feat artist b song")
 
     assert result["artist"] == "Artist A feat. Artist B"
 
 
 @pytest.mark.anyio
-async def test_match_discards_below_threshold(monkeypatch):
-    monkeypatch.setattr(
-        mb_module.musicbrainzngs,
-        "search_recordings",
-        lambda query, limit: {"recording-list": [_recording("Song", [{"artist": {"name": "A"}}], 50)]},
-    )
-    result = await MusicBrainzMatchService(min_score=90).match("something")
-
-    assert result is None
-
-
-@pytest.mark.anyio
 async def test_match_returns_none_for_no_results(monkeypatch):
-    monkeypatch.setattr(
-        mb_module.musicbrainzngs,
-        "search_recordings",
-        lambda query, limit: {"recording-list": []},
-    )
+    monkeypatch.setattr(mb_module.musicbrainzngs, "search_recordings", _returns())
     assert await MusicBrainzMatchService().match("nothing here") is None
 
 
@@ -90,33 +82,34 @@ async def test_match_swallows_search_errors(monkeypatch):
 @pytest.mark.anyio
 async def test_match_drops_result_missing_artist(monkeypatch):
     monkeypatch.setattr(
-        mb_module.musicbrainzngs,
-        "search_recordings",
-        lambda query, limit: {"recording-list": [_recording("Song", [], 100)]},
+        mb_module.musicbrainzngs, "search_recordings", _returns(_recording("Song", [], 100))
     )
     assert await MusicBrainzMatchService().match("x") is None
 
 
+# --- Retrieval: the query we build ------------------------------------------------------
+
+
 @pytest.mark.anyio
-async def test_match_fields_builds_fielded_fuzzy_query(monkeypatch):
-    # The reported bug: artist "Kahn" + title typo "Abatoir". A free-text search matches
-    # the exact typo'd title by unrelated artists; a fielded query keyed on the artist,
-    # with the title fuzzed, resolves to the right recording instead.
+async def test_match_fields_fuzzes_both_fields_by_term_length(monkeypatch):
     captured = {}
 
     def fake_search(query, limit):
         captured["query"] = query
-        return {"recording-list": [_recording("Abattoir", [{"artist": {"name": "Kahn"}}], 100)]}
+        return {"recording-list": [_recording("Abattoir", _credit("Kahn"), 100)]}
 
     monkeypatch.setattr(mb_module.musicbrainzngs, "search_recordings", fake_search)
     result = await MusicBrainzMatchService().match_fields(artist="Kahn", title="Abatoir")
 
-    assert captured["query"] == "artist:(Kahn) AND recording:(Abatoir~)"
-    assert result == {"artist": "Kahn", "title": "Abattoir", "album": None, "score": 100}
+    # The artist is fuzzed too, so a mistyped artist is still retrievable. Short terms get
+    # ~1: a bare ~ is edit-distance 2, which on a 4-letter word matches half the database.
+    assert captured["query"] == "artist:(Kahn~1) AND recording:(Abatoir~2)"
+    assert result["artist"] == "Kahn"
+    assert result["title"] == "Abattoir"
 
 
 @pytest.mark.anyio
-async def test_match_fields_fuzzes_each_title_term_and_escapes(monkeypatch):
+async def test_match_fields_fuzzes_each_term_and_escapes(monkeypatch):
     captured = {}
 
     def fake_search(query, limit):
@@ -126,25 +119,318 @@ async def test_match_fields_fuzzes_each_title_term_and_escapes(monkeypatch):
     monkeypatch.setattr(mb_module.musicbrainzngs, "search_recordings", fake_search)
     await MusicBrainzMatchService().match_fields(artist="A:B", title="two words")
 
-    # Reserved ":" is escaped in the artist; every title term is individually fuzzed.
-    assert captured["query"] == r"artist:(A\:B) AND recording:(two~ words~)"
+    # Reserved ":" is escaped; every term is individually fuzzed by its own length.
+    assert captured["query"] == r"artist:(A\:B~1) AND recording:(two~1 words~2)"
 
 
 @pytest.mark.anyio
-async def test_match_fields_title_only(monkeypatch):
-    captured = {}
+@pytest.mark.parametrize(
+    "artist, title",
+    [
+        ("Kahn", ""),  # artist only
+        ("", "solo"),  # title only
+        ("Kahn", "   "),  # whitespace is not a field
+        ("  ", ""),  # nothing at all
+    ],
+)
+async def test_match_fields_refuses_a_partial_pair_without_searching(monkeypatch, artist, title):
+    """Half an identity is not something to correct.
 
-    def fake_search(query, limit):
-        captured["query"] = query
-        return {"recording-list": []}
+    With only one field there's nothing to verify the other against, so the gate has no
+    opinion and MusicBrainz's top-ranked recording wins by default — "Kahn" alone matched
+    an arbitrary Kahn track at 100% and invented a title the user never typed. Such an item
+    stays in the inbox for the user to complete instead (see _derive_resolve_state), so no
+    search should even be issued.
+    """
 
-    monkeypatch.setattr(mb_module.musicbrainzngs, "search_recordings", fake_search)
-    await MusicBrainzMatchService().match_fields(title="solo")
+    def fail_search(query, limit):
+        raise AssertionError(f"searched MusicBrainz for a partial pair: {query!r}")
 
-    assert captured["query"] == "recording:(solo~)"
+    monkeypatch.setattr(mb_module.musicbrainzngs, "search_recordings", fail_search)
+    assert await MusicBrainzMatchService().match_fields(artist=artist, title=title) is None
+
+
+# --- Verification: what we accept (regressions for #31) ---------------------------------
+#
+# Every "rejects" case below scored 100 on MusicBrainz's ext:score in the live evidence on
+# #31 — that's the whole point. A top hit always scores ~100, so these are only separable
+# by comparing the candidate to what the user actually typed.
 
 
 @pytest.mark.anyio
-async def test_match_fields_returns_none_when_no_fields():
-    # No network call should happen when there's nothing to search on.
-    assert await MusicBrainzMatchService().match_fields(artist="  ", title="") is None
+async def test_match_fields_accepts_genuine_typo(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Abattoir", _credit("Kahn"), 100)),
+    )
+    result = await MusicBrainzMatchService().match_fields(artist="Kahn", title="Abatoir")
+
+    # The feature working as intended: one mistyped character, corrected.
+    assert (result["artist"], result["title"]) == ("Kahn", "Abattoir")
+
+
+@pytest.mark.anyio
+async def test_match_fields_accepts_mistyped_artist(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Lite Spots", _credit("KAYTRANADA"), 100)),
+    )
+    # Previously unfixable: the artist was matched exactly, so a typo in it returned
+    # nothing and the resolve loop recorded a *terminal* nomatch.
+    result = await MusicBrainzMatchService().match_fields(artist="Kaytranda", title="Lite Spots")
+
+    assert result["artist"] == "KAYTRANADA"
+
+
+@pytest.mark.anyio
+async def test_match_fields_accepts_extra_credited_artists(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(
+            _recording("Damager (Hamdi edit)", _credit("Sammy Virji & Interplanetary Criminal"), 100)
+        ),
+    )
+    # MusicBrainz credits collaborators the user didn't type. Still the right recording,
+    # so the artist gate only runs typed -> candidate, never the reverse.
+    result = await MusicBrainzMatchService().match_fields(
+        artist="Sammy Virji", title="Damager (Hamdi Edit)"
+    )
+
+    assert result["artist"] == "Sammy Virji & Interplanetary Criminal"
+
+
+@pytest.mark.anyio
+async def test_match_fields_rejects_unrelated_artist(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Yeah", _credit("Criminal Manne"), 100)),
+    )
+    result = await MusicBrainzMatchService().match_fields(
+        artist="Interplanetary Criminal", title="Yeah Yeah (VIP Mix)"
+    )
+
+    assert result is None
+
+
+@pytest.mark.anyio
+async def test_match_fields_rejects_title_that_drops_typed_words(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Yeah", _credit("Interplanetary Criminal"), 100)),
+    )
+    # The DJ case: the VIP mix isn't in MusicBrainz, and collapsing it onto the unrelated
+    # original would send the Soulseek downloader after the wrong track.
+    result = await MusicBrainzMatchService().match_fields(
+        artist="Interplanetary Criminal", title="Yeah Yeah (VIP Mix)"
+    )
+
+    assert result is None
+
+
+@pytest.mark.anyio
+async def test_match_fields_rejects_title_that_drops_a_repeated_word(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Yeah", _credit("Interplanetary Criminal"), 100)),
+    )
+    # Repetition is the whole difference here — no "(VIP Mix)" tokens to reject it on. A
+    # single "Yeah" cannot account for both of the caller's, so this is still a different
+    # recording.
+    result = await MusicBrainzMatchService().match_fields(
+        artist="Interplanetary Criminal", title="Yeah Yeah"
+    )
+
+    assert result is None
+
+
+@pytest.mark.anyio
+async def test_match_fields_accepts_title_whose_repetition_is_matched(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Yeah Yeah", _credit("Interplanetary Criminal"), 100)),
+    )
+    # The counterpart to the above: consuming tokens must not penalise a title that does
+    # carry the repetition.
+    result = await MusicBrainzMatchService().match_fields(
+        artist="Interplanetary Criminal", title="Yeah Yeah"
+    )
+
+    assert result is not None
+    assert result["similarity"] == 100.0
+
+
+@pytest.mark.anyio
+async def test_match_fields_rejects_title_that_adds_words(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Abattoir Blues", _credit("Kahn"), 100)),
+    )
+    # A different recording, not a typo fix — so the title gate runs both directions.
+    assert await MusicBrainzMatchService().match_fields(artist="Kahn", title="Abatoir") is None
+
+
+@pytest.mark.anyio
+async def test_match_fields_rejects_placeholder_metadata(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Probe", _credit("[no artist]"), 100, releases=[{"title": "Vaya Con Tioz"}])),
+    )
+    # Observed end-to-end on dev: a hand-typed item was rewritten to "[no artist] - Probe"
+    # and logged as a success.
+    result = await MusicBrainzMatchService().match_fields(
+        artist="QA Scratch Artist 1784020563445", title="QA Wishlist Probe 1784020563445"
+    )
+
+    assert result is None
+
+
+@pytest.mark.anyio
+async def test_match_rejects_unrelated_top_scoring_freetext_result(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Title", _credit("Wandering Artist"), 100)),
+    )
+    # The nonsense query from #31: 35 results, all 91+. The old min_score gate passed this.
+    assert await MusicBrainzMatchService().match("Zzqqxx Nonexistent Title 99999") is None
+
+
+@pytest.mark.anyio
+async def test_match_tolerates_noise_in_freetext_query(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Lite Spots", _credit("KAYTRANADA"), 100)),
+    )
+    # A raw video title carries tokens MusicBrainz will never hold. They're stripped from
+    # the query up front (an enumerable set of production descriptors), rather than
+    # forgiven by letting the candidate drop whatever it likes.
+    result = await MusicBrainzMatchService().match("Kaytranada - Lite Spots (Official Video) [HD]")
+
+    assert result["title"] == "Lite Spots"
+
+
+@pytest.mark.anyio
+async def test_match_rejects_freetext_candidate_that_drops_qualifier(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Damager", _credit("Sammy Virji"), 100)),
+    )
+    # The free-text twin of test_match_fields_rejects_title_that_drops_typed_words, and the
+    # path LinkParseService actually uses: pasting the edit's YouTube link must not rewrite
+    # it to the original recording. "(Hamdi Edit)" is the identity of the track, not noise.
+    assert await MusicBrainzMatchService().match("Sammy Virji - Damager (Hamdi Edit)") is None
+
+
+@pytest.mark.anyio
+async def test_match_rejects_freetext_vip_mix_collapse(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Yeah", _credit("Interplanetary Criminal"), 100)),
+    )
+    # #31's headline case arriving via a pasted link rather than typed fields — noise
+    # stripping removes "(Official Video)" but must never remove "(VIP Mix)".
+    result = await MusicBrainzMatchService().match(
+        "Interplanetary Criminal - Yeah Yeah (VIP Mix) (Official Video)"
+    )
+
+    assert result is None
+
+
+@pytest.mark.anyio
+async def test_match_accepts_freetext_typo_correction(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Abattoir", _credit("Kahn"), 100)),
+    )
+    # The gate is bidirectional but still per-token fuzzy, so the feature keeps working:
+    # a small edit is applied, only a *different recording* is refused.
+    result = await MusicBrainzMatchService().match("Kahn - Abatoir (Official Video)")
+
+    assert (result["artist"], result["title"]) == ("Kahn", "Abattoir")
+
+
+@pytest.mark.anyio
+async def test_match_rejects_candidate_whose_artist_is_non_latin(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Aphex Twin", _credit("МОРЭ&РЭЛЬСЫ"), 100)),
+    )
+    # Live MusicBrainz really returns this for "Aphex Twin Windowlicker" — a track *named*
+    # "Aphex Twin" by an unrelated Russian band. Tokenising to an a-z0-9 allowlist deleted
+    # the Cyrillic artist entirely, leaving nothing to fail the gate.
+    assert await MusicBrainzMatchService().match("Aphex Twin Windowlicker [HD]") is None
+
+
+@pytest.mark.anyio
+async def test_match_fields_matches_non_latin_artist(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Тишина", _credit("МОРЭ&РЭЛЬСЫ"), 100)),
+    )
+    # The flip side: a non-Latin artist must still be matchable on their own name.
+    result = await MusicBrainzMatchService().match_fields(artist="МОРЭ РЭЛЬСЫ", title="Тишина")
+
+    assert result["artist"] == "МОРЭ&РЭЛЬСЫ"
+
+
+@pytest.mark.anyio
+async def test_match_fields_ignores_accents_and_case(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Déjà Vu", _credit("Beyoncé"), 100)),
+    )
+    result = await MusicBrainzMatchService().match_fields(artist="beyonce", title="Deja Vu")
+
+    assert (result["artist"], result["similarity"]) == ("Beyoncé", 100.0)
+
+
+@pytest.mark.anyio
+async def test_match_fields_ext_score_cannot_promote_a_rejected_candidate(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(
+            _recording("Abattoir Blues", _credit("Kahn"), 100),
+            _recording("Abattoir", _credit("Kahn"), 80),
+        ),
+    )
+    # #31 in miniature: MusicBrainz ranks the wrong recording top. ext:score is applied
+    # only *underneath* the similarity gate, so the top hit can't win by out-scoring.
+    result = await MusicBrainzMatchService().match_fields(artist="Kahn", title="Abatoir")
+
+    assert result["title"] == "Abattoir"
+    assert result["score"] == 80
+
+
+@pytest.mark.anyio
+async def test_match_fields_breaks_similarity_ties_on_ext_score(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(
+            _recording("Abattoir", _credit("Kahn & Neek"), 100),
+            _recording("Abattoir", _credit("Kahn"), 80),
+        ),
+    )
+    # Both are equally similar to "Kahn" — the artist gate allows extra credited artists,
+    # so it can't separate them. Ranking within one result set is the one thing ext:score
+    # is good for, so it decides here.
+    result = await MusicBrainzMatchService().match_fields(artist="Kahn", title="Abatoir")
+
+    assert result["artist"] == "Kahn & Neek"
