@@ -124,23 +124,30 @@ async def test_match_fields_fuzzes_each_term_and_escapes(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_match_fields_title_only(monkeypatch):
-    captured = {}
+@pytest.mark.parametrize(
+    "artist, title",
+    [
+        ("Kahn", ""),  # artist only
+        ("", "solo"),  # title only
+        ("Kahn", "   "),  # whitespace is not a field
+        ("  ", ""),  # nothing at all
+    ],
+)
+async def test_match_fields_refuses_a_partial_pair_without_searching(monkeypatch, artist, title):
+    """Half an identity is not something to correct.
 
-    def fake_search(query, limit):
-        captured["query"] = query
-        return {"recording-list": []}
+    With only one field there's nothing to verify the other against, so the gate has no
+    opinion and MusicBrainz's top-ranked recording wins by default — "Kahn" alone matched
+    an arbitrary Kahn track at 100% and invented a title the user never typed. Such an item
+    stays in the inbox for the user to complete instead (see _derive_resolve_state), so no
+    search should even be issued.
+    """
 
-    monkeypatch.setattr(mb_module.musicbrainzngs, "search_recordings", fake_search)
-    await MusicBrainzMatchService().match_fields(title="solo")
+    def fail_search(query, limit):
+        raise AssertionError(f"searched MusicBrainz for a partial pair: {query!r}")
 
-    assert captured["query"] == "recording:(solo~1)"
-
-
-@pytest.mark.anyio
-async def test_match_fields_returns_none_when_no_fields():
-    # No network call should happen when there's nothing to search on.
-    assert await MusicBrainzMatchService().match_fields(artist="  ", title="") is None
+    monkeypatch.setattr(mb_module.musicbrainzngs, "search_recordings", fail_search)
+    assert await MusicBrainzMatchService().match_fields(artist=artist, title=title) is None
 
 
 # --- Verification: what we accept (regressions for #31) ---------------------------------

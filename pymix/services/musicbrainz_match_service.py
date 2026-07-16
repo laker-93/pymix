@@ -185,36 +185,44 @@ class MusicBrainzMatchService:
         ("Abatoir" -> "Abattoir") still retrieves the right recording, and the local gate
         in :meth:`_verify_fields` decides whether it's close enough to accept.
 
+        **Both fields are required.** An artist alone (or a title alone) is not an identity
+        to correct — it's half of one, and there is nothing to verify the other half
+        against, so the gate below would have no opinion on it: "Kahn" happily "matched"
+        Kahn's arbitrary top-ranked recording at 100% similarity and invented a title the
+        user never typed. That's the same destructive rewrite as #31, just sourced from a
+        missing field rather than a bad score. A partial item is instead left alone for the
+        user to complete (it stays ``inbox``/``needs info`` — see ``_derive_resolve_state``),
+        which is also why the resolve loop never submits one.
+
         Returns None (like :meth:`match`) on no result, a result that failed verification,
-        a failed search, or when neither field carries any text to query on.
+        a failed search, or when either field is missing.
         """
         artist = (artist or "").strip()
         title = (title or "").strip()
-        lucene = self._build_fielded_query(artist, title)
-        if not lucene:
+        if not (artist and title):
             return None
+        lucene = self._build_fielded_query(artist, title)
         return await self._run(lucene, lambda c: self._verify_fields(artist, title, c))
 
     @staticmethod
     def _build_fielded_query(artist: str, title: str) -> str:
-        """Build a fielded, fuzzed Lucene query from an artist and/or title.
+        """Build a fielded, fuzzed Lucene query from an artist and title (both required —
+        :meth:`match_fields` rejects a partial pair before reaching here).
 
         Every term is fuzzed, including the artist's: leaving the artist exact made
         autocorrect asymmetric — a mistyped title was fixed, but a mistyped artist matched
         nothing, and the resolve loop then recorded a *terminal* nomatch the user could
-        never get corrected. Returns "" when there's nothing to search on.
+        never get corrected.
         """
-        clauses = []
-        if artist:
-            terms = " ".join(_fuzz_term(term) for term in artist.split())
-            clauses.append(f"artist:({terms})")
-        if title:
-            terms = " ".join(_fuzz_term(term) for term in title.split())
-            clauses.append(f"recording:({terms})")
-        return " AND ".join(clauses)
+        artist_terms = " ".join(_fuzz_term(term) for term in artist.split())
+        title_terms = " ".join(_fuzz_term(term) for term in title.split())
+        return f"artist:({artist_terms}) AND recording:({title_terms})"
 
     def _verify_fields(self, artist: str, title: str, candidate: MusicBrainzMatch) -> Optional[float]:
         """Score a candidate against the caller's artist/title, or None to reject it.
+
+        Both fields carry text — :meth:`match_fields` rejects a partial pair rather than
+        asking this to have an opinion on half an identity.
 
         The two fields are gated differently because MusicBrainz may legitimately differ
         from the user in only one direction on each.
@@ -226,9 +234,6 @@ class MusicBrainzMatchService:
         artist_coverage = _coverage(artist, candidate["artist"])
         if artist_coverage < self._min_coverage:
             return None
-
-        if not title:
-            return artist_coverage
 
         # Title — bidirectional, because a title is wrong if it differs either way.
         # Dropping words the user typed collapses an edit onto the unrelated original
