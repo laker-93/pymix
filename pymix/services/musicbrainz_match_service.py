@@ -82,18 +82,30 @@ def _coverage(needle: str, haystack: str) -> float:
     rapidfuzz's token_set_ratio scores every wrong match in #31's evidence table 100,
     because it treats one token set being a subset of the other as a perfect hit.
 
+    Counterparts are matched as a multiset — each haystack token can only account for one
+    needle token. Letting a token be reused made repetition invisible: "Yeah Yeah" was
+    fully covered by "Yeah", so "Yeah Yeah (VIP Mix)" -> "Yeah" was rejected only for its
+    "vip"/"mix" tokens, and a bare "Yeah Yeah" -> "Yeah" passed both directions at 100%.
+
     An empty needle is vacuously covered (a caller that didn't supply a field isn't
     asserting anything about it); an empty haystack covers nothing.
     """
     needles = _tokenise(needle)
     if not needles:
         return 100.0
-    haystacks = _tokenise(haystack)
-    if not haystacks:
+    unclaimed = _tokenise(haystack)
+    if not unclaimed:
         return 0.0
-    covered = sum(
-        1 for n in needles if max(fuzz.ratio(n, h) for h in haystacks) >= _TOKEN_MATCH_RATIO
-    )
+    covered = 0
+    for n in needles:
+        best_ratio, best_index = 0.0, -1
+        for index, h in enumerate(unclaimed):
+            ratio = fuzz.ratio(n, h)
+            if ratio > best_ratio:
+                best_ratio, best_index = ratio, index
+        if best_ratio >= _TOKEN_MATCH_RATIO:
+            covered += 1
+            unclaimed.pop(best_index)
     return 100.0 * covered / len(needles)
 
 

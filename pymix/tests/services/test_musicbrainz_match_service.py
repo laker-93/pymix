@@ -226,6 +226,40 @@ async def test_match_fields_rejects_title_that_drops_typed_words(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_match_fields_rejects_title_that_drops_a_repeated_word(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Yeah", _credit("Interplanetary Criminal"), 100)),
+    )
+    # Repetition is the whole difference here — no "(VIP Mix)" tokens to reject it on. A
+    # single "Yeah" cannot account for both of the caller's, so this is still a different
+    # recording.
+    result = await MusicBrainzMatchService().match_fields(
+        artist="Interplanetary Criminal", title="Yeah Yeah"
+    )
+
+    assert result is None
+
+
+@pytest.mark.anyio
+async def test_match_fields_accepts_title_whose_repetition_is_matched(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Yeah Yeah", _credit("Interplanetary Criminal"), 100)),
+    )
+    # The counterpart to the above: consuming tokens must not penalise a title that does
+    # carry the repetition.
+    result = await MusicBrainzMatchService().match_fields(
+        artist="Interplanetary Criminal", title="Yeah Yeah"
+    )
+
+    assert result is not None
+    assert result["similarity"] == 100.0
+
+
+@pytest.mark.anyio
 async def test_match_fields_rejects_title_that_adds_words(monkeypatch):
     monkeypatch.setattr(
         mb_module.musicbrainzngs,
