@@ -270,11 +270,55 @@ async def test_match_tolerates_noise_in_freetext_query(monkeypatch):
         "search_recordings",
         _returns(_recording("Lite Spots", _credit("KAYTRANADA"), 100)),
     )
-    # A raw video title carries tokens MusicBrainz will never hold, so free text is gated
-    # candidate -> query: the match may not invent anything, but noise is forgiven.
+    # A raw video title carries tokens MusicBrainz will never hold. They're stripped from
+    # the query up front (an enumerable set of production descriptors), rather than
+    # forgiven by letting the candidate drop whatever it likes.
     result = await MusicBrainzMatchService().match("Kaytranada - Lite Spots (Official Video) [HD]")
 
     assert result["title"] == "Lite Spots"
+
+
+@pytest.mark.anyio
+async def test_match_rejects_freetext_candidate_that_drops_qualifier(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Damager", _credit("Sammy Virji"), 100)),
+    )
+    # The free-text twin of test_match_fields_rejects_title_that_drops_typed_words, and the
+    # path LinkParseService actually uses: pasting the edit's YouTube link must not rewrite
+    # it to the original recording. "(Hamdi Edit)" is the identity of the track, not noise.
+    assert await MusicBrainzMatchService().match("Sammy Virji - Damager (Hamdi Edit)") is None
+
+
+@pytest.mark.anyio
+async def test_match_rejects_freetext_vip_mix_collapse(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Yeah", _credit("Interplanetary Criminal"), 100)),
+    )
+    # #31's headline case arriving via a pasted link rather than typed fields — noise
+    # stripping removes "(Official Video)" but must never remove "(VIP Mix)".
+    result = await MusicBrainzMatchService().match(
+        "Interplanetary Criminal - Yeah Yeah (VIP Mix) (Official Video)"
+    )
+
+    assert result is None
+
+
+@pytest.mark.anyio
+async def test_match_accepts_freetext_typo_correction(monkeypatch):
+    monkeypatch.setattr(
+        mb_module.musicbrainzngs,
+        "search_recordings",
+        _returns(_recording("Abattoir", _credit("Kahn"), 100)),
+    )
+    # The gate is bidirectional but still per-token fuzzy, so the feature keeps working:
+    # a small edit is applied, only a *different recording* is refused.
+    result = await MusicBrainzMatchService().match("Kahn - Abatoir (Official Video)")
+
+    assert (result["artist"], result["title"]) == ("Kahn", "Abattoir")
 
 
 @pytest.mark.anyio

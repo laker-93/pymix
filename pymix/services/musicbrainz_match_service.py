@@ -7,6 +7,8 @@ from typing import Callable, Optional, TypedDict
 import musicbrainzngs
 from rapidfuzz import fuzz
 
+from pymix.utils.text_noise import strip_noise
+
 logger = logging.getLogger(__name__)
 
 # MusicBrainz asks every client to identify itself and to stay under 1 request/sec.
@@ -147,11 +149,16 @@ class MusicBrainzMatchService:
         can't enforce the artist, so a same-titled track by an unrelated artist outscores
         the one you meant.
 
+        Production descriptors ("(Official Video)", "[HD]") are stripped here, not by the
+        caller: the free-text gate insists every word the caller supplied is accounted
+        for, so it's only fair once text nobody meant as metadata is gone. Doing it here
+        means the HTTP caller gets the same treatment as LinkParseService.
+
         None means either no result, no result that passed verification, or a
         failed/raised search — in every case the caller should fall back to whatever it
         had before. A network/API failure here must never break link parsing.
         """
-        query = (query or "").strip()
+        query = strip_noise((query or "").strip()).strip()
         if not query:
             return None
         return await self._run(query, lambda c: self._verify_freetext(query, c))
@@ -226,16 +233,24 @@ class MusicBrainzMatchService:
     def _verify_freetext(self, query: str, candidate: MusicBrainzMatch) -> Optional[float]:
         """Score a candidate against a messy free-text query, or None to reject it.
 
-        Gated in the opposite direction to :meth:`_verify_fields`' title. The query here is
-        raw text — a video title carrying "official video", "HD", a channel name — so
-        requiring the query to be covered would reject good matches over noise the user
-        never meant as metadata. Requiring the reverse still blocks the failure that
-        matters: a match cannot introduce an artist or title the user never mentioned.
+        Bidirectional, for the same reason :meth:`_verify_fields` gates a title both ways:
+        a match that *drops* words is as wrong as one that invents them, and dropping is
+        the failure #31 is actually about. Gating only candidate->query accepted
+        "Sammy Virji - Damager (Hamdi Edit)" -> "Sammy Virji - Damager" at 100%, silently
+        turning an edit into the original recording and sending the downloader after the
+        wrong track. There's no artist/title split to lean on here, so both sides are
+        compared as one bag of words.
+
+        Noise ("Official Video", "[HD]") is stripped from the query in :meth:`match`
+        rather than paid for by tolerating dropped words: those descriptors are a known,
+        enumerable set, whereas "(VIP Mix)" is the whole identity of the track.
         """
-        coverage = _coverage(f"{candidate['artist']} {candidate['title']}", query)
-        if coverage < self._min_coverage:
+        candidate_text = f"{candidate['artist']} {candidate['title']}"
+        forward = _coverage(query, candidate_text)
+        reverse = _coverage(candidate_text, query)
+        if min(forward, reverse) < self._min_coverage:
             return None
-        return coverage
+        return min(forward, reverse)
 
     async def _run(
         self,
