@@ -13,7 +13,7 @@ from pymix.model.db_tables import (
     PlaylistPathRow, WishlistRow,
 )
 from pymix.model.original_track_meta import OriginalTracks
-from pymix.model.wishlist import MetadataSource, ResolveState
+from pymix.model.wishlist import MetadataSource, ResolveState, WishlistStatus
 from pymix.utils.get_available_port import get_available_port
 
 
@@ -22,17 +22,46 @@ def _derive_resolve_state(youtube_url, bandcamp_url, soundcloud_url, artist=None
 
     ``resolved`` when it carries a source URL (its metadata was parsed from that link, or
     the URL itself is the exact-song identity the downloader resolves). ``pending`` when
-    it's hand-typed artist/title free text that the async resolve loop should refine
-    against MusicBrainz. ``nomatch`` (terminal) when there's nothing to refine — a bare
-    inbox raw note with no artist/title: we don't guess a canonical track from an ambiguous
-    note, so the item waits in the inbox for the user to supply artist/title rather than
-    entering the resolve loop. Single source of truth for the client, bulk and Google-Sheet
-    ingest paths, which all funnel through here."""
+    it's hand-typed artist *and* title free text that the async resolve loop should refine
+    against MusicBrainz. ``nomatch`` (terminal) when there's nothing to refine — an inbox
+    item with a raw note, only an artist, or only a title: we don't guess a canonical track
+    from incomplete or ambiguous info, so the item waits in the inbox for the user to supply
+    both artist and title rather than entering the resolve loop. Single source of truth for
+    the client, bulk and Google-Sheet ingest paths, which all funnel through here. Mirrors
+    ``CreateWishlistRequest.initial_status``, which sends the same items to ``inbox``."""
     if youtube_url or bandcamp_url or soundcloud_url:
         return ResolveState.RESOLVED.value
-    if (artist or "").strip() or (title or "").strip():
+    if (artist or "").strip() and (title or "").strip():
         return ResolveState.PENDING.value
     return ResolveState.NOMATCH.value
+
+
+def _derive_artist_title_update(row: WishlistRow, updates: dict) -> dict:
+    """Provenance/resolve-state side effects of a PATCH that touches artist and/or title.
+
+    An item that didn't yet have both fields (an inbox item with a raw note, or only one
+    of artist/title) has never been through the resolve loop. Supplying the missing piece
+    is the same event as typing both fields at creation, so it's treated identically:
+    ``metadata_source`` stays ``auto`` and ``resolve_state`` goes to ``pending``, so it
+    enters the resolve loop and gets the same MusicBrainz refinement pass a freshly-typed
+    complete item would — and ``status`` moves to ``wishlist`` (mirrors
+    ``CreateWishlistRequest.initial_status``), independent of whether the caller already
+    set it.
+
+    Editing an item that already had both fields is a correction to already-resolved (or
+    already-pending) text, and locks it against future automatic re-matching, as before —
+    the resolve loop must never overwrite what the user just typed."""
+    new_artist = (updates.get("artist", row.artist) or "").strip()
+    new_title = (updates.get("title", row.title) or "").strip()
+    was_incomplete = not ((row.artist or "").strip() and (row.title or "").strip())
+
+    if was_incomplete and new_artist and new_title:
+        updates.setdefault("status", WishlistStatus.WISHLIST.value)
+        updates["metadata_source"] = MetadataSource.AUTO.value
+        updates["resolve_state"] = ResolveState.PENDING.value
+    else:
+        updates["metadata_source"] = MetadataSource.USER.value
+    return updates
 
 
 logger = logging.getLogger(__name__)
@@ -748,6 +777,9 @@ class DbController:
             ).first()
             if not row:
                 return None
+
+            if "artist" in updates or "title" in updates:
+                updates = _derive_artist_title_update(row, updates)
 
             for key, value in updates.items():
                 setattr(row, key, value)

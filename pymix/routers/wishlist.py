@@ -14,7 +14,7 @@ from pymix.model.api.wishlist_requests import (
     SetWishlistSheetRequest,
     UpdateWishlistRequest,
 )
-from pymix.model.wishlist import MetadataSource, RESOLVE_STATES, WISHLIST_STATUSES
+from pymix.model.wishlist import RESOLVE_STATES, WISHLIST_STATUSES
 from pymix.services.link_parse_service import LinkParseService
 from pymix.services.musicbrainz_match_service import MusicBrainzMatchService
 from pymix.services.sheet_sync_service import SheetSyncService
@@ -235,10 +235,9 @@ async def update_wishlist_item(
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    # A user editing artist/title locks the item against future automatic re-matching.
-    if "artist" in updates or "title" in updates:
-        updates["metadata_source"] = MetadataSource.USER.value
-
+    # Provenance/resolve-state side effects of an artist/title edit (lock vs. re-enter the
+    # resolve loop) depend on the item's current state, so db_controller decides — see
+    # _derive_artist_title_update.
     item = db_controller.update_wishlist_item(username=username, wishlist_id=wishlist_id, updates=updates)
     if item is None:
         raise HTTPException(status_code=404, detail=f"No wishlist item found with id {wishlist_id}")
