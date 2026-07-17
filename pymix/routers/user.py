@@ -186,26 +186,6 @@ async def storage_check(
         'success': success
     }
 
-@router.get("/user/delete", tags=["db"])
-@inject
-async def delete_user(
-        username: str,
-        db_controller: DbController = Depends(Provide[Container.db_controller]),
-)-> dict:
-    logger.info(f'deleting user {username}')
-    reason = ""
-    success = True
-    try:
-        db_controller.delete_user(username)
-    except Exception as ex:
-        logger.error(f'error occurred deleting user', exc_info=True)
-        reason = repr(ex)
-        success = False
-    return {
-        'success': success,
-        'reason': reason
-    }
-
 @router.get("/user/get_by_username", tags=["db"])
 @inject
 async def get_user(

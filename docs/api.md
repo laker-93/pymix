@@ -23,7 +23,6 @@ All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 | GET `/user/is_valid_token` | Check a signup token is valid (unused tokens gate registration). |
 | GET `/user/library_size` | Sum of bytes under `/private-music/{user}`. |
 | GET `/user/storage_check` | Whether an upload of `uploadSizeBytes` fits in quota; accepts Bearer or cookie. |
-| GET `/user/delete` | Delete user row. |
 | GET `/user/get_by_username`, GET `/user/get_by_session_id` | Lookup helpers. |
 
 ## Maintenance — `routers/maintenance.py`
