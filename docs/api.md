@@ -2,8 +2,16 @@
 
 App `root_path="/pymix"` (so behind the proxy everything is prefixed `/pymix`).
 CORS allows the feishin/sub-box web origins with credentials; methods limited to
-GET/POST/DELETE/OPTIONS. Auth is by `session_id` cookie (set on create/login) or an
-explicit `username` (query/body); some endpoints also accept a Bearer token.
+GET/POST/DELETE/OPTIONS. Auth is by the `session_id` cookie (set on create/login) and
+nothing else; `/user/storage_check` also accepts that session id as a Bearer token.
+
+User-scoped endpoints resolve their caller with the `require_user` / `require_username`
+dependency in `routers/auth.py`, which returns **401** when the cookie is missing,
+unknown or expired. Endpoints used to accept an explicit `username` (query/body) as an
+alternative identity; it was never verified, so any caller could act as any user by
+naming them. It has been removed — `username` now appears only where it is an argument
+rather than a claim of identity (`/user/create`, `/user/login`, and the `[db]` lookup
+helpers).
 
 All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 
@@ -64,8 +72,10 @@ All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 ## Conventions for adding an endpoint
 1. Put the route in the topical router (or create a new module and register it — see
    architecture.md "When you add a router").
-2. Accept `session_id: str | None = Cookie(None)` and/or `username`. Resolve the user
-   with the standard guard block (copy from a sibling endpoint).
+2. Identify the caller with `user: dict = Depends(require_user)` (or
+   `username: str = Depends(require_username)`) from `routers/auth.py`. Never take a
+   `username` param as the caller's identity — it is unauthenticated. Don't hand-roll a
+   guard block; the dependency 401s on its own, so the handler body can assume a user.
 3. `@inject` your collaborators with `Depends(Provide[Container.x])`.
 4. Delegate to a controller/orchestrator — keep the router thin.
 5. Match the response style of the router you're in (plain dict vs Pydantic model).

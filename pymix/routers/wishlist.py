@@ -2,7 +2,7 @@ import logging
 from typing import Optional
 
 from dependency_injector.wiring import Provide, inject
-from fastapi import APIRouter, Depends, Cookie, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
 from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
@@ -14,6 +14,7 @@ from pymix.model.api.wishlist_requests import (
     SetWishlistSheetRequest,
     UpdateWishlistRequest,
 )
+from pymix.routers.auth import require_username
 from pymix.model.wishlist import RESOLVE_STATES, WISHLIST_STATUSES
 from pymix.services.link_parse_service import LinkParseService
 from pymix.services.musicbrainz_match_service import MusicBrainzMatchService
@@ -26,27 +27,14 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def _resolve_username(db_controller: DbController, session_id: Optional[str], username: Optional[str]) -> str:
-    if username:
-        return username
-    if session_id:
-        user = db_controller.get_user_by_session_id(session_id)
-        if user:
-            return user["username"]
-    raise HTTPException(status_code=401, detail="Must provide a username or session_id to identify user.")
-
-
 @router.get("/wishlist", tags=["wishlist"])
 @inject
 async def get_wishlist(
     status: Optional[str] = Query(None, description="Filter by wishlist status"),
     resolve_state: Optional[str] = Query(None, description="Filter by resolve_state"),
-    session_id: Optional[str] = Cookie(None),
-    username: Optional[str] = Query(None, description="Username for authentication"),
+    username: str = Depends(require_username),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
 ) -> dict:
-    username = _resolve_username(db_controller, session_id, username)
-
     if status is not None and status not in WISHLIST_STATUSES:
         raise HTTPException(status_code=400, detail=f"Invalid status '{status}'")
     if resolve_state is not None and resolve_state not in RESOLVE_STATES:
@@ -60,12 +48,9 @@ async def get_wishlist(
 @inject
 async def create_wishlist_item(
     body: CreateWishlistRequest,
-    session_id: Optional[str] = Cookie(None),
-    username: Optional[str] = Query(None, description="Username for authentication"),
+    username: str = Depends(require_username),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
 ) -> dict:
-    username = _resolve_username(db_controller, session_id, username)
-
     item = db_controller.create_wishlist_item(
         username=username,
         artist=body.artist,
@@ -84,12 +69,9 @@ async def create_wishlist_item(
 @inject
 async def create_wishlist_items_bulk(
     body: CreateWishlistBulkRequest,
-    session_id: Optional[str] = Cookie(None),
-    username: Optional[str] = Query(None, description="Username for authentication"),
+    username: str = Depends(require_username),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
 ) -> dict:
-    username = _resolve_username(db_controller, session_id, username)
-
     items = db_controller.create_wishlist_items_bulk(
         username=username,
         items=[{**item.model_dump(), "status": item.initial_status} for item in body.items],
@@ -101,13 +83,9 @@ async def create_wishlist_items_bulk(
 @inject
 async def parse_wishlist_link(
     body: ParseLinkRequest,
-    session_id: Optional[str] = Cookie(None),
-    username: Optional[str] = Query(None, description="Username for authentication"),
-    db_controller: DbController = Depends(Provide[Container.db_controller]),
+    username: str = Depends(require_username),
     link_parse_service: LinkParseService = Depends(Provide[Container.link_parse_service]),
 ) -> dict:
-    _resolve_username(db_controller, session_id, username)
-
     try:
         metadata = await link_parse_service.extract(body.url)
     except ValueError as e:
@@ -123,9 +101,7 @@ async def parse_wishlist_link(
 @inject
 async def match_wishlist_metadata(
     body: MatchMetadataRequest,
-    session_id: Optional[str] = Cookie(None),
-    username: Optional[str] = Query(None, description="Username for authentication"),
-    db_controller: DbController = Depends(Provide[Container.db_controller]),
+    username: str = Depends(require_username),
     musicbrainz_match_service: MusicBrainzMatchService = Depends(
         Provide[Container.musicbrainz_match_service]
     ),
@@ -136,8 +112,6 @@ async def match_wishlist_metadata(
     same extraction quality on hand-entered text. A miss returns ``{"match": null}``
     rather than an error — the caller keeps whatever it had.
     """
-    _resolve_username(db_controller, session_id, username)
-
     # A raw query is free text (an inbox note); an artist/title pair is fielded so the
     # artist actually constrains the search — see MusicBrainzMatchService.match_fields.
     if body.query and body.query.strip():
@@ -153,13 +127,10 @@ async def match_wishlist_metadata(
 @inject
 async def set_wishlist_sheet(
     body: SetWishlistSheetRequest,
-    session_id: Optional[str] = Cookie(None),
-    username: Optional[str] = Query(None, description="Username for authentication"),
+    username: str = Depends(require_username),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
     sheet_sync_service: SheetSyncService = Depends(Provide[Container.sheet_sync_service]),
 ) -> dict:
-    username = _resolve_username(db_controller, session_id, username)
-
     user = db_controller.update_user_wishlist_sheet_id(username=username, sheet_id=body.sheet_id)
     await sheet_sync_service.sync_user(user)
     return {"success": True}
@@ -168,12 +139,9 @@ async def set_wishlist_sheet(
 @router.get("/wishlist/sheet/status", tags=["wishlist"])
 @inject
 async def get_wishlist_sheet_status(
-    session_id: Optional[str] = Cookie(None),
-    username: Optional[str] = Query(None, description="Username for authentication"),
+    username: str = Depends(require_username),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
 ) -> dict:
-    username = _resolve_username(db_controller, session_id, username)
-
     user = db_controller.get_user(username)
     sheet_id = user["wishlist_sheet_id"]
     return {
@@ -187,15 +155,12 @@ async def get_wishlist_sheet_status(
 @router.post("/wishlist/reconcile", tags=["wishlist"])
 @inject
 async def reconcile_wishlist(
-    session_id: Optional[str] = Cookie(None),
-    username: Optional[str] = Query(None, description="Username for authentication"),
+    username: str = Depends(require_username),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
     wishlist_reconcile_service: WishlistReconcileService = Depends(
         Provide[Container.wishlist_reconcile_service]
     ),
 ) -> dict:
-    username = _resolve_username(db_controller, session_id, username)
-
     user = db_controller.get_user(username)
     result = await wishlist_reconcile_service.reconcile_user(user)
     return {"resolved": result.resolved}
@@ -205,12 +170,9 @@ async def reconcile_wishlist(
 @inject
 async def get_wishlist_item(
     wishlist_id: str = Path(..., description="Wishlist item ID"),
-    session_id: Optional[str] = Cookie(None),
-    username: Optional[str] = Query(None, description="Username for authentication"),
+    username: str = Depends(require_username),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
 ) -> dict:
-    username = _resolve_username(db_controller, session_id, username)
-
     item = db_controller.get_wishlist_item(username=username, wishlist_id=wishlist_id)
     if item is None:
         raise HTTPException(status_code=404, detail=f"No wishlist item found with id {wishlist_id}")
@@ -222,12 +184,9 @@ async def get_wishlist_item(
 async def update_wishlist_item(
     body: UpdateWishlistRequest,
     wishlist_id: str = Path(..., description="Wishlist item ID"),
-    session_id: Optional[str] = Cookie(None),
-    username: Optional[str] = Query(None, description="Username for authentication"),
+    username: str = Depends(require_username),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
 ) -> dict:
-    username = _resolve_username(db_controller, session_id, username)
-
     if body.status is not None and body.status not in WISHLIST_STATUSES:
         raise HTTPException(status_code=400, detail=f"Invalid status '{body.status}'")
 
@@ -248,12 +207,9 @@ async def update_wishlist_item(
 @inject
 async def delete_wishlist_item(
     wishlist_id: str = Path(..., description="Wishlist item ID"),
-    session_id: Optional[str] = Cookie(None),
-    username: Optional[str] = Query(None, description="Username for authentication"),
+    username: str = Depends(require_username),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
 ) -> dict:
-    username = _resolve_username(db_controller, session_id, username)
-
     deleted = db_controller.delete_wishlist_item(username=username, wishlist_id=wishlist_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"No wishlist item found with id {wishlist_id}")
@@ -264,13 +220,10 @@ async def delete_wishlist_item(
 @inject
 async def match_wishlist_item_youtube(
     wishlist_id: str = Path(..., description="Wishlist item ID"),
-    session_id: Optional[str] = Cookie(None),
-    username: Optional[str] = Query(None, description="Username for authentication"),
+    username: str = Depends(require_username),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
     youtube_match_service: YoutubeMatchService = Depends(Provide[Container.youtube_match_service]),
 ) -> dict:
-    username = _resolve_username(db_controller, session_id, username)
-
     item = db_controller.get_wishlist_item(username=username, wishlist_id=wishlist_id)
     if item is None:
         raise HTTPException(status_code=404, detail=f"No wishlist item found with id {wishlist_id}")

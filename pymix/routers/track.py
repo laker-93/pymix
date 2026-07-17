@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Body, Path, Query, Cookie, HTTPException
+from fastapi import APIRouter, Depends, Body, Path, Cookie, HTTPException
 from jsonschema import validate, ValidationError
 from dependency_injector.wiring import inject, Provide
 from typing import Dict, Any, List
@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
+from pymix.routers.auth import require_username
 
 
 class TrackPresenceRequest(BaseModel):
@@ -70,8 +71,7 @@ cue_schema = {
 @inject
 async def get_tracks_presence(
     body: TrackPresenceRequest,
-    session_id: str | None = Cookie(None),
-    username: str | None = Query(None, description="Username for authentication"),
+    username: str = Depends(require_username),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
 ) -> TrackPresenceResponse:
     """
@@ -85,16 +85,6 @@ async def get_tracks_presence(
             detail=f"Too many subbox_ids in a single request (max {_PRESENCE_MAX_IDS}). Split into smaller batches.",
         )
 
-    if not username and session_id:
-        user = db_controller.get_user_by_session_id(session_id)
-        username = user["username"]
-
-    if not username:
-        raise HTTPException(
-            status_code=400,
-            detail="Must provide a username or session_id to identify user",
-        )
-
     presence = db_controller.get_subbox_ids_presence(username, body.subbox_ids)
     return TrackPresenceResponse(presence=presence)
 
@@ -106,8 +96,7 @@ async def update_metadata(
     subbox_id: str | None = Cookie(None),
     source_app: str = Body(..., description="Source application (serato or rekordbox)"),
     change_type: str = Body(..., description="Type of change ('upload', 'edit', 'sync', 'merge')"),
-    session_id: str | None = None,
-    username: str | None = None,
+    username: str = Depends(require_username),
     db_controller: DbController = Depends(Provide[Container.db_controller])
 ) -> dict:
     """
@@ -117,23 +106,6 @@ async def update_metadata(
 
     success = True
     reason = ""
-
-    if not username and not session_id:
-        success = False
-        reason = "Must provide a username or session_id to identify user."
-        logger.error(reason)
-        return {"success": success, "reason": reason}
-
-    try:
-        if not username and session_id:
-            user = db_controller.get_user_by_session_id(session_id)
-            username = user["username"]
-            logger.info(f"Resolved session_id '{session_id}' to username '{username}'")
-    except Exception as ex:
-        success = False
-        reason = f"Error resolving user: {repr(ex)}"
-        logger.error(reason, exc_info=True)
-        return {"success": success, "reason": reason}
 
     try:
         validate(instance=cuedata, schema=cue_schema)
@@ -175,40 +147,20 @@ async def update_metadata(
 @inject
 async def get_metadata(
     track_id: str = Path(..., description="Subbox track ID"),
-    session_id: str | None = Cookie(None),
-    username: str | None = Query(None, description="Username for authentication"),
+    username: str = Depends(require_username),
     db_controller: DbController = Depends(Provide[Container.db_controller])
 ) -> Dict[str, Any]:
     """
     Retrieve metadata for a given track in the user's library.
-    Resolves user from either `username` or `session_id`, and
-    returns cue/loop metadata as JSON.
+    Resolves the user from the `session_id` cookie and returns cue/loop
+    metadata as JSON.
     """
 
     success = True
     reason = ""
     cuedata = None
 
-    # --- 1️⃣ Identify user ---
-    if not username and not session_id:
-        logger.error("Missing username or session_id for metadata retrieval.")
-        return {
-            "success": False,
-            "reason": "Must provide username or session_id to identify user"
-        }
-
-    try:
-        if not username and session_id:
-            user = db_controller.get_user_by_session_id(session_id)
-            username = user["username"]
-            logger.info(f"Resolved session_id '{session_id}' to username '{username}'")
-    except Exception as ex:
-        success = False
-        reason = f"Error resolving user: {repr(ex)}"
-        logger.error(reason, exc_info=True)
-        return {"success": success, "reason": reason}
-
-    # --- 2️⃣ Retrieve metadata ---
+    # --- 1️⃣ Retrieve metadata ---
     try:
         logger.info(f"Fetching metadata for user={username}, track_id={track_id}")
         library_entry = db_controller.get_library_entry(username=username, subbox_id=track_id)
@@ -236,29 +188,16 @@ async def get_metadata(
 
 class DeleteTrackRequest(BaseModel):
     ids: List[str]
-    username: str | None = None
 @router.delete("/track", tags=["metadata"])
 @inject
 async def delete_track(
         req: DeleteTrackRequest = Body(...),
-        session_id: str | None = Cookie(None),
+        username: str = Depends(require_username),
         db_controller: DbController = Depends(Provide[Container.db_controller]),
         rekordbox_xml_controller: RekordboxXMLController = Depends(Provide[Container.rekordbox_xml_controller]),
 ) -> Dict[str, Any]:
     all_success = True
     results = []
-    username = req.username
-    try:
-        if not username and session_id:
-            user = db_controller.get_user_by_session_id(session_id)
-            username = user["username"]
-            logger.info(f"Resolved session_id '{session_id}' to username '{username}'")
-        assert username is not None
-    except Exception as ex:
-        all_success = False
-        reason = f"Error resolving user: {repr(ex)}"
-        logger.error(reason, exc_info=True)
-        return {"success": all_success, "reason": reason, "results": results}
     for subbox_id in req.ids:
         reason = ""
         success = True
