@@ -11,6 +11,7 @@ from starlette.responses import JSONResponse
 from pymix.containers import Container
 from pymix.orchestrators.services_orchestrator import ServicesOrchestrator
 from pymix.controllers.db_controller import DbController
+from pymix.routers.auth import require_username
 
 router = APIRouter()
 
@@ -110,29 +111,13 @@ async def library_size(
 @router.get("/user/library_size", tags=["user"])
 @inject
 async def library_size(
-        username: str | None = None,
-        session_id: str | None = Cookie(None),
-        db_controller: DbController = Depends(Provide[Container.db_controller]),
+        username: str = Depends(require_username),
 ) -> dict:
-    success = False
-    total_size = 0
-    reason = ""
-    if not session_id:
-        reason = "must have a session id to identify user"
-    if session_id:
-        try:
-            user = db_controller.get_user_by_session_id(session_id)
-        except Exception as ex:
-            logger.error(f'error occurred getting user for session id {session_id}', exc_info=True)
-            reason = repr(ex)
-        else:
-            username = user['username']
-            total_size = sum(file.stat().st_size for file in Path(f'/private-music/{username}').rglob('*'))
-            success = True
+    total_size = sum(file.stat().st_size for file in Path(f'/private-music/{username}').rglob('*'))
     return {
-        'success': success,
+        'success': True,
         'total_size_bytes': total_size,
-        'reason': reason
+        'reason': ""
     }
 
 
@@ -199,26 +184,6 @@ async def storage_check(
         'remainingBytes': remaining_bytes,
         'reason': reason,
         'success': success
-    }
-
-@router.get("/user/delete", tags=["db"])
-@inject
-async def delete_user(
-        username: str,
-        db_controller: DbController = Depends(Provide[Container.db_controller]),
-)-> dict:
-    logger.info(f'deleting user {username}')
-    reason = ""
-    success = True
-    try:
-        db_controller.delete_user(username)
-    except Exception as ex:
-        logger.error(f'error occurred deleting user', exc_info=True)
-        reason = repr(ex)
-        success = False
-    return {
-        'success': success,
-        'reason': reason
     }
 
 @router.get("/user/get_by_username", tags=["db"])
