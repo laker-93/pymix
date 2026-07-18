@@ -118,6 +118,56 @@ class RekordboxXMLController:
         result = docker.execute(container_name, beets_command.split())
         logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
 
+    @staticmethod
+    def _subbox_id_or_query(subbox_ids: List[str]) -> List[str]:
+        """
+        Build a beets query that matches any of the given subbox_ids. beets treats
+        a bare comma between terms as OR, so [A, B, C] becomes the argv
+        ``subbox_id::A , subbox_id::B , subbox_id::C`` (each token is its own argv
+        element — the comma must not be glued to a term).
+        """
+        query: List[str] = []
+        for i, subbox_id in enumerate(subbox_ids):
+            if i:
+                query.append(",")
+            query.append(f"subbox_id::{subbox_id}")
+        return query
+
+    async def get_present_subbox_ids(
+        self, username: str, subbox_ids: List[str], public: bool
+    ) -> set:
+        """
+        Return the subset of ``subbox_ids`` that beets currently has an item for.
+        A single ``beet list`` OR-query over all ids — one docker exec regardless of
+        how many ids are requested. Used to (a) skip beets for ids already absent
+        (idempotent delete) and (b) verify which ids a removal actually removed.
+        """
+        if not subbox_ids:
+            return set()
+        container_name = "beets" if public else f"beets{username}"
+        beets_command = ["beet", "list", "-f", "$subbox_id", *self._subbox_id_or_query(subbox_ids)]
+        logger.info(f'running beet command {beets_command} on container {container_name}')
+        result = docker.execute(container_name, beets_command)
+        found = {line.strip() for line in result.splitlines() if line.strip()}
+        # Intersect with the requested set so a partial-tag match can never widen it.
+        return found & set(subbox_ids)
+
+    async def remove_tracks(self, username: str, subbox_ids: List[str], public: bool):
+        """
+        Remove every given subbox_id (and its file on disk) in a single
+        ``beet rm -df`` OR-query — one docker exec instead of one per id. Raises
+        the underlying DockerException if beets exits non-zero; callers should
+        verify the actual end state with :meth:`get_present_subbox_ids` rather than
+        trusting success/failure of the whole batch.
+        """
+        if not subbox_ids:
+            return
+        container_name = "beets" if public else f"beets{username}"
+        beets_command = ["beet", "rm", "-df", *self._subbox_id_or_query(subbox_ids)]
+        logger.info(f'running beet command {beets_command} on container {container_name}')
+        result = docker.execute(container_name, beets_command)
+        logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
+
 
     def _get_duplicates(self, username: str, public: bool) -> Optional[List[str]]:
         """
