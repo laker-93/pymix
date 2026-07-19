@@ -196,30 +196,84 @@ async def delete_track(
         db_controller: DbController = Depends(Provide[Container.db_controller]),
         rekordbox_xml_controller: RekordboxXMLController = Depends(Provide[Container.rekordbox_xml_controller]),
 ) -> Dict[str, Any]:
+    # Batched, reorder-safe delete. The dangerous state (laker-93/pymix#30) was
+    # committing the DB rows *before* the file/beets removal, so a failed beets
+    # removal orphaned the track — file + Navidrome entry left behind with no pymix
+    # mapping to reconcile from. Here we remove from beets first, verify the actual
+    # end state, and only then delete the DB rows for ids that are confirmed gone.
+    # Every beets step is a single OR-query, so the whole request is ~2-3 docker
+    # execs regardless of how many ids were selected (was one `beet rm` per id).
+    ids = list(dict.fromkeys(req.ids))  # de-dup, preserve order
+    if not ids:
+        return {"username": username, "success": True, "results": []}
+
+    removal_reason = ""
+
+    # 1️⃣ Which ids does beets actually have? Ids already absent are treated as
+    #    "already in the desired end state" — an idempotent success, not a failure
+    #    (this is the stale/desync case that used to false-report a failure).
+    try:
+        present = await rekordbox_xml_controller.get_present_subbox_ids(
+            username=username, subbox_ids=ids, public=False
+        )
+    except Exception as ex:
+        # Can't even determine beets state — refuse to touch the DB so nothing is
+        # orphaned. Fail the whole batch; the client shows an error and can retry.
+        reason = f"Error querying beets state for user {username}: {repr(ex)}"
+        logger.error(reason, exc_info=True)
+        return {
+            "username": username,
+            "success": False,
+            "results": [{"subbox_id": i, "reason": reason, "success": False} for i in ids],
+        }
+
+    # 2️⃣ Remove the present ids from beets + disk in one batched command.
+    if present:
+        try:
+            await rekordbox_xml_controller.remove_tracks(
+                username=username, subbox_ids=sorted(present), public=False
+            )
+        except Exception as ex:
+            # Don't trust the batch's success/failure — a batched rm can partially
+            # succeed. Record the reason and fall through to verify the real state.
+            removal_reason = f"Error removing tracks for user {username}: {repr(ex)}"
+            logger.error(removal_reason, exc_info=True)
+
+    # 3️⃣ Verify: re-query beets. Anything still present was NOT removed.
+    try:
+        still_present = await rekordbox_xml_controller.get_present_subbox_ids(
+            username=username, subbox_ids=sorted(present), public=False
+        )
+    except Exception as ex:
+        # Verification failed — be conservative and leave every present id's DB rows
+        # intact (treat them all as not-removed) so nothing is orphaned.
+        logger.error(
+            f"Error verifying beets removal for user {username}: {repr(ex)}", exc_info=True
+        )
+        still_present = set(present)
+
+    # 4️⃣ An id is "gone" if beets no longer has it (absent-at-start OR just removed).
+    #    Delete DB rows only for those; leave rows for still-present ids so a retry
+    #    can finish the job (no orphan).
     all_success = True
     results = []
-    for subbox_id in req.ids:
-        reason = ""
-        success = True
-        try:
-            deleted = db_controller.delete_track(username=username, subbox_id=subbox_id)
-            if not deleted:
-                success = False
-                all_success = False
-                reason = f"Delete failed for subbox_id={subbox_id} user {username}"
-                logger.warning(reason)
-            else:
-                await rekordbox_xml_controller.remove_track(
-                    username=username,
-                    subbox_id=subbox_id,
-                    public=False
-                )
-        except Exception as ex:
-            success = False
+    for subbox_id in ids:
+        if subbox_id in still_present:
             all_success = False
-            reason = f"Error removing for {subbox_id} for user {username}: {repr(ex)}"
+            reason = removal_reason or (
+                f"Track {subbox_id} still present in beets after removal for user {username}"
+            )
+            logger.warning(reason)
+            results.append({"subbox_id": subbox_id, "reason": reason, "success": False})
+            continue
+        try:
+            db_controller.delete_track(username=username, subbox_id=subbox_id)
+            results.append({"subbox_id": subbox_id, "reason": "", "success": True})
+        except Exception as ex:
+            all_success = False
+            reason = f"Error deleting DB rows for {subbox_id} for user {username}: {repr(ex)}"
             logger.error(reason, exc_info=True)
-        results.append({"subbox_id": subbox_id, "reason": reason, "success": success})
+            results.append({"subbox_id": subbox_id, "reason": reason, "success": False})
 
     return {
         "username": username,
