@@ -111,13 +111,6 @@ class RekordboxXMLController:
         path = Path(result)
         return path
 
-    async def remove_track(self, username: str, subbox_id: str, public: bool):
-        container_name = "beets" if public else f"beets{username}"
-        beets_command = f"beet rm -df subbox_id::{subbox_id}"
-        logger.info(f'running beet duplicates command {beets_command}')
-        result = docker.execute(container_name, beets_command.split())
-        logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
-
     @staticmethod
     def _subbox_id_or_query(subbox_ids: List[str]) -> List[str]:
         """
