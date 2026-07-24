@@ -518,12 +518,15 @@ async def sync_tracks(
         )
         if not match:
             candidate_tracks = await subsonic_client.query_track_by_name(user, resolved_title)
+            # Title-only fallback: aligned with get_track_match's tier-2 threshold for the
+            # same query shape (was 0.5, which — before the core-title gate — an exact
+            # artist match alone could satisfy regardless of title; see issue #42).
             match = await subsonic_client._get_best_track_match(
                 resolved_title,
                 resolved_artist,
                 requested_track.album,
                 candidate_tracks,
-                similarity_threshold=0.5,
+                similarity_threshold=0.6,
             )
         if match:
             matched_server_track, similarity = match

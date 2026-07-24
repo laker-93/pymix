@@ -28,6 +28,22 @@ make_logger_suppressible(logger)
 
 IGNORED_TITLE_WORDS = {'remix'}
 
+# Independent floor the *core* song title (parentheticals stripped) must clear before a
+# candidate is eligible at all — gated regardless of how well artist/album/qualifier line
+# up. Without it, an exact artist match could drag a completely different song over a low
+# threshold (issue #42: "Rodent (Kode9 remix)" false-matched "Distant Lights (Kode9 remix)"
+# on the shared remix token). core_sim("rodent", "distant lights") = 0.30, well under this.
+CORE_TITLE_FLOOR = 0.5
+
+# Relative weights of the composite match score. The core song title and the artist carry
+# the match; the version qualifier (the "(Kode 9 remix)" part) and album are lighter, so a
+# mismatched or absent qualifier only ranks a candidate *down* — it can never rescue a
+# failed core (gated above) nor, on its own, satisfy a threshold.
+_W_CORE = 1.0
+_W_ARTIST = 1.0
+_W_QUALIFIER = 0.5
+_W_ALBUM = 0.5
+
 def clean(text: str, is_title=False) -> str:
     cleaned = re.sub(r'\W+', ' ', text.lower()) if text else ''
     if is_title and len(cleaned) > max(map(len, IGNORED_TITLE_WORDS)):
@@ -35,16 +51,55 @@ def clean(text: str, is_title=False) -> str:
         cleaned = ' '.join(tokens).strip()
     return cleaned
 
-def compute_similarity(title_a: str, artist_a: str, album_a: Optional[str], title_b: str, artist_b: str, album_b: Optional[str]) -> float:
-    title_sim = SequenceMatcher(None, title_a, title_b).ratio()
-    artist_sim = SequenceMatcher(None, artist_a, artist_b).ratio()
-    total = title_sim + artist_sim
-    weight = 2.0
+def _split_title(text: str) -> Tuple[str, str]:
+    """Split a raw title into cleaned ``(core, qualifier)``.
 
+    ``core`` is the title with any parenthetical/bracketed segment removed, then
+    ``is_title``-cleaned (so ``remix`` etc. is dropped) — the actual song name used for
+    the core-title gate. ``qualifier`` is the concatenated contents of those parentheticals
+    (e.g. ``"kode 9 remix"``), cleaned but *not* ``is_title``-cleaned: here ``remix`` is a
+    version discriminator, not noise, so it is kept and used to tell versions apart.
+
+    A title that is *only* a parenthetical (empty core) falls back to the full cleaned
+    title for the core, so the gate never runs against an empty string.
+    """
+    qualifier = clean(" ".join(re.findall(r"[\(\[](.*?)[\)\]]", text)))
+    core = clean(re.sub(r"[\(\[].*?[\)\]]", "", text), is_title=True)
+    if not core:
+        core = clean(text, is_title=True)
+    return core, qualifier
+
+def score_track_match(
+    core_a: str, qualifier_a: str, artist_a: str, album_a: Optional[str],
+    core_b: str, qualifier_b: str, artist_b: str, album_b: Optional[str],
+) -> Optional[float]:
+    """Composite similarity in ``[0, 1]`` for two split tracks, or ``None`` if the
+    core-title gate fails.
+
+    The core song titles must independently clear :data:`CORE_TITLE_FLOOR` — below it the
+    pair is rejected outright, no matter how well artist/album/qualifier match. Above it,
+    the qualifier acts as a soft rank-down: an exact version qualifier boosts the score so
+    the right remix outranks the original, while a mismatched or absent qualifier merely
+    lowers the rank (it can still match when it is the only candidate).
+    """
+    core_sim = SequenceMatcher(None, core_a, core_b).ratio()
+    if core_sim < CORE_TITLE_FLOOR:
+        return None
+
+    artist_sim = SequenceMatcher(None, artist_a, artist_b).ratio()
+    # Neither side carrying a qualifier is not a disagreement — score it a perfect 1.0 so a
+    # plain title-vs-title match isn't penalised for lacking version info.
+    if qualifier_a or qualifier_b:
+        qualifier_sim = SequenceMatcher(None, qualifier_a, qualifier_b).ratio()
+    else:
+        qualifier_sim = 1.0
+
+    total = core_sim * _W_CORE + artist_sim * _W_ARTIST + qualifier_sim * _W_QUALIFIER
+    weight = _W_CORE + _W_ARTIST + _W_QUALIFIER
     if album_a and album_b:
         album_sim = SequenceMatcher(None, album_a, album_b).ratio()
-        total += album_sim * 0.5
-        weight += 0.5
+        total += album_sim * _W_ALBUM
+        weight += _W_ALBUM
 
     return total / weight
 
@@ -309,9 +364,21 @@ class SubsonicClient(BaseAPIClient):
             match = await self._find_best_match(title, artist, tracks, album, similarity_threshold, track_cleans=track_cleans)
         return match
 
-    async def get_track_match(self, user: dict, title: str, artist: str, album: Optional[str] = None) -> Optional[
-        tuple[SubBoxTrack, float]]:
+    async def get_track_match(
+        self, user: dict, title: str, artist: str, album: Optional[str] = None,
+        *, max_tier: int = 3, min_confidence: float = 0.0,
+    ) -> Optional[tuple[SubBoxTrack, float]]:
         """Find the best Navidrome track for ``title``/``artist``.
+
+        Widens the search in up to three tiers, each looser than the last: (1) query by
+        title+artist at threshold 0.8, (2) query by title only at 0.6, (3) query by each
+        token of the title at 0.5. ``max_tier`` caps how far it widens — a caller making a
+        high-stakes, one-way decision (e.g. the wishlist reconcile flip to the terminal
+        ``available`` state) passes ``max_tier=2`` to skip the token tier entirely, since
+        that tier's per-token candidate expansion is what surfaces same-artist wrong-song
+        matches (issue #42). ``min_confidence`` raises the acceptance bar as a floor under
+        every tier's own threshold, so such a caller can also demand more confidence than
+        the default tiers require.
 
         This method's per-item search logging (the progressive "no matches querying
         by ..." / "failed to find match" lines and the similarity diagnostics in the
@@ -328,26 +395,44 @@ class SubsonicClient(BaseAPIClient):
 
         candidate_tracks = await self.query_tracks_by(user, title, artist)
         match = await self._get_best_track_match(title, artist, album,
-                                                candidate_tracks, 0.8)
+                                                candidate_tracks, max(0.8, min_confidence))
         if match:
             return match
+        if max_tier < 2:
+            logger.info(f'no matches querying by {title} and {artist} (token tiers disabled)')
+            return None
 
         logger.info(f'no matches querying by {title} and {artist}. Querying on title only...')
         candidate_tracks = await self.query_track_by_name(user, title)
-        match = await self._get_best_track_match(title, artist, album, candidate_tracks, 0.6)
+        match = await self._get_best_track_match(title, artist, album, candidate_tracks, max(0.6, min_confidence))
         if match:
             return match
+        if max_tier < 3:
+            logger.info(f'no matches querying by {title} (token tier disabled)')
+            return None
 
         logger.info(f'no matches querying by {title}. Querying on tokens of title...')
         candidate_tracks = []
-        for token in title.split():
-            # skip common words that will give false positives
-            if (token.lower() == "the" or token.lower() == "a") and len(title.split()) > 1:
+        seen_tokens: set[str] = set()
+        raw_tokens = title.split()
+        for raw_token in raw_tokens:
+            # Normalise punctuation off the token before searching — a raw split leaves
+            # noise like "(Kode9" that searches poorly; clean() yields "kode9", a better
+            # search key. The qualifier tokens are deliberately kept (they are how we find
+            # the right remix); the split scoring, not the search, rejects wrong matches.
+            token = clean(raw_token)
+            if not token:
                 continue
+            # skip common words that will give false positives
+            if token in ("the", "a") and len(raw_tokens) > 1:
+                continue
+            if token in seen_tokens:
+                continue
+            seen_tokens.add(token)
             candidate_tracks.extend(
                 await self.query_track_by_name(user, token)
             )
-        match = await self._get_best_track_match(title, artist, album, candidate_tracks, 0.4)
+        match = await self._get_best_track_match(title, artist, album, candidate_tracks, max(0.5, min_confidence))
         if match:
             return match
 
@@ -391,59 +476,55 @@ class SubsonicClient(BaseAPIClient):
         return tracks
 
     @staticmethod
-    def _clean_track_for_match(track: SubBoxTrack) -> Tuple[str, str, Optional[str], str]:
-        """Precompute the (title, artist, album, bracket-stripped title) cleaned strings
-        used to match against ``track``. These depend only on ``track`` itself, so a
-        caller matching the same candidate list against many queries (e.g. sync_plan
-        matching an entire local library against one playlist) should compute this once
-        per track up front and pass it back in via ``track_cleans``, instead of paying
-        for it again on every query."""
+    def _clean_track_for_match(track: SubBoxTrack) -> Tuple[str, str, str, Optional[str]]:
+        """Precompute the (core, qualifier, artist, album) cleaned strings used to match
+        against ``track`` — the title split into its core song name and version qualifier
+        (see :func:`_split_title`). These depend only on ``track`` itself, so a caller
+        matching the same candidate list against many queries (e.g. sync_plan matching an
+        entire local library against one playlist) should compute this once per track up
+        front and pass it back in via ``track_cleans``, instead of paying for it again on
+        every query."""
+        core, qualifier = _split_title(track.name)
         return (
-            clean(track.name, is_title=True),
+            core,
+            qualifier,
             clean(track.artist),
             clean(track.album) if track.album else None,
-            clean(re.sub(r"[\(\[].*?[\)\]]", "", track.name.lower()), is_title=True),
         )
 
     async def _find_best_match(
         self, title: str, artist: str, tracks: List[SubBoxTrack], album: Optional[str], similarity_threshold: float,
-        track_cleans: Optional[List[Tuple[str, str, Optional[str], str]]] = None,
+        track_cleans: Optional[List[Tuple[str, str, str, Optional[str]]]] = None,
     ) -> Optional[tuple[SubBoxTrack, float]]:
         results = {}
 
-        title_clean = clean(title, is_title=True)
+        core_q, qualifier_q = _split_title(title)
         artist_clean = clean(artist)
         album_clean = clean(album) if album else None
-        title_no_brackets_clean = clean(re.sub(r"[\(\[].*?[\)\]]", "", title.lower()), is_title=True)
 
         for idx, track in enumerate(tracks):
             if track_cleans is not None:
-                track_title_clean, track_artist_clean, track_album_clean, track_title_no_brackets_clean = track_cleans[idx]
+                track_core, track_qualifier, track_artist_clean, track_album_clean = track_cleans[idx]
             else:
-                track_title_clean, track_artist_clean, track_album_clean, track_title_no_brackets_clean = \
+                track_core, track_qualifier, track_artist_clean, track_album_clean = \
                     self._clean_track_for_match(track)
 
-            # Primary similarity
-            similarity = compute_similarity(
-                title_clean, artist_clean, album_clean,
-                track_title_clean, track_artist_clean, track_album_clean
+            similarity = score_track_match(
+                core_q, qualifier_q, artist_clean, album_clean,
+                track_core, track_qualifier, track_artist_clean, track_album_clean,
             )
 
-            if similarity >= similarity_threshold:
+            if similarity is None:
+                # Core song title below the floor — a different song, however well the
+                # artist/album/qualifier happen to line up. Rejected outright (issue #42).
+                logger.warning(
+                    f"Core title below floor ({CORE_TITLE_FLOOR}) for '{title}' by '{artist}' against track '{track}'"
+                )
+            elif similarity >= similarity_threshold:
                 results[similarity] = track
-                continue
-
-            # Fallback: try again with bracketed text removed from titles only
-            fallback_similarity = compute_similarity(
-                title_no_brackets_clean, artist_clean, album_clean,
-                track_title_no_brackets_clean, track_artist_clean, track_album_clean
-            )
-
-            if fallback_similarity >= similarity_threshold:
-                results[fallback_similarity] = track
             else:
                 logger.warning(
-                    f"No good match ({fallback_similarity:.3f} < {similarity_threshold}) for '{title}' by '{artist}' against track '{track}'"
+                    f"No good match ({similarity:.3f} < {similarity_threshold}) for '{title}' by '{artist}' against track '{track}'"
                 )
         if not results:
             return None

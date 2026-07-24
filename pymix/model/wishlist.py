@@ -79,5 +79,6 @@ class WishlistItem:
     bandcamp_url: Optional[str] = None
     soundcloud_url: Optional[str] = None
     linked_subbox_id: Optional[str] = None
+    match_confidence: Optional[float] = None
     created_at: Optional[float] = None
     updated_at: Optional[float] = None

@@ -2,8 +2,13 @@ import datetime
 from unittest.mock import AsyncMock, MagicMock
 import pytest
 
-from pymix.clients.subsonic_client import SubsonicClient
+from pymix.clients.subsonic_client import (
+    SubsonicClient,
+    _split_title,
+    score_track_match,
+)
 from pymix.model.subboxplaylist import SubBoxPlaylist
+from pymix.model.subboxtrack import SubBoxTrack
 
 mock_subsonic_response = {'subsonic-response': {'status': 'ok', 'version': '1.16.1', 'type': 'navidrome',
                            'serverVersion': '0.48.0 (af5c2b5a)', 'playlists': {'playlist': [
@@ -18,9 +23,11 @@ mock_subsonic_response = {'subsonic-response': {'status': 'ok', 'version': '1.16
              'changed': '2022-11-29T18:23:08.7732488Z'}]}}
                           }
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_get_playlist():
-    subsonic_client = SubsonicClient(MagicMock(), MagicMock(), "mock_username", "mock_version", "foo", "bar")
+    subsonic_client = SubsonicClient(
+        "http://{user}:{port}", MagicMock(), "mock_version", "foo", "bar", None, "test"
+    )
     subsonic_client.get = AsyncMock(return_value=mock_subsonic_response)
     expected_playlists = [
         SubBoxPlaylist(name='ambient-light', n_of_songs=1, comment='',
@@ -33,6 +40,117 @@ async def test_get_playlist():
                        last_updated=datetime.datetime(2022, 11, 29, 18, 23, 8, 773248, tzinfo=datetime.timezone.utc),
                        duration_s=0, subsonic_id='99015bb5-cc58-4492-a5ee-6108f3acba41')
     ]
-    playlists = await subsonic_client.get_playlists()
+    playlists = await subsonic_client.get_playlists({"username": "lajp", "password": "pw"})
     assert expected_playlists == playlists
+
+
+def _client():
+    # _find_best_match / _clean_track_for_match / get_track_match's tier control need no
+    # network — the constructor args are irrelevant to the matching logic under test.
+    return SubsonicClient(MagicMock(), MagicMock(), "mock_version", "foo", "bar", None, "test")
+
+
+def _track(name, artist="Burial", album=None):
+    return SubBoxTrack(name=name, artist=artist, album=album)
+
+
+# --- _split_title -----------------------------------------------------------------
+
+@pytest.mark.parametrize("raw,core,qualifier", [
+    ("Rodent (Kode9 remix)", "rodent", "kode9 remix"),
+    ("Distant Lights (Kode9 remix)", "distant lights", "kode9 remix"),
+    ("Rodent", "rodent", ""),
+    ("Rodent [VIP Remix]", "rodent", "vip remix"),
+    # A title that is *only* a parenthetical falls back to the full cleaned title for the
+    # core, so the gate never runs against an empty string.
+    ("(Intro)", "intro", "intro"),
+])
+def test_split_title(raw, core, qualifier):
+    assert _split_title(raw) == (core, qualifier)
+
+
+# --- score_track_match ------------------------------------------------------------
+
+def _score(title_a, title_b, artist_a="burial", artist_b="burial", album_a=None, album_b=None):
+    core_a, qual_a = _split_title(title_a)
+    core_b, qual_b = _split_title(title_b)
+    return score_track_match(core_a, qual_a, artist_a, album_a, core_b, qual_b, artist_b, album_b)
+
+
+def test_core_gate_rejects_different_song_even_with_exact_artist_and_qualifier():
+    # Issue #42: same artist, coincidentally the same remix qualifier, different song.
+    # The core titles ("rodent" vs "distant lights") diverge, so it is rejected outright
+    # regardless of the exact artist match and the shared "(Kode9 remix)".
+    assert _score("Rodent (Kode9 remix)", "Distant Lights (Kode9 remix)") is None
+
+
+def test_qualifier_ranks_right_version_above_original_and_wrong_remix():
+    want = "Rodent (Kode 9 remix)"
+    exact = _score(want, "Rodent (Kode 9 remix)")
+    vip = _score(want, "Rodent (VIP remix)")
+    original = _score(want, "Rodent")
+    # All are the same core song, so all match; the qualifier ranks the exact version top.
+    assert exact == 1.0
+    assert exact > vip > original
+    # The original is a soft rank-down, not a rejection — still matchable on its own.
+    assert original is not None
+
+
+def test_missing_qualifier_still_matches_plain_titles():
+    assert _score("Rodent", "Rodent") == 1.0
+
+
+# --- _find_best_match -------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_find_best_match_rejects_same_artist_wrong_song():
+    client = _client()
+    # Even at a very loose threshold the core gate keeps the wrong song out.
+    match = await client._find_best_match(
+        "Rodent (Kode9 remix)", "Burial",
+        [_track("Distant Lights (Kode9 remix)")], None, similarity_threshold=0.4,
+    )
+    assert match is None
+
+
+@pytest.mark.anyio
+async def test_find_best_match_picks_exact_remix_over_original():
+    client = _client()
+    candidates = [_track("Rodent"), _track("Rodent (Kode 9 remix)"), _track("Rodent (VIP remix)")]
+    match = await client._find_best_match(
+        "Rodent (Kode 9 remix)", "Burial", candidates, None, similarity_threshold=0.6,
+    )
+    assert match is not None
+    matched_track, score = match
+    assert matched_track.name == "Rodent (Kode 9 remix)"
+    assert score == 1.0
+
+
+@pytest.mark.anyio
+async def test_find_best_match_falls_back_to_original_when_only_candidate():
+    client = _client()
+    match = await client._find_best_match(
+        "Rodent (Kode 9 remix)", "Burial", [_track("Rodent")], None, similarity_threshold=0.6,
+    )
+    assert match is not None
+    matched_track, _score = match
+    assert matched_track.name == "Rodent"
+
+
+# --- get_track_match tiers --------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_get_track_match_max_tier_2_skips_token_search():
+    client = _client()
+    client.query_tracks_by = AsyncMock(return_value=[])
+    client.query_track_by_name = AsyncMock(return_value=[])
+    match = await client.get_track_match(
+        {"username": "u", "password": "p"}, "Rodent", "Burial", None,
+        max_tier=2, min_confidence=0.8,
+    )
+    assert match is None
+    # Tier 1 uses query_tracks_by; tier 2 uses query_track_by_name once (title only). The
+    # token tier (which would call query_track_by_name per token) must not run.
+    client.query_tracks_by.assert_awaited_once()
+    client.query_track_by_name.assert_awaited_once_with({"username": "u", "password": "p"}, "Rodent")
 
