@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from typing import Dict, Annotated, List, Tuple, Optional
@@ -136,6 +137,17 @@ async def map_meta(
         'success': True,
         'reason': ""
     }
+# Cap on how many per-track Navidrome matches run at once. Each get_track_match is
+# largely I/O-bound (1–7+ sequential Subsonic queries), so serialising them made a large
+# library (e.g. a multi-thousand-track Rekordbox XML) take minutes and blow the Cloudflare
+# 524 edge timeout. Bounded concurrency overlaps those query waits — how much wall-clock it
+# saves depends on how much of the time is Navidrome round-trip latency (a lot in prod)
+# vs. Navidrome's own capacity to serve the searches concurrently (the local-dev limiter).
+# The cap keeps the request from stampeding Navidrome with thousands of simultaneous
+# queries. The hard guarantee against a 524 is the client chunking the request; this just
+# makes each chunk faster.
+MATCH_TRACKS_CONCURRENCY = int(os.environ.get("MATCH_TRACKS_CONCURRENCY", "16"))
+
 @router.post("/sync/match_tracks", tags=["sync"])
 @inject
 async def match_tracks(
@@ -144,28 +156,26 @@ async def match_tracks(
         subsonic_client: SubsonicClient = Depends(Provide[Container.subsonic_client])
 ) -> MatchedTracksResponse:
 
-    matched_tracks = []
-    for track in tracks.tracks:
-        match = await subsonic_client.get_track_match(user, track.title, track.artist, track.album)
+    semaphore = asyncio.Semaphore(MATCH_TRACKS_CONCURRENCY)
 
+    async def match_one(track: Track) -> MatchedTrack:
+        async with semaphore:
+            match = await subsonic_client.get_track_match(
+                user, track.title, track.artist, track.album
+            )
         if match:
             match = match[0]
             logger.info(f'matched track {track} with {match}')
-            matched_tracks.append(MatchedTrack(
-                title=match.name,
-                artist=match.artist,
-                matched=True
-            ))
-        else:
-            matched_tracks.append(MatchedTrack(
-                title=track.title,
-                artist=track.artist,
-                matched=False
-            ))
+            return MatchedTrack(title=match.name, artist=match.artist, matched=True)
+        return MatchedTrack(title=track.title, artist=track.artist, matched=False)
+
+    # gather preserves input order, so the response lines up 1:1 with tracks.tracks.
+    matched_tracks = await asyncio.gather(*(match_one(t) for t in tracks.tracks))
+
     return MatchedTracksResponse(
         success=True,
         reason="",
-        tracks=matched_tracks
+        tracks=list(matched_tracks)
     )
 
 @router.post("/sync/plan", tags=["sync"])
