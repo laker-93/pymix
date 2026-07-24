@@ -16,6 +16,17 @@ logger = logging.getLogger(__name__)
 make_logger_suppressible(logger)
 
 
+# A flip to 'available' is terminal — never re-checked, invisible to redownload — so this
+# sweep demands more confidence than a general sync match and never lets the token-expansion
+# tier (which surfaces same-artist wrong songs, issue #42) drive it. A marginal item stays
+# open and is simply re-checked next sweep; a false flip would be permanent.
+RECONCILE_MAX_TIER = 2
+RECONCILE_MIN_CONFIDENCE = 0.8
+# Flips that clear the bar but only just — surfaced (WARNING, above the sweep's suppression)
+# so a not-slam-dunk match can be spot-checked without a support/DB session.
+RECONCILE_LOW_CONFIDENCE_WARN = 0.9
+
+
 @dataclasses.dataclass
 class ReconcileResult:
     """Per-user outcome of one reconcile pass, for the caller to log/aggregate.
@@ -80,7 +91,9 @@ class WishlistReconcileService:
             label = f"{artist} - {title}"
             try:
                 match = await self._subsonic.get_track_match(
-                    user, title, artist, item.get("album")
+                    user, title, artist, item.get("album"),
+                    max_tier=RECONCILE_MAX_TIER,
+                    min_confidence=RECONCILE_MIN_CONFIDENCE,
                 )
             except Exception:
                 # A real error (not a no-match) — always surface it, even mid-sweep
@@ -92,7 +105,7 @@ class WishlistReconcileService:
                 result.unmatched.append(label)
                 continue
 
-            track, _score = match
+            track, score = match
             # get_subbox_id opens the file with taglib — a blocking call, so keep it off
             # the event loop (see CLAUDE.md: blocking taglib/beets/fs work is offloaded).
             subbox_id = (
@@ -103,12 +116,24 @@ class WishlistReconcileService:
             self._db.update_wishlist_item(
                 username,
                 item["wishlist_id"],
-                {"status": WishlistStatus.AVAILABLE.value, "linked_subbox_id": subbox_id},
+                {
+                    "status": WishlistStatus.AVAILABLE.value,
+                    "linked_subbox_id": subbox_id,
+                    "match_confidence": score,
+                },
             )
             result.matched.append(label)
-            logger.info(
-                f"reconcile: marked wishlist item {item['wishlist_id']} ({label}) "
-                f"available, linked subbox_id {subbox_id}"
-            )
+            if score < RECONCILE_LOW_CONFIDENCE_WARN:
+                # Surfaces even mid-sweep (WARNING is above the suppression threshold): the
+                # flip is terminal, so a borderline one is worth a human glance.
+                logger.warning(
+                    f"reconcile: low-confidence flip of wishlist item {item['wishlist_id']} "
+                    f"({label}) available at score {score:.3f}, linked subbox_id {subbox_id}"
+                )
+            else:
+                logger.info(
+                    f"reconcile: marked wishlist item {item['wishlist_id']} ({label}) "
+                    f"available at score {score:.3f}, linked subbox_id {subbox_id}"
+                )
 
         return result

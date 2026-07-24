@@ -149,5 +149,11 @@ class WishlistRow(Base):
 
     linked_subbox_id = Column(String)
 
+    # Confidence [0,1] of the match that flipped this item to 'available' (stamped by the
+    # reconcile sweep alongside linked_subbox_id). Nullable: items that were never flipped,
+    # or predate this column, carry NULL. Lets a suspect flip be audited after the fact —
+    # query low/NULL-confidence 'available' rows — since 'available' is otherwise terminal.
+    match_confidence = Column(Float)
+
     created_at = Column(Float)
     updated_at = Column(Float)
