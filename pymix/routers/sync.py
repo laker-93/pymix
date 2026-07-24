@@ -5,7 +5,7 @@ from typing import Dict, Annotated, List, Tuple, Optional
 from dependency_injector.wiring import Provide, inject
 from fastapi import APIRouter, Depends, Query, HTTPException
 from anyio import to_process
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from pymix.clients.beets_client import BeetsClient
 from pymix.clients.subsonic_client import SubsonicClient
@@ -26,6 +26,18 @@ class ClientTracks(BaseModel):
 class Track(BaseModel):
     title: str
     artist: str
+
+    # The client can send a null title/artist for a track whose Rekordbox
+    # Name/Artist tag is blank or reduces to nothing after cleaning. A null
+    # here used to 422 the *entire* request (it's one array), failing the whole
+    # "Upload from XML". Coerce null -> "" so one bad row degrades to an
+    # unmatched track instead of blowing up the batch; downstream matching
+    # already treats an empty title/artist as a miss.
+    @field_validator("title", "artist", mode="before")
+    @classmethod
+    def _null_to_empty(cls, v):
+        return "" if v is None else v
+
     fromTag: bool = True
     fileExtension: Optional[str] = None
     album: Optional[str] = None
