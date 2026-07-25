@@ -1,4 +1,7 @@
-plugins: web fetchart lyrics lastgenre embedart duplicates info subsonicupdate
+# no `web` plugin: pymix talks to beets via `docker exec` CLI calls instead of
+# its HTTP API, since running a Flask server per user is too memory-heavy for
+# the resource-limited DO droplet.
+plugins: fetchart lyrics lastgenre embedart duplicates info subsonicupdate
 directory: /music
 library: /config/musiclibrary.blb
 art_filename: albumart
@@ -74,11 +77,6 @@ replace:
     '[\xF8]': o
     #'\.$': _
     '\s+$': ''
-
-web:
-    host: 0.0.0.0
-    port: 8337
-    readonly: false
 
 lyrics:
     auto: no
