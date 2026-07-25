@@ -171,8 +171,6 @@ class Container(containers.DeclarativeContainer):
 
     beets_client = providers.Singleton(
         BeetsClient,
-        host=config.containers.beets.host,
-        session=aiohttp_session,
         app_env=config.app_env
     )
 

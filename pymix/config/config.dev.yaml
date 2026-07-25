@@ -22,7 +22,6 @@ containers:
     docker_compose_file: /subbox/docker-compose/filebrowser/docker-compose.yml
     env_file: /subbox/docker-compose/filebrowser/env
   beets:
-    host: http://beets{user}:{port}
     data: /private-staged/{user}/
     data_public: /public-staged
     docker_compose_file: /subbox/docker-compose/beets/docker-compose.yml

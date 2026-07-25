@@ -11,7 +11,7 @@ controllers/     coordinate a use-case across multiple orchestrators/handlers/cl
    │
 orchestrators/   business logic over ONE domain (subsonic, rekordbox xml, serato crates, services)
    │
-clients/         async HTTP to external services (Navidrome/Subsonic REST, beets web API)
+clients/         async wrappers over external services (Navidrome/Subsonic REST HTTP, beets CLI via docker exec)
 handlers/        side-effecting helpers (filesystem staging, docker compose, env/zip files)
    │
 factories/       construct stateful objects (DB session, aiohttp session, rekordbox xml)
@@ -59,8 +59,8 @@ on `/user/create`:
 | Container         | Name pattern        | Port (internal) | Role |
 |-------------------|---------------------|-----------------|------|
 | Navidrome         | `navidrome{user}`   | 4533            | Subsonic server / library + playlists |
-| beets             | `beets{user}`       | 8337            | Tag/import engine, queried via CLI + web API |
-| beets (public)    | `beets`             | 8337            | Shared/public library (`public=True`) |
+| beets             | `beets{user}`       | —               | Tag/import engine, queried entirely via CLI (`docker exec`) |
+| beets (public)    | `beets`             | —               | Shared/public library (`public=True`) |
 | filebrowser       | `filebrowser`       | —               | Single shared up/download UI; per-user accounts |
 | pymix             | `pymix`             | 8002            | This app |
 | postgres          | `pymix-postgres`    | 5432            | pymix's own DB |
@@ -81,8 +81,11 @@ on `/user/create`:
   Auth uses the Subsonic token+salt scheme (`SubsonicClient._calculate_token`).
   **Requires Navidrome's "report real path" option** so pymix can map a Subsonic
   track back to its on-disk path (`pymix_path`).
-- **beets** = music importer/tagger. Driven via CLI in the container; the only web
-  API call is `/stats` (`BeetsClient.get_number_of_tracks`).
+- **beets** = music importer/tagger. Driven entirely via CLI in the container
+  (`docker exec`, `python_on_whales`) — no `web` plugin. Running a Flask server
+  per user container was too much memory overhead for the resource-limited DO
+  droplet, so even the track-count lookup (`BeetsClient.get_number_of_tracks`)
+  parses `beet stats` output instead of calling a `/stats` HTTP endpoint.
 - **Rekordbox XML** = parsed/written via `pyrekordbox` (wrapped by
   `RekordboxXMLFactory` / `RekordboxXMLOrchestrator`).
 - **Serato crates** = read/written via `pyserato` (`SeratoCrateOrchestrator`).
