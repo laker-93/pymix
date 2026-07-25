@@ -130,11 +130,18 @@ class ServicesOrchestrator:
             gid,
             mode
         )
+        env_kwargs = {}
+        metrics_path = self._config['containers']['subsonic'].get('metrics_path')
+        if metrics_path:
+            env_kwargs['nd_prometheus_enabled'] = 'true'
+            env_kwargs['nd_prometheus_metricspath'] = metrics_path
+
         self._env_file_handler.create_env_file(
             Path(self._config['containers']['subsonic']['env_file']),
             username,
             port,
-            project_name
+            project_name,
+            **env_kwargs
         )
 
         docker = DockerClient(

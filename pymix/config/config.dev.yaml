@@ -13,6 +13,7 @@ containers:
     docker_compose_file: /subbox/docker-compose/navidrome/docker-compose.yml
     env_file: /subbox/docker-compose/navidrome/env
     config_file_dst: /subbox/private/{user}/navidrome/data/navidrome.toml
+    metrics_path: /metrics
   filebrowser:
     user_root: /user-updownloads
     data_watch: /user-updownloads/{user}/watch
