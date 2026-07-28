@@ -60,3 +60,38 @@ def require_user(
 def require_username(user: dict = Depends(require_user)) -> str:
     """Return just the calling user's username, or raise 401."""
     return user["username"]
+
+
+# `demo` is a public trial login with no per-user container stack of its own — its
+# Navidrome browsing identity already lives inside demoadmin's Navidrome container,
+# so its pymix-side reads are proxied there too rather than resolving containers
+# that don't exist.
+DEMO_USERNAME = "demo"
+DEMO_PROXY_USERNAME = "demoadmin"
+
+
+@inject
+def require_reader(
+    user: dict = Depends(require_user),
+    db_controller: DbController = Depends(Provide[Container.db_controller]),
+) -> dict:
+    """Like require_user, but resolves `demo` to demoadmin's row.
+
+    Use on routes that only read a user's library (sync/export): every downstream
+    client derives its container target from this dict, so substituting it here is
+    enough to make `demo`'s reads target demoadmin's containers.
+    """
+    if user["username"] == DEMO_USERNAME:
+        return db_controller.get_user(DEMO_PROXY_USERNAME)
+    return user
+
+
+def require_uploader(user: dict = Depends(require_user)) -> dict:
+    """Like require_user, but blocks `demo` with a 403.
+
+    Use on routes that mutate a user's library (upload/import) — `demo` may read
+    demoadmin's library (via require_reader) but must never be able to write to it.
+    """
+    if user["username"] == DEMO_USERNAME:
+        raise HTTPException(status_code=403, detail="demo account cannot upload or import")
+    return user
