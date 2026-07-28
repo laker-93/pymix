@@ -620,6 +620,12 @@ class DbController:
             session.delete(user)
             session.commit()
 
+    def unclaim_token(self, token: str):
+        with self._session_factory() as session:
+            token_row = session.query(UserTokenRow).filter(UserTokenRow.token == token).one()
+            token_row.user_id = ''
+            session.commit()
+
     def delete_session(self, session_id: str):
         with self._session_factory() as session:
             row = session.query(SessionRow).filter(SessionRow.session_id == session_id).one()

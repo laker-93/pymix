@@ -73,6 +73,7 @@ class ServicesOrchestrator:
             if session_id:
                 logger.info(f"deleting session id {session_id}")
                 self._db_controller.delete_session(session_id)
+            self._db_controller.unclaim_token(token)
             raise
         return session_id
 
