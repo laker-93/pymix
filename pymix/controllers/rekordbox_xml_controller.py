@@ -518,7 +518,7 @@ class RekordboxXMLController:
         if allowed_track_ids is not None:
             all_xml_tracks = [t for t in all_xml_tracks if t.track_id in allowed_track_ids]
             logger.info(f"Filtered to {len(all_xml_tracks)} track(s) with metadata from XML based on playlist filter.")
-        rated_tracks = list(filter(lambda t: t.rating > 0, all_xml_tracks))
+        rated_tracks = list(filter(lambda t: (t.rating or 0) > 0, all_xml_tracks))
         await self._subsonic_orchestrator.update_tracks_with_subid(user, tracks=rated_tracks)
         #  and set the rating of the track in navidrome from the rating taken from xml
         await self._subsonic_orchestrator.set_ratings(user, rated_tracks)
