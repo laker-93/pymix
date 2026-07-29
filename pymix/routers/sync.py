@@ -15,7 +15,7 @@ from pymix.controllers.db_controller import DbController
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.model.original_track_meta import OriginalTracks
-from pymix.routers.auth import require_user
+from pymix.routers.auth import require_reader, require_uploader
 
 router = APIRouter()
 
@@ -101,7 +101,7 @@ def _resolve_local_track_for_matching(local_track: Track) -> tuple[str, str]:
 @inject
 async def map_meta(
         tracks: OriginalTracks,
-        user: dict = Depends(require_user),
+        user: dict = Depends(require_uploader),
         db_controller: DbController = Depends(Provide[Container.db_controller]),
         fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler])
 ) -> dict:
@@ -152,7 +152,7 @@ MATCH_TRACKS_CONCURRENCY = int(os.environ.get("MATCH_TRACKS_CONCURRENCY", "16"))
 @inject
 async def match_tracks(
         tracks: Tracks,
-        user: dict = Depends(require_user),
+        user: dict = Depends(require_uploader),
         subsonic_client: SubsonicClient = Depends(Provide[Container.subsonic_client])
 ) -> MatchedTracksResponse:
 
@@ -182,7 +182,7 @@ async def match_tracks(
 @inject
 async def sync_plan(
         request: SyncPlanRequest,
-        user: dict = Depends(require_user),
+        user: dict = Depends(require_reader),
         subsonic_client: SubsonicClient = Depends(Provide[Container.subsonic_client])
 ) -> SyncPlanResponse:
     username = user['username']
@@ -447,7 +447,7 @@ class SyncPlaylistArgs(BaseModel):
 @inject
 async def sync(
         request: SyncRequest,
-        user: dict = Depends(require_user),
+        user: dict = Depends(require_reader),
         fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
         subsonic_client: SubsonicClient = Depends(Provide[Container.subsonic_client])
 ) -> dict:
@@ -514,7 +514,7 @@ async def sync(
 @inject
 async def sync_tracks(
         request: SyncRequest,
-        user: dict = Depends(require_user),
+        user: dict = Depends(require_reader),
         fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
         subsonic_client: SubsonicClient = Depends(Provide[Container.subsonic_client])
 ) -> dict:
@@ -596,7 +596,7 @@ async def sync_tracks(
 @inject
 async def sync_playlists(
         request: SyncPlanRequest,
-        user: dict = Depends(require_user),
+        user: dict = Depends(require_reader),
         fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
         subsonic_client: SubsonicClient = Depends(Provide[Container.subsonic_client])
 ) -> dict:

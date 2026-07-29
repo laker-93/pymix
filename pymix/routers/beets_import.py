@@ -10,7 +10,7 @@ from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
-from pymix.routers.auth import require_user, require_username
+from pymix.routers.auth import require_uploader, require_username
 
 router = APIRouter()
 
@@ -58,7 +58,7 @@ async def beets_duplicates(
 async def beets_import(
     request: BeetsImportRequest,
     background_tasks: BackgroundTasks,
-    user: dict = Depends(require_user),
+    user: dict = Depends(require_uploader),
     beets_client: BeetsClient = Depends(Provide[Container.beets_client]),
     fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
     rekordbox_xml_controller: RekordboxXMLController = Depends(Provide[Container.rekordbox_xml_controller]),
@@ -132,7 +132,7 @@ async def run_import_task(rekordbox_xml_controller, username, public, job_id, db
 async def tracks_imported(
         job_id: str,
         public: bool = False,
-        user: dict = Depends(require_user),
+        user: dict = Depends(require_uploader),
         beets_client: BeetsClient = Depends(Provide[Container.beets_client]),
         db_controller: DbController = Depends(Provide[Container.db_controller]),
 ) -> dict:

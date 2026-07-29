@@ -9,7 +9,7 @@ from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
 from pymix.controllers.serato_controller import SeratoController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
-from pymix.routers.auth import require_user
+from pymix.routers.auth import require_reader, require_uploader
 from pymix.routers.rb_import_export import RBExportRequest
 
 router = APIRouter()
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 @inject
 async def serato_import(
     background_tasks: BackgroundTasks,
-    user: dict = Depends(require_user),
+    user: dict = Depends(require_uploader),
     beets_client: BeetsClient = Depends(Provide[Container.beets_client]),
     fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
     serato_controller: SeratoController = Depends(Provide[Container.serato_controller]),
@@ -102,7 +102,7 @@ async def run_import_task(serato_controller, username, job_id, db_controller, fb
 @inject
 async def serato_export(
         request: RBExportRequest,
-        user: dict = Depends(require_user),
+        user: dict = Depends(require_reader),
         beets_client: BeetsClient = Depends(Provide[Container.beets_client]),
         fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
         serato_controller: SeratoController = Depends(Provide[Container.serato_controller]),
