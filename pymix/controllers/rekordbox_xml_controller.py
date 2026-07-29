@@ -10,6 +10,7 @@ import music_tag
 from beets.plugins import BeetsPlugin
 from beets.library import Item
 from python_on_whales import docker
+from pyrekordbox.rbxml import RekordboxXml
 
 from pymix.clients.subsonic_client import SubsonicClient
 from pymix.controllers.db_controller import DbController
@@ -71,16 +72,16 @@ class RekordboxXMLController:
         self._local_user_music_stem = local_user_music_stem
         self._serving_music_path_base = serving_music_path_base
 
-    def _create_rekordbox_xml_playlist(self, user_root: str, user: dict, subsonic_playlist: SubBoxPlaylist):
+    def _create_rekordbox_xml_playlist(self, user_root: str, user: dict, subsonic_playlist: SubBoxPlaylist, rekordbox_xml: RekordboxXml):
         """
         From the playlist given, create the rekordbox folders and playlists.
         Add the tracks to the playlist.
         :param subsonic_playlist:
         :return:
         """
-        playlist = self._rekordbox_xml_orchestrator.create_rekordbox_xml_playlist(subsonic_playlist)
+        playlist = self._rekordbox_xml_orchestrator.create_rekordbox_xml_playlist(rekordbox_xml, subsonic_playlist)
         for track in subsonic_playlist.tracks:
-            self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(user_root, user, track, playlist)
+            self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(rekordbox_xml, user_root, user, track, playlist)
 
 
     # todo this controller is overloaded; this method has nothing to do with rekordbox xml and should live elsewhere.
@@ -363,7 +364,7 @@ class RekordboxXMLController:
         playlist_ids: Optional[List[str]] = None,
     ):
         # todo this could be made a context manager to create, update then save the xml
-        self._rekordbox_xml_orchestrator.create_xml(xml_path)
+        rekordbox_xml = self._rekordbox_xml_orchestrator.create_xml(xml_path)
 
         subsonic_playlists = await self._subsonic_orchestrator.get_subsonic_playlists(user)
         if not subsonic_playlists:
@@ -389,18 +390,19 @@ class RekordboxXMLController:
                     subsonic_playlist.path_components = path_map[subsonic_playlist.name]
             # Given the Playlist data from Subsonic create the playlist directory structure in Rekordbox.
             for subsonic_playlist in subsonic_playlists:
-                self._create_rekordbox_xml_playlist(user_root, user, subsonic_playlist)
+                self._create_rekordbox_xml_playlist(user_root, user, subsonic_playlist, rekordbox_xml)
         # When not filtering, add subsonic tracks that do not belong to a playlist to a default playlist.
         if not playlist_ids:
-            default_playlist = self._rekordbox_xml_orchestrator.get_playlist('NOPLAYLIST')
+            default_playlist = self._rekordbox_xml_orchestrator.get_playlist(rekordbox_xml, 'NOPLAYLIST')
             if not default_playlist:
                 noplaylist = SubBoxPlaylist(name='NOPLAYLIST', path_components=['NOPLAYLIST'])
-                default_playlist = self._rekordbox_xml_orchestrator.create_rekordbox_xml_playlist(noplaylist)
+                default_playlist = self._rekordbox_xml_orchestrator.create_rekordbox_xml_playlist(rekordbox_xml, noplaylist)
             import asyncio
             await asyncio.sleep(2)
             async for tracks in self._subsonic_client.get_all_tracks(user, 200):
                 for track in tracks:
                     self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(
+                        rekordbox_xml,
                         user_root,
                         user,
                         track,
@@ -410,17 +412,17 @@ class RekordboxXMLController:
                 await asyncio.sleep(2)
 
         # todo remove any playlists that have no tracks
-        self._rekordbox_xml_orchestrator.save_xml(xml_output_path)
+        self._rekordbox_xml_orchestrator.save_xml(rekordbox_xml, xml_output_path)
 
     # todo this function should be part of the beets client or beets controller class and removed from here and rekordbox_xml_controller.py
-    def _import_to_beets(self, username: str, zip_path: Optional[Path], audio_path: Optional[Path]):
+    def _import_to_beets(self, username: str, zip_path: Optional[Path], audio_path: Optional[Path], rekordbox_xml: RekordboxXml):
         """
         Import into beets in quiet mode. Any exceptions will interrupt the process.
         beets should import in to the directory navidrome is working off.
         Users can use APIs after import to correct any mistakes from the beets quiet import.
         """
         if zip_path:
-            self._rb_backup_file_handler.restore_track_meta_and_stage_for_import(username, zip_path)
+            self._rb_backup_file_handler.restore_track_meta_and_stage_for_import(username, zip_path, rekordbox_xml)
         if audio_path:
             self._rb_backup_file_handler.stage_for_import(username, audio_path)
         # 1. invoke beets import on the audio files to import
@@ -463,15 +465,18 @@ class RekordboxXMLController:
             playlist_names: Optional[List[List[str]]] = None,
     ):
         username = user['username']
-        self._rekordbox_xml_orchestrator.create_xml(xml_path)
+        # parsed fresh per call and threaded explicitly through the rest of this request -
+        # never stored on the (singleton) orchestrator, so concurrent users' imports can't
+        # race on shared state (see #59).
+        rekordbox_xml = self._rekordbox_xml_orchestrator.create_xml(xml_path)
 
         if zip_path or audio_path:
-            await anyio.to_thread.run_sync(self._import_to_beets, username, zip_path, audio_path)
+            await anyio.to_thread.run_sync(self._import_to_beets, username, zip_path, audio_path, rekordbox_xml)
         # must trigger a navidrome scan so the tracks will be queryable when creating and moving in to playlists in the
         # next step
         await self._subsonic_orchestrator.scan(user)
         await anyio.sleep(2)
-        await self._set_data_from_xml(user, playlist_names)
+        await self._set_data_from_xml(user, rekordbox_xml, playlist_names)
         # the fb path is removed here as we only want to remove data in fb once import is successful to avoid
         # unnecessarily having to reupload data from the client after a beets import failure
         self._file_browser_file_handler.remove_fb_data_path(username)
@@ -497,24 +502,24 @@ class RekordboxXMLController:
                     break
         return result
 
-    async def _set_data_from_xml(self, user: dict, playlist_names: Optional[List[List[str]]] = None):
+    async def _set_data_from_xml(self, user: dict, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None):
         # todo make this logic more similar to serato_controller where subbox_id is used for look up
-        await self._create_playlists_from_xml(user, playlist_names)
-        await self._set_metadata_from_xml(user, playlist_names)
+        await self._create_playlists_from_xml(user, rekordbox_xml, playlist_names)
+        await self._set_metadata_from_xml(user, rekordbox_xml, playlist_names)
 
-    async def _set_metadata_from_xml(self, user, playlist_names: Optional[List[List[str]]] = None):
+    async def _set_metadata_from_xml(self, user, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None):
         allowed_track_ids = None
         if playlist_names:
-            rekordbox_xml_playlists = self._rekordbox_xml_orchestrator.get_all_xml_playlists()
+            rekordbox_xml_playlists = self._rekordbox_xml_orchestrator.get_all_xml_playlists(rekordbox_xml)
             all_playlists: List[SubBoxPlaylist] = []
             self._rekordbox_xml_orchestrator.get_subbox_playlists_from_rekordbox_xml_playlists(
-                rekordbox_xml_playlists, [], all_playlists
+                rekordbox_xml, rekordbox_xml_playlists, [], all_playlists
             )
             filtered_playlists = self._filter_playlists(all_playlists, playlist_names)
             allowed_track_ids = {t.track_id for pl in filtered_playlists for t in pl.tracks}
             logger.info("Filtered metadata to %s track(s) from %s playlist(s)", len(allowed_track_ids), len(filtered_playlists))
 
-        all_xml_tracks = self._rekordbox_xml_orchestrator.get_all_xml_tracks()
+        all_xml_tracks = self._rekordbox_xml_orchestrator.get_all_xml_tracks(rekordbox_xml)
         if allowed_track_ids is not None:
             all_xml_tracks = [t for t in all_xml_tracks if t.track_id in allowed_track_ids]
             logger.info(f"Filtered to {len(all_xml_tracks)} track(s) with metadata from XML based on playlist filter.")
@@ -523,7 +528,7 @@ class RekordboxXMLController:
         #  and set the rating of the track in navidrome from the rating taken from xml
         await self._subsonic_orchestrator.set_ratings(user, rated_tracks)
         #encoder = V2Mp3Encoder()
-        for track in self._rekordbox_xml_orchestrator._rekordbox_xml.get_tracks():
+        for track in rekordbox_xml.get_tracks():
             if allowed_track_ids is not None and track.TrackID not in allowed_track_ids:
                 continue
             marks = track.marks
@@ -593,11 +598,11 @@ class RekordboxXMLController:
             )
 
 
-    async def _create_playlists_from_xml(self, user: dict, playlist_names: Optional[List[List[str]]] = None):
+    async def _create_playlists_from_xml(self, user: dict, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None):
         # 4. create internal subbox playlist and tracks as below
-        rekordbox_xml_playlists = self._rekordbox_xml_orchestrator.get_all_xml_playlists()
+        rekordbox_xml_playlists = self._rekordbox_xml_orchestrator.get_all_xml_playlists(rekordbox_xml)
         subbox_playlists: List[SubBoxPlaylist] = []
-        self._rekordbox_xml_orchestrator.get_subbox_playlists_from_rekordbox_xml_playlists(rekordbox_xml_playlists, [],
+        self._rekordbox_xml_orchestrator.get_subbox_playlists_from_rekordbox_xml_playlists(rekordbox_xml, rekordbox_xml_playlists, [],
                                                                                            subbox_playlists)
 
         if playlist_names:

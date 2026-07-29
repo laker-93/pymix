@@ -5,7 +5,7 @@ import music_tag
 import shutil
 from pathlib import Path
 
-from pyrekordbox.rbxml import Track
+from pyrekordbox.rbxml import RekordboxXml, Track
 
 from pymix.controllers.db_controller import DbController
 from pymix.model.subboxtrack import SubBoxTrack
@@ -48,7 +48,7 @@ class RBBackupFileHandler:
         """
         return f'{track.Artist} - {track.Name}'
 
-    def restore_track_meta(self, username: str, audio_files_zip: Path) -> int:
+    def restore_track_meta(self, username: str, audio_files_zip: Path, rekordbox_xml: RekordboxXml) -> int:
         """
         rekordbox mangles the names of the tracks when creating the backup. It also nukes all the meta data in the
         audio files. This must be restored in to the audio file's meta data to allow beets import work.
@@ -65,7 +65,7 @@ class RBBackupFileHandler:
                     logger.info(f'unable to convert track id to int for {audio_file}')
                     continue
 
-                track = self._rekordbox_xml_orchestrator.get_track_by_id(track_id)
+                track = self._rekordbox_xml_orchestrator.get_track_by_id(rekordbox_xml, track_id)
                 self._restore_tags(audio_file, track)
                 track_name = self._format_track_name(track)
                 output_parts = list(audio_file.parts)
@@ -95,13 +95,13 @@ class RBBackupFileHandler:
             else:
                 filepath.unlink()
 
-    def restore_track_meta_and_stage_for_import(self, username: str, audio_files_zip: Path) -> int:
+    def restore_track_meta_and_stage_for_import(self, username: str, audio_files_zip: Path, rekordbox_xml: RekordboxXml) -> int:
         """
         rekordbox mangles the names of the tracks when creating the backup. It also nukes all the meta data in the
         audio files. This must be restored in to the audio file's meta data to allow beets import work.
         Finally, the audio file is moved in to the beets docker shared directory that is used for import in to beets.
         """
-        n_updated_tracks = self.restore_track_meta(username, audio_files_zip)
+        n_updated_tracks = self.restore_track_meta(username, audio_files_zip, rekordbox_xml)
         return n_updated_tracks
 
     # todo: move from rb handler as logic is generic to serato and rb
