@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List, Optional, Dict
 from xml.etree.ElementTree import ElementTree, indent
 
-from pyrekordbox.rbxml import Node, RATING_MAPPING, XmlDuplicateError
+from pyrekordbox.rbxml import Node, RATING_MAPPING, RekordboxXml, XmlDuplicateError
 
 from pymix.controllers.db_controller import DbController
 from pymix.factories.rekordbox_xml_factory import RekordboxXMLFactory
@@ -21,7 +21,6 @@ class RekordboxXMLOrchestrator:
         self._rekordbox_xml_factory = rekordbox_xml_factory
         self._db_controller = db_controller
         self._local_user_music_stem = local_user_music_stem.removesuffix('/')
-        self._rekordbox_xml = None
 
     def _get_user_music_root(self, username: str) -> Path:
         if '{user}' in self._local_user_music_stem:
@@ -43,11 +42,11 @@ class RekordboxXMLOrchestrator:
             )
             return Path(f'{user_root}/{track.path}')
 
-    def create_xml(self, xml_path: Optional[Path] = None):
-        self._rekordbox_xml = self._rekordbox_xml_factory.create_rekordbox_xml(xml_path)
+    def create_xml(self, xml_path: Optional[Path] = None) -> RekordboxXml:
+        return self._rekordbox_xml_factory.create_rekordbox_xml(xml_path)
 
-    def get_track_by_id(self, track_id: int) -> SubBoxTrack:
-        rb_track = self._rekordbox_xml.get_track(TrackID=track_id)
+    def get_track_by_id(self, rekordbox_xml: RekordboxXml, track_id: int) -> SubBoxTrack:
+        rb_track = rekordbox_xml.get_track(TrackID=track_id)
         return SubBoxTrack(
             name=rb_track.Name,
             artist=rb_track.Artist,
@@ -56,9 +55,10 @@ class RekordboxXMLOrchestrator:
             track_number=rb_track.TrackNumber,
         )
 
-    def get_subbox_playlists_from_rekordbox_xml_playlists(self, xml_playlists: List[Node], parent_components: List[str], subbox_playlists) -> List[SubBoxPlaylist]:
+    def get_subbox_playlists_from_rekordbox_xml_playlists(self, rekordbox_xml: RekordboxXml, xml_playlists: List[Node], parent_components: List[str], subbox_playlists) -> List[SubBoxPlaylist]:
         """
         From the rekordbox XML playlists, create the internal Playlist datastructure
+        :param rekordbox_xml: the parsed XML for this request; never shared across requests
         :param xml_playlists:
         :param parent_components: list of parent folder names leading to this level
         :param subbox_playlists:
@@ -70,12 +70,12 @@ class RekordboxXMLOrchestrator:
             if not playlist.is_playlist:
                 # recurse through the folder structure until reach the playlist leaves
                 playlists = playlist.get_playlists()
-                self.get_subbox_playlists_from_rekordbox_xml_playlists(playlists, components, subbox_playlists)
+                self.get_subbox_playlists_from_rekordbox_xml_playlists(rekordbox_xml, playlists, components, subbox_playlists)
                 continue
             assert playlist.key_type == 'TrackID', f"playlist key type {playlist.key_type}"
             tracks = []
             for track_id in track_ids:
-                track = self._rekordbox_xml.get_track(TrackID=track_id)
+                track = rekordbox_xml.get_track(TrackID=track_id)
                 tracks.append(
                     SubBoxTrack(
                         name=track.Name,
@@ -96,7 +96,7 @@ class RekordboxXMLOrchestrator:
                 )
             )
 
-    def create_rekordbox_xml_playlist(self, subsonic_playlist: SubBoxPlaylist) -> Node:
+    def create_rekordbox_xml_playlist(self, rekordbox_xml: RekordboxXml, subsonic_playlist: SubBoxPlaylist) -> Node:
         """
         From the playlist, create the rekordbox folders and playlist node.
         Uses path_components if available for lossless folder reconstruction,
@@ -109,7 +109,7 @@ class RekordboxXMLOrchestrator:
             parts = subsonic_playlist.name.split(' / ')
             folders = parts[:-1]
             playlist_name = parts[-1]
-        playlist_root = self._create_playlist_folders(list(folders)) if folders else self._rekordbox_xml
+        playlist_root = self._create_playlist_folders(rekordbox_xml, list(folders)) if folders else rekordbox_xml
         new_playlist = playlist_root.add_playlist(playlist_name)
         logger.info(f'created playlist with name {playlist_name}')
         return new_playlist
@@ -125,7 +125,7 @@ class RekordboxXMLOrchestrator:
             cue_data = lib_entry["cuedata"]
             return cue_data
 
-    def add_track_to_rekordbox_playlist(self, user_root: str, user: dict, track: SubBoxTrack, playlist: Node, force: bool = True):
+    def add_track_to_rekordbox_playlist(self, rekordbox_xml: RekordboxXml, user_root: str, user: dict, track: SubBoxTrack, playlist: Node, force: bool = True):
         """
         Add track in playlist. Optionally force the track in to playlist even if the track is already in the XML.
         """
@@ -137,7 +137,7 @@ class RekordboxXMLOrchestrator:
         resolved_location = self._resolve_track_location(user_root, user, track)
         resolved_location_str = os.path.normpath(str(resolved_location))
         try:
-            rekordbox_track = self._rekordbox_xml.add_track(
+            rekordbox_track = rekordbox_xml.add_track(
             resolved_location_str,
                 Name=track.name,
                 Artist=track.artist,
@@ -152,12 +152,12 @@ class RekordboxXMLOrchestrator:
             # if the track_id is set then the subsonic track is already present in the rekordbox xml,
             # otherwise the track has yet to be added to rekordbox xml and appears in multiple playlists.
             if track_id:
-                rekordbox_track = self._rekordbox_xml.get_track(TrackID=track_id)
+                rekordbox_track = rekordbox_xml.get_track(TrackID=track_id)
             else:
-                #rekordbox_track = self._rekordbox_xml.get_track(Location=os.path.normpath(f'{user_root}/{track.path}'))
+                #rekordbox_track = rekordbox_xml.get_track(Location=os.path.normpath(f'{user_root}/{track.path}'))
                 # the rekord box get_track api is stupid so do some very inefficient work around
-                #rekordbox_track = self._rekordbox_xml.get_track(index=1, Location=os.path.normpath(str(track.path)))
-                for other in self._rekordbox_xml.get_tracks():
+                #rekordbox_track = rekordbox_xml.get_track(index=1, Location=os.path.normpath(str(track.path)))
+                for other in rekordbox_xml.get_tracks():
                     if resolved_location_str == other.Location:
                         rekordbox_track = other
                         break
@@ -203,8 +203,8 @@ class RekordboxXMLOrchestrator:
         assert rekordbox_track
 
 
-    def _get_playlist_folder(self, playlist_folder_name: str, parent_folder: Optional[Node] = None) -> Optional[Node]:
-        playlists = self._rekordbox_xml._root_node.get_playlists() if parent_folder is None else parent_folder.get_playlists()
+    def _get_playlist_folder(self, rekordbox_xml: RekordboxXml, playlist_folder_name: str, parent_folder: Optional[Node] = None) -> Optional[Node]:
+        playlists = rekordbox_xml._root_node.get_playlists() if parent_folder is None else parent_folder.get_playlists()
         playlist_folder = None
         for playlist in playlists:
             if playlist.name == playlist_folder_name and playlist.is_folder:
@@ -212,7 +212,7 @@ class RekordboxXMLOrchestrator:
                 break
         return playlist_folder
 
-    def _create_playlist_folders(self, folder_names: List[str], parent_folder: Optional[Node]=None) -> Node:
+    def _create_playlist_folders(self, rekordbox_xml: RekordboxXml, folder_names: List[str], parent_folder: Optional[Node]=None) -> Node:
         """
         Given the folder names (e.g. ['root-folder', 'mid-folder', 'child-folder'])
         return the child folder Node with the correct structure.
@@ -220,27 +220,28 @@ class RekordboxXMLOrchestrator:
         If 'root-folder' does not exist, create new folders.
         """
         folder_name = folder_names.pop(0)
-        playlist_folder = self._get_playlist_folder(folder_name, parent_folder)
+        playlist_folder = self._get_playlist_folder(rekordbox_xml, folder_name, parent_folder)
         if not playlist_folder:
             if parent_folder:
                 playlist_folder = parent_folder.add_playlist_folder(folder_name)
             else:
-                playlist_folder = self._rekordbox_xml.add_playlist_folder(folder_name)
+                playlist_folder = rekordbox_xml.add_playlist_folder(folder_name)
         if not folder_names:
             return playlist_folder
         else:
             return self._create_playlist_folders(
+                rekordbox_xml,
                 folder_names,
                 playlist_folder
             )
 
-    def get_all_xml_playlists(self) -> List[Node]:
-        all_playlists: List[Node] = self._rekordbox_xml.root_playlist_folder.get_playlists()
+    def get_all_xml_playlists(self, rekordbox_xml: RekordboxXml) -> List[Node]:
+        all_playlists: List[Node] = rekordbox_xml.root_playlist_folder.get_playlists()
         return all_playlists
 
-    def get_playlist(self, name: str) -> Optional[Node]:
+    def get_playlist(self, rekordbox_xml: RekordboxXml, name: str) -> Optional[Node]:
         try:
-            playlist = self._rekordbox_xml.get_playlist(name)
+            playlist = rekordbox_xml.get_playlist(name)
             # force an exception if the playlist does not exist
             str(playlist)
             assert playlist.is_playlist
@@ -248,9 +249,9 @@ class RekordboxXMLOrchestrator:
             playlist = None
         return playlist
 
-    def get_all_xml_tracks(self) -> List[SubBoxTrack]:
+    def get_all_xml_tracks(self, rekordbox_xml: RekordboxXml) -> List[SubBoxTrack]:
         all_tracks = []
-        for rekordbox_track in self._rekordbox_xml.get_tracks():
+        for rekordbox_track in rekordbox_xml.get_tracks():
             all_tracks.append(
                 SubBoxTrack(
                     name=rekordbox_track.Name,
@@ -265,8 +266,8 @@ class RekordboxXMLOrchestrator:
             )
         return all_tracks
 
-    def save_xml(self, xml_output_path: Path):
-        tree = ElementTree(self._rekordbox_xml._root)
+    def save_xml(self, rekordbox_xml: RekordboxXml, xml_output_path: Path):
+        tree = ElementTree(rekordbox_xml._root)
         indent(tree, space="\t", level=0)
         tree.write(xml_output_path, encoding='utf-8', xml_declaration=True)
         logger.info(f'saved xml to {xml_output_path}')

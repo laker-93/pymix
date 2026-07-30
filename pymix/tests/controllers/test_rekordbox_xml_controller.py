@@ -62,7 +62,10 @@ async def test_set_metadata_from_xml_skips_tracks_with_no_rating(container):
     mock_rekordbox_xml_orchestrator.get_all_xml_tracks = mock.MagicMock(
         return_value=[unrated_track, rated_track]
     )
-    mock_rekordbox_xml_orchestrator._rekordbox_xml.get_tracks = mock.MagicMock(return_value=[])
+    # the parsed XML is now request-scoped: passed explicitly rather than read off
+    # the orchestrator instance (regression test setup for #59)
+    mock_rekordbox_xml = mock.MagicMock()
+    mock_rekordbox_xml.get_tracks = mock.MagicMock(return_value=[])
 
     with container.subsonic_orchestrator.override(
             mock_subsonic_orchestrator
@@ -70,7 +73,7 @@ async def test_set_metadata_from_xml_skips_tracks_with_no_rating(container):
         mock_rekordbox_xml_orchestrator
     ):
         rekordbox_xml_controller = await container.rekordbox_xml_controller()
-        await rekordbox_xml_controller._set_metadata_from_xml({'username': 'demoadmin'}, None)
+        await rekordbox_xml_controller._set_metadata_from_xml({'username': 'demoadmin'}, mock_rekordbox_xml, None)
 
     mock_subsonic_orchestrator.set_ratings.assert_awaited_once_with(
         {'username': 'demoadmin'}, [rated_track]
