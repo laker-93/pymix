@@ -366,20 +366,23 @@ class RekordboxXMLController:
         # todo this could be made a context manager to create, update then save the xml
         rekordbox_xml = self._rekordbox_xml_orchestrator.create_xml(xml_path)
 
-        subsonic_playlists = await self._subsonic_orchestrator.get_subsonic_playlists(user)
+        # Scope to playlist_ids at the fetch itself — get_subsonic_playlists only
+        # fetches tracks for playlists that match, instead of fetching every one of
+        # the user's playlists and discarding all but the requested few (this used
+        # to make a single-playlist export pay for every OTHER playlist's fetch too;
+        # see laker-93/pymix#66 follow-up).
+        id_set = set(playlist_ids) if playlist_ids else None
+        subsonic_playlists = await self._subsonic_orchestrator.get_subsonic_playlists(user, id_set)
         if not subsonic_playlists:
             logger.info(f'no subsonic playlists found for user')
 
         if subsonic_playlists:
-            if playlist_ids:
-                id_set = set(playlist_ids)
-                logger.info(f'export: {len(subsonic_playlists)} playlists before filtering: {[(p.name, p.subsonic_id) for p in subsonic_playlists]}')
-                subsonic_playlists = [p for p in subsonic_playlists if p.subsonic_id in id_set]
+            if id_set:
                 matched_ids = {p.subsonic_id for p in subsonic_playlists}
                 unmatched_ids = id_set - matched_ids
                 if unmatched_ids:
                     logger.error(f'export: requested playlist ids not found: {unmatched_ids}')
-                logger.info(f'export: {len(subsonic_playlists)} playlists after filtering: {[(p.name, p.subsonic_id) for p in subsonic_playlists]}')
+                logger.info(f'export: {len(subsonic_playlists)} playlists matched requested ids: {[(p.name, p.subsonic_id) for p in subsonic_playlists]}')
             # sort the playlists by name so duplicate folders of the same name are not created
             subsonic_playlists.sort(key=lambda playlist: playlist.name)
             # Enrich subsonic playlists with stored path_components for lossless folder reconstruction

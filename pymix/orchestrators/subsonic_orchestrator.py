@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import os
 from typing import List, Set, AsyncIterator, Optional
 
 from pymix.clients.subsonic_client import SubsonicClient
@@ -7,26 +9,49 @@ from pymix.model.subboxtrack import SubBoxTrack
 
 logger = logging.getLogger(__name__)
 
+# Cap on concurrent get_playlist_tracks calls when fetching multiple playlists at
+# once (mirrors sync.py's MATCH_TRACKS_CONCURRENCY). Each playlist's tracks used to
+# be fetched one at a time in a sequential loop, so a user with e.g. 32 playlists
+# paid 32 sequential Subsonic round trips even when only one playlist's tracks were
+# actually needed (Rekordbox/Serato export) — see laker-93/pymix#66 follow-up.
+SUBSONIC_PLAYLIST_FETCH_CONCURRENCY = int(os.environ.get("SUBSONIC_PLAYLIST_FETCH_CONCURRENCY", "16"))
+
 
 class SubsonicOrchestrator:
     def __init__(self, subsonic_client: SubsonicClient):
         self._subsonic_client = subsonic_client
 
-    async def _get_subsonic_playlists(self, user: dict) -> Optional[List[SubBoxPlaylist]]:
+    async def _get_subsonic_playlists(
+        self, user: dict, playlist_ids: Optional[Set[str]] = None
+    ) -> Optional[List[SubBoxPlaylist]]:
         """
         Creates internal view of the playlists and their tracks found in navirdome.
+
+        playlist_ids, when given, scopes both which playlists are returned AND whose
+        tracks get fetched — the caller doesn't pay for track fetches on playlists
+        it's only going to discard. The remaining fetches run concurrently (bounded)
+        rather than one at a time, since each is an independent round trip.
         :return:
         """
         playlists = await self._subsonic_client.get_playlists(user)
-        # get all playlists to find their ids.
-        # for each playlist, get the playlist and iterate through to find the tracks
-        if playlists:
-            for playlist in playlists:
+        if not playlists:
+            return playlists
+        if playlist_ids is not None:
+            playlists = [p for p in playlists if p.subsonic_id in playlist_ids]
+
+        semaphore = asyncio.Semaphore(SUBSONIC_PLAYLIST_FETCH_CONCURRENCY)
+
+        async def fetch_tracks(playlist: SubBoxPlaylist) -> None:
+            async with semaphore:
                 playlist.tracks = await self._subsonic_client.get_playlist_tracks(user, playlist.subsonic_id)
+
+        await asyncio.gather(*(fetch_tracks(p) for p in playlists))
         return playlists
 
-    async def get_subsonic_playlists(self, user: dict) -> Optional[List[SubBoxPlaylist]]:
-        subsonic_playlists = await self._get_subsonic_playlists(user)
+    async def get_subsonic_playlists(
+        self, user: dict, playlist_ids: Optional[Set[str]] = None
+    ) -> Optional[List[SubBoxPlaylist]]:
+        subsonic_playlists = await self._get_subsonic_playlists(user, playlist_ids)
         return subsonic_playlists
 
     async def get_subsonic_tracks(self, user: dict) -> List[SubBoxTrack]:
