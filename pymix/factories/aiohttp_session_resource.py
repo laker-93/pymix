@@ -7,7 +7,7 @@ import aiohttp
 # than falling back to it. On this singleton, session-wide session, that lets a
 # single stuck connection (dropped socket, stuck handshake, pool contention) hang
 # a caller forever with no exception -- see pymix issue #49.
-REQUEST_TIMEOUT_SECONDS = 30
+REQUEST_TIMEOUT_SECONDS = 300
 
 
 async def init_aiohttp_session(auth=None, connector=None) -> Iterator[aiohttp.ClientSession]:
