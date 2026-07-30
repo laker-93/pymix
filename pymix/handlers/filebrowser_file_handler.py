@@ -188,6 +188,15 @@ class FileBrowserFileHandler:
         xml_path.unlink(missing_ok=True)
         return xml_path
 
+    def get_downloads_dir(self, username: str) -> Path:
+        """The directory sync/rekordbox exports are written to for this user.
+
+        Read-only lookup (unlike get_xml_output_path/get_crate_output_path, this
+        doesn't create the directory) — used by /sync/download to resolve a
+        filename to stream back, where a missing directory should just mean 404.
+        """
+        return Path(self._filebrowser_data_path_downloads.format(user=username))
+
     def get_crate_output_path(self, username: str) -> Path:
         src_path = Path(
             self._filebrowser_data_path_downloads.format(user=username)
