@@ -5,6 +5,7 @@ from typing import Dict, Annotated, List, Tuple, Optional
 
 from dependency_injector.wiring import Provide, inject
 from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi.responses import FileResponse
 from anyio import to_process
 from pydantic import BaseModel, field_validator
 
@@ -766,3 +767,42 @@ async def sync_playlists(
         "zipPath": zip_path,
         "reason": reason
     }
+
+
+@router.get("/sync/download/{filename}", tags=["sync"])
+@inject
+async def sync_download(
+        filename: str,
+        user: dict = Depends(require_reader),
+        fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
+) -> FileResponse:
+    """Stream a file previously written by /sync/playlists or /rekordbox/export.
+
+    Exists so the client can fetch its download through the pymix session it
+    already has, rather than filebrowser directly. That matters for `demo`:
+    require_reader resolves it to demoadmin so the file (already written under
+    demoadmin's downloads dir) is reachable here, but `demo` only ever has its
+    own (unrelated) filebrowser credential — a direct filebrowser fetch 404s.
+    See issue #66.
+    """
+    username = user["username"]
+    downloads_dir = fb_file_handler.get_downloads_dir(username).resolve()
+    # filename is client-controlled; resolve() + is_relative_to guards against
+    # path traversal (e.g. "../../etc/passwd") regardless of how a "/" ends up
+    # in it (a literal segment separator can't reach this far, but a decoded
+    # one from the ASGI server could).
+    requested_path = (downloads_dir / filename).resolve()
+    if requested_path != downloads_dir and downloads_dir not in requested_path.parents:
+        raise HTTPException(status_code=404, detail="file not found")
+
+    if not requested_path.is_file():
+        logger.info(
+            "sync_download not_found: user=%s filename=%s path=%s",
+            username,
+            filename,
+            requested_path,
+        )
+        raise HTTPException(status_code=404, detail="file not found")
+
+    logger.info("sync_download: user=%s filename=%s", username, filename)
+    return FileResponse(path=requested_path, filename=filename)
