@@ -371,8 +371,21 @@ async def sync_plan(
             summary["downloadSizeBytes"] += file_size
 
     if request.playlists:
-        for playlist in request.playlists:
-            playlist_tracks = await subsonic_client.get_playlist_tracks(user, playlist["id"])
+        # Fetch every requested playlist's tracks concurrently — each is an
+        # independent Subsonic round trip, so selecting many playlists (e.g.
+        # "Select all") used to pay for them one at a time in sequence. Processing
+        # stays sequential below since _process_server_tracks mutates shared state
+        # (summary/tracks/etc.) that isn't safe to touch from concurrent tasks.
+        semaphore = asyncio.Semaphore(MATCH_TRACKS_CONCURRENCY)
+
+        async def fetch_playlist_tracks(playlist: Dict[str, str]):
+            async with semaphore:
+                return playlist, await subsonic_client.get_playlist_tracks(user, playlist["id"])
+
+        fetched_playlists = await asyncio.gather(
+            *(fetch_playlist_tracks(playlist) for playlist in request.playlists)
+        )
+        for playlist, playlist_tracks in fetched_playlists:
             logger.info(
                 "sync_plan playlist: user=%s playlist_id=%s playlist_name=%s server_tracks=%s",
                 username,
@@ -623,8 +636,19 @@ async def sync_playlists(
     server_subbox_ids_seen: set[str] = set()
     subbox_id_tagged_missing: set[str] = set()
 
-    for playlist in request.playlists:
-        playlist_tracks = await subsonic_client.get_playlist_tracks(user, playlist["id"])
+    # Fetch every requested playlist's tracks concurrently, same as sync_plan —
+    # each is an independent Subsonic round trip. The per-playlist processing below
+    # stays sequential since it mutates shared state (all_tracks, the *_seen sets).
+    semaphore = asyncio.Semaphore(MATCH_TRACKS_CONCURRENCY)
+
+    async def fetch_playlist_tracks(playlist: Dict[str, str]):
+        async with semaphore:
+            return playlist, await subsonic_client.get_playlist_tracks(user, playlist["id"])
+
+    fetched_playlists = await asyncio.gather(
+        *(fetch_playlist_tracks(playlist) for playlist in request.playlists)
+    )
+    for playlist, playlist_tracks in fetched_playlists:
         matched_server_track_ids: set[int] = set()
 
         # Local tracks tagged with a subboxId are matched directly against the
