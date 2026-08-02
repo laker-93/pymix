@@ -13,6 +13,10 @@ naming them. It has been removed — `username` now appears only where it is an 
 rather than a claim of identity (`/user/create`, `/user/login`, and the `[db]` lookup
 helpers).
 
+`POST /invite-request` is the sole exception — an unauthenticated write, because its
+caller has no account by definition. See "Beta invites" below for the controls that
+replace the session cookie there; don't treat it as a precedent for anything else.
+
 All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 
 ## Users & sessions — `routers/user.py`
@@ -67,6 +71,33 @@ All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 | POST `/track/metadata/update` | Versioned update of a track's cue/loop metadata (`cuedata` validated against `cue_schema`). `source_app` ∈ {serato, rekordbox}, `change_type` ∈ {upload, edit, sync, merge}. |
 | GET `/track/metadata/{track_id}` | Fetch latest cue/loop metadata for a track. |
 | DELETE `/track` | Delete tracks (by `subbox_id` list) from DB tables + remove from beets. |
+
+## Beta invites — `routers/invite_request.py`
+| Method/Path | Purpose |
+|---|---|
+| POST `/invite-request` | **Unauthenticated.** Capture a prospective beta tester: `{email, dj_software, dj_software_other?}` where `dj_software` ∈ {rekordbox, serato, other}. Upserts on email; always returns `{"status": "ok"}`. |
+
+The one route that must not resolve a caller: it exists precisely to capture someone with
+no account (the demo → beta funnel, subbox-app#69), so `require_user` cannot apply. What
+that costs, and how it's paid for:
+
+- **Abuse controls replace the cookie.** A per-IP cap (`check_rate_limit`, 5/hour) and a
+  4 KB body cap, both in `routers/invite_request.py`. The IP comes from the *rightmost*
+  `X-Forwarded-For` entry — Traefik appends the peer it saw, so anything further left is
+  client-supplied. The limiter is in-process, so it resets on restart; it's a speed bump,
+  not a security boundary. No captcha until it's actually abused.
+- **400, not 422.** The body is parsed by a `Depends(parse_invite_request)` rather than a
+  `body:` parameter, so bad input comes back as one flat 400 the client can render inline
+  against the email field (and so the size cap runs before anything is parsed).
+- **No membership oracle.** The response is identical whether the address was new or
+  already on the list, and `create_invite_request` returns nothing, so the route can't
+  leak who has signed up.
+
+There is deliberately **no listing endpoint** — pymix has no HTTP admin-auth pattern and
+inventing one for this isn't worth it. Fulfilment is manual: read `invite_request_table`,
+mint a `user_token_table` row, then set the request's `status` to `invited`/`declined` by
+hand. If that becomes routine, add a script under `scripts/` rather than an
+unauthenticated route.
 
 ## Conventions for adding an endpoint
 1. Put the route in the topical router (or create a new module and register it — see

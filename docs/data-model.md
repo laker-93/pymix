@@ -26,6 +26,7 @@
 | `user_job_table` | `UserJobRow` | user_id, job_id | Links a user to their jobs. |
 | `job_table` | `JobRow` | job_id, name (import/export), counts, in_progress, result | Drives the import/export progress endpoints. At most one in-progress job per user (asserted). |
 | `playlist_path_table` | `PlaylistPathRow` | user_id, display_name, path_components (JSON) | Stores a playlist's folder path components so export can rebuild nested folder structure losslessly (Subsonic playlists are flat). Added in migration 002. |
+| `invite_request_table` | `InviteRequestRow` | email (unique), dj_software, dj_software_other, status, created_at, updated_at | Beta-invite requests from the demo/landing funnel. **The only table with no `user_id`** — the requester has no account yet. Written by the unauthenticated `POST /invite-request` as an upsert on email. `status` (`new`/`invited`/`declined`) is set by hand: fulfilment is a human reading the table and minting a `user_token_table` row. Added in migration 015. |
 
 ## Domain models (not DB rows)
 

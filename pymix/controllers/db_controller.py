@@ -5,13 +5,15 @@ import datetime
 from pathlib import Path
 from typing import Optional, Dict
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from pymix.model.db_tables import (
     UserRow, SessionRow, SubboxBeetsMapRow, LibraryRow,
     MetaHistoryRow, UserJobRow, JobRow, OriginalTrackMetaRow, UserTokenRow,
-    PlaylistPathRow, WishlistRow,
+    PlaylistPathRow, WishlistRow, InviteRequestRow,
 )
+from pymix.model.invite_request import InviteRequestStatus
 from pymix.model.original_track_meta import OriginalTracks
 from pymix.model.wishlist import MetadataSource, ResolveState, WishlistStatus
 from pymix.utils.get_available_port import get_available_port
@@ -902,6 +904,68 @@ class DbController:
                 .all()
             )
             return [_row_to_dict(r) for r in rows]
+
+    def create_invite_request(
+            self,
+            email: str,
+            dj_software: str,
+            dj_software_other: Optional[str] = None,
+    ) -> None:
+        """Record (or refresh) a beta-invite request.
+
+        Upsert on the normalised email rather than insert: someone re-submitting the form
+        — because they changed their answer, or just weren't sure it went through — must
+        not see an error, so a second submission refreshes ``dj_software`` and
+        ``updated_at`` in place. ``status`` is deliberately left alone, so re-submitting
+        can't quietly reopen a request already worked as ``invited``/``declined``.
+
+        Returns nothing on purpose: the route must not leak whether the address was
+        already on the list (see ``routers/invite_request.py``).
+        """
+        normalised_email = email.strip().lower()
+        now = datetime.datetime.now().timestamp()
+
+        with self._session_factory() as session:
+            existing = session.query(InviteRequestRow).filter(
+                InviteRequestRow.email == normalised_email
+            ).first()
+
+            if existing:
+                existing.dj_software = dj_software
+                existing.dj_software_other = dj_software_other
+                existing.updated_at = now
+                session.commit()
+                logger.info("Refreshed invite request for %s", normalised_email)
+                return
+
+            session.add(
+                InviteRequestRow(
+                    email=normalised_email,
+                    dj_software=dj_software,
+                    dj_software_other=dj_software_other,
+                    status=InviteRequestStatus.NEW.value,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            try:
+                session.commit()
+            except IntegrityError:
+                # Two submissions of the same new address raced the SELECT above. The
+                # unique constraint is the real arbiter; the loser just becomes the
+                # refresh path, so the caller still sees a plain success.
+                session.rollback()
+                row = session.query(InviteRequestRow).filter(
+                    InviteRequestRow.email == normalised_email
+                ).one()
+                row.dj_software = dj_software
+                row.dj_software_other = dj_software_other
+                row.updated_at = now
+                session.commit()
+                logger.info("Refreshed invite request for %s (raced insert)", normalised_email)
+                return
+
+            logger.info("Recorded invite request for %s (%s)", normalised_email, dj_software)
 
     def resolve_wishlist_item(self, wishlist_id: str, updates: dict) -> Optional[dict]:
         """Apply a resolve-loop update atomically, but only while the item is still
