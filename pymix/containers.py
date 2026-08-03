@@ -5,6 +5,7 @@ from pyserato.builder import Builder
 from dependency_injector import containers, providers
 
 from pymix.clients.beets_client import BeetsClient
+from pymix.clients.beets_exec import BeetsExec
 from pymix.clients.navidrome_client import NavidromeClient
 from pymix.clients.subsonic_client import SubsonicClient
 from pymix.controllers.db_controller import DbController
@@ -83,6 +84,12 @@ class Container(containers.DeclarativeContainer):
         DockerEnvFileHandler,
     )
 
+    # Singleton: the per-container write-lock dict it owns must be shared by
+    # every controller that execs into a beets container, in one process (#73).
+    beets_exec = providers.Singleton(
+        BeetsExec,
+    )
+
     services_orchestrator = providers.Singleton(
         ServicesOrchestrator,
         db_controller,
@@ -141,6 +148,7 @@ class Container(containers.DeclarativeContainer):
         config.rekordbox.restored_rb_output_root,
         config.local_user_music_stem,
         config.containers.subsonic.serving_music_path_base,
+        beets_exec,
     )
 
     serato_crate_orchestrator = providers.Singleton(
@@ -167,11 +175,13 @@ class Container(containers.DeclarativeContainer):
         db_controller,
         wishlist_reconcile_service,
         config.containers.subsonic.serving_music_path_base,
+        beets_exec,
     )
 
     beets_client = providers.Singleton(
         BeetsClient,
-        app_env=config.app_env
+        app_env=config.app_env,
+        beets_exec=beets_exec,
     )
 
     youtube_match_service = providers.Singleton(
