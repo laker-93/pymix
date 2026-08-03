@@ -114,7 +114,7 @@ class SeratoController:
         # beets config set to quiet mode and fallback of 'asis'. If user needs to correct later, they will have to
         # specify a musicbrainz id and re import with a specific query. This will need a separate API to be implemented.
         logger.info(f'starting beets import for {username}')
-        beets_command = f"beet import --group-albums --set user={username} -q /downloads"
+        beets_command = f"beet import -A --group-albums --set user={username} --set automatch_state=pending /downloads"
         # One lock for the whole job (import -> duplicates -> subbox_id map),
         # shared with RekordboxXMLController via the same injected BeetsExec
         # singleton so a serato and a rekordbox import for the same user's
