@@ -1,7 +1,8 @@
 import logging
 
 import anyio
-from python_on_whales import docker
+
+from pymix.clients.beets_exec import BeetsExec
 
 logger = logging.getLogger(__name__)
 
@@ -15,8 +16,9 @@ class BeetsClient:
     DO droplet running one beets container per user.
     """
 
-    def __init__(self, app_env):
+    def __init__(self, app_env, beets_exec: BeetsExec):
         self._app_env = app_env
+        self._beets_exec = beets_exec
 
     async def get_number_of_tracks(self, user: dict, public: bool = False) -> int:
         username = '' if public else user['username']
@@ -25,8 +27,9 @@ class BeetsClient:
     def _get_number_of_tracks(self, username: str, public: bool) -> int:
         container_name = "beets" if public else f"beets{username}"
         beets_command = "beet stats"
-        logger.info(f'running beet stats command {beets_command} on container {container_name}')
-        result = docker.execute(container_name, beets_command.split())
+        # a read: no write_lock — safe to run concurrently with an in-flight
+        # import, which is exactly what the progress-bar poll needs (#73)
+        result = self._beets_exec.execute(container_name, beets_command)
         return self._parse_track_count(result)
 
     @staticmethod

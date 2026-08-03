@@ -9,9 +9,9 @@ import mediafile
 import music_tag
 from beets.plugins import BeetsPlugin
 from beets.library import Item
-from python_on_whales import docker
 from pyrekordbox.rbxml import RekordboxXml
 
+from pymix.clients.beets_exec import BeetsExec
 from pymix.clients.subsonic_client import SubsonicClient
 from pymix.controllers.db_controller import DbController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
@@ -59,7 +59,8 @@ class RekordboxXMLController:
             wishlist_reconcile_service: WishlistReconcileService,
             restored_db_output_root: str,
             local_user_music_stem: str,
-            serving_music_path_base: str
+            serving_music_path_base: str,
+            beets_exec: BeetsExec,
     ):
         self._subsonic_orchestrator = subsonic_orchestrator
         self._rekordbox_xml_orchestrator = rekordbox_xml_orchestrator
@@ -71,6 +72,7 @@ class RekordboxXMLController:
         self._subsonic_client = subsonic_client
         self._local_user_music_stem = local_user_music_stem
         self._serving_music_path_base = serving_music_path_base
+        self._beets_exec = beets_exec
 
     def _create_rekordbox_xml_playlist(self, user_root: str, user: dict, subsonic_playlist: SubBoxPlaylist, rekordbox_xml: RekordboxXml):
         """
@@ -92,9 +94,9 @@ class RekordboxXMLController:
         """
         """
         container_name = "beets" if public else f"beets{username}"
-        beets_command = f"beet duplicates -d"
-        logger.info(f'running beet duplicates command {beets_command}')
-        result = docker.execute(container_name, beets_command.split())
+        beets_command = "beet duplicates -d"
+        with self._beets_exec.write_lock(container_name):
+            result = self._beets_exec.execute(container_name, beets_command)
         logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
         return result.split('\n')
 
@@ -105,9 +107,8 @@ class RekordboxXMLController:
 
     def get_path_by_subbox_id(self, username: str, subbox_id: str, public: bool) -> Path:
         container_name = "beets" if public else f"beets{username}"
-        beets_command = f" beet ls -p subbox_id::{subbox_id}"
-        logger.info(f'running beet duplicates command {beets_command}')
-        result = docker.execute(container_name, beets_command.split())
+        beets_command = f"beet ls -p subbox_id::{subbox_id}"
+        result = self._beets_exec.execute(container_name, beets_command)
         logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
         path = Path(result)
         return path
@@ -138,10 +139,12 @@ class RekordboxXMLController:
         """
         if not subbox_ids:
             return set()
+        return await anyio.to_thread.run_sync(self._get_present_subbox_ids, username, subbox_ids, public)
+
+    def _get_present_subbox_ids(self, username: str, subbox_ids: List[str], public: bool) -> set:
         container_name = "beets" if public else f"beets{username}"
         beets_command = ["beet", "list", "-f", "$subbox_id", *self._subbox_id_or_query(subbox_ids)]
-        logger.info(f'running beet command {beets_command} on container {container_name}')
-        result = docker.execute(container_name, beets_command)
+        result = self._beets_exec.execute(container_name, beets_command)
         found = {line.strip() for line in result.splitlines() if line.strip()}
         # Intersect with the requested set so a partial-tag match can never widen it.
         return found & set(subbox_ids)
@@ -156,10 +159,13 @@ class RekordboxXMLController:
         """
         if not subbox_ids:
             return
+        await anyio.to_thread.run_sync(self._remove_tracks, username, subbox_ids, public)
+
+    def _remove_tracks(self, username: str, subbox_ids: List[str], public: bool):
         container_name = "beets" if public else f"beets{username}"
         beets_command = ["beet", "rm", "-df", *self._subbox_id_or_query(subbox_ids)]
-        logger.info(f'running beet command {beets_command} on container {container_name}')
-        result = docker.execute(container_name, beets_command)
+        with self._beets_exec.write_lock(container_name):
+            result = self._beets_exec.execute(container_name, beets_command)
         logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
 
 
@@ -167,9 +173,8 @@ class RekordboxXMLController:
         """
         """
         container_name = "beets" if public else f"beets{username}"
-        beets_command = f"beet duplicates -p"
-        logger.info(f'running beet duplicate command {beets_command}')
-        result = docker.execute(container_name, beets_command.split())
+        beets_command = "beet duplicates -p"
+        result = self._beets_exec.execute(container_name, beets_command)
         logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
         if not result:
             return
@@ -203,11 +208,10 @@ class RekordboxXMLController:
         container_name = "beets" if public else f"beets{username}"
 
         # 1️⃣ Run beets command to get all tracks missing subbox_id
-        beets_command = f"beet list -f $id:$path subbox_id::^$"
-        logger.info(f'running beet command {beets_command}')
+        beets_command = "beet list -f $id:$path subbox_id::^$"
         # detach to avoid returning potentially large stdout from the docker logs.
         # Instead logs are streamed incrementally
-        log_iter = docker.execute(container_name, beets_command.split(), stream=True)
+        log_iter = self._beets_exec.execute(container_name, beets_command, stream=True)
         beet_entries: List[tuple[int, str]] = []
         # 2️⃣ Parse beet_id:path pairs from command output
         for log_type, log in log_iter:
@@ -250,10 +254,9 @@ class RekordboxXMLController:
 
             # 5 Run beets command to write subbox_id tag to track
             beets_command = f"beet modify -y id:{beet_id} subbox_id={subbox_id}"
-            logger.info(f'running beet command {beets_command}')
             # detach to avoid returning potentially large stdout from the docker logs.
             # Instead logs are streamed incrementally
-            log_iter = docker.execute(container_name, beets_command.split(), stream=True)
+            log_iter = self._beets_exec.execute(container_name, beets_command, stream=True)
             for log_type, log in log_iter:
                 line = log.decode()
                 logger.info(f'{log_type}: {line}')
@@ -329,34 +332,38 @@ class RekordboxXMLController:
         # group-albums to allow importing correctly tracks with different album tags.
         beets_command = f"beet import --group-albums --set user={username} --set public={public} -q /downloads"
         logger.info(f'running beet import command {beets_command}')
-        try:
-            # detach to avoid returning potentially large stdout from the docker logs.
-            # Instead logs are streamed incrementally
-            log_iter = docker.execute(f"beets{username}", beets_command.split(), stream=True)
-            for log_type, log in log_iter:
-                logger.info(f'{log_type}: {log.decode()}')
-        except Exception:
-            logger.exception('beets import failed')
-            raise
-        else:
-            logger.info(f"finished beets command {beets_command} for {username}")
-            # Debug: log SUBBOX_ID tags on imported files after beets import
-            #music_dir = Path(f'{self._serving_music_path_base}/{username}')
-            #self._log_subbox_id_tags(music_dir, 'POST-BEETS')
-            # 9. on success, remove the directory of the beets import
-            logger.info(f'starting post import clean up for {username}')
-            # todo - inject public in from router
-            self._rb_backup_file_handler.clean_up_beets_import_tree(username, False)
-        finally:
-            # we want to handle the meta data regardless as we could have had some files that were successfully imported
-            # in those cases, we want to handle the meta data so they are skipped on next import attempt
-            # set permissions so navidrome can read - todo: remove this by running pymix as non root
-            #src_dir = self._serving_music_path_base.format(user=username)
-            #make_readable(Path(src_dir))
-            # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
-            # todo move this logic out of the rb xml controller
-            self._get_duplicates(username, False)
-            self._map_subbox_id_beet_id(username, False)
+        # One lock for the whole job (import -> duplicates -> subbox_id map): a
+        # future automatch sweep or a concurrent watch-cycle for the same user
+        # must not interleave between these steps (#73).
+        with self._beets_exec.write_lock(f"beets{username}"):
+            try:
+                # detach to avoid returning potentially large stdout from the docker logs.
+                # Instead logs are streamed incrementally
+                log_iter = self._beets_exec.execute(f"beets{username}", beets_command, stream=True)
+                for log_type, log in log_iter:
+                    logger.info(f'{log_type}: {log.decode()}')
+            except Exception:
+                logger.exception('beets import failed')
+                raise
+            else:
+                logger.info(f"finished beets command {beets_command} for {username}")
+                # Debug: log SUBBOX_ID tags on imported files after beets import
+                #music_dir = Path(f'{self._serving_music_path_base}/{username}')
+                #self._log_subbox_id_tags(music_dir, 'POST-BEETS')
+                # 9. on success, remove the directory of the beets import
+                logger.info(f'starting post import clean up for {username}')
+                # todo - inject public in from router
+                self._rb_backup_file_handler.clean_up_beets_import_tree(username, False)
+            finally:
+                # we want to handle the meta data regardless as we could have had some files that were successfully imported
+                # in those cases, we want to handle the meta data so they are skipped on next import attempt
+                # set permissions so navidrome can read - todo: remove this by running pymix as non root
+                #src_dir = self._serving_music_path_base.format(user=username)
+                #make_readable(Path(src_dir))
+                # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
+                # todo move this logic out of the rb xml controller
+                self._get_duplicates(username, False)
+                self._map_subbox_id_beet_id(username, False)
 
 
     async def create_rekordbox_xml_from_subsonic_playlists(
@@ -433,31 +440,34 @@ class RekordboxXMLController:
         # group-albums to allow importing correctly tracks with different album tags.
         beets_command = f"beet import --group-albums --set user={username} -q /downloads"
         logger.info(f'running beet import command {beets_command}')
-        try:
-            # detach to avoid returning potentially large stdout from the docker logs.
-            # Instead logs are streamed incrementally
-            log_iter = docker.execute(f"beets{username}", beets_command.split(), stream=True)
-            for log_type, log in log_iter:
-                logger.info(f'{log_type}: {log.decode()}')
-        except Exception:
-            logger.exception('beets import failed')
-            raise
-        else:
-            logger.info(f"finished beets command {beets_command} for {username}")
-            # 9. on success, remove the directory of the beets import
-            logger.info(f'starting post import clean up for {username}')
-            # todo - inject public in from router
-            self._rb_backup_file_handler.clean_up_beets_import_tree(username, False)
-        finally:
-            # we want to handle the meta data regardless as we could have had some files that were successfully imported
-            # in those cases, we want to handle the meta data so they are skipped on next import attempt
-            # set permissions so navidrome can read - todo: remove this by running pymix as non root
-            #src_dir = self._serving_music_path_base.format(user=username)
-            #make_readable(Path(src_dir))
-            # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
-            # todo move this logic out of the rb xml controller
-            self._get_duplicates(username, False)
-            self._map_subbox_id_beet_id(username, False)
+        # One lock for the whole job (import -> duplicates -> subbox_id map): see
+        # the matching comment in _consume_from_filebrowser (#73).
+        with self._beets_exec.write_lock(f"beets{username}"):
+            try:
+                # detach to avoid returning potentially large stdout from the docker logs.
+                # Instead logs are streamed incrementally
+                log_iter = self._beets_exec.execute(f"beets{username}", beets_command, stream=True)
+                for log_type, log in log_iter:
+                    logger.info(f'{log_type}: {log.decode()}')
+            except Exception:
+                logger.exception('beets import failed')
+                raise
+            else:
+                logger.info(f"finished beets command {beets_command} for {username}")
+                # 9. on success, remove the directory of the beets import
+                logger.info(f'starting post import clean up for {username}')
+                # todo - inject public in from router
+                self._rb_backup_file_handler.clean_up_beets_import_tree(username, False)
+            finally:
+                # we want to handle the meta data regardless as we could have had some files that were successfully imported
+                # in those cases, we want to handle the meta data so they are skipped on next import attempt
+                # set permissions so navidrome can read - todo: remove this by running pymix as non root
+                #src_dir = self._serving_music_path_base.format(user=username)
+                #make_readable(Path(src_dir))
+                # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
+                # todo move this logic out of the rb xml controller
+                self._get_duplicates(username, False)
+                self._map_subbox_id_beet_id(username, False)
 
     async def create_subsonic_playlists_from_xml(
             self,
@@ -504,6 +514,24 @@ class RekordboxXMLController:
                     result.append(p)
                     break
         return result
+
+    def _modify_bpm(self, username: str, subbox_id: str, bpm: int, pymix_path: Path):
+        beets_command = f"beet modify -y subbox_id:{subbox_id} bpm={bpm}"
+        container_name = f"beets{username}"
+        try:
+            with self._beets_exec.write_lock(container_name):
+                log_iter = self._beets_exec.execute(container_name, beets_command, stream=True)
+                for log_type, log in log_iter:
+                    line = log.decode()
+                    logger.info(f'{log_type}: {line}')
+        except Exception:
+            # if the logic to set the subbox_id tag in beets db failed in
+            # the import step (e.g. because the logic to parse the path from
+            # the output of beet ls failed) then the above beet modify step
+            # will fail as beets is unaware of any track with that
+            # subbox_id. The fix here is to fix the logic of parsing the
+            # correct path from the beet ls output during import stage.
+            logger.exception("Failed to execute beets command for %s", pymix_path)
 
     async def _set_data_from_xml(self, user: dict, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None):
         # todo make this logic more similar to serato_controller where subbox_id is used for look up
@@ -555,23 +583,9 @@ class RekordboxXMLController:
                 logger.info(f"No AverageBpm in XML for track {track.Name}, skipping bpm update.")
             else:
                 # doesn't support float value for bpm so convert to int
-                beets_command = f"beet modify -y subbox_id:{subbox_id} bpm={int(track.AverageBpm)}"
-
-                container_name = f"beets{user['username']}"
-                log_iter = docker.execute(container_name, beets_command.split(), stream=True)
-                try:
-                    for log_type, log in log_iter:
-                        line = log.decode()
-                        logger.info(f'{log_type}: {line}')
-                except Exception:
-                    # if the logic to set the subbox_id tag in beets db failed in
-                    # the import step (e.g. because the logic to parse the path from
-                    # the output of beet ls failed) then the above beet modify step
-                    # will fail as beets is unaware of any track with that
-                    # subbox_id. The fix here is to fix the logic of parsing the
-                    # correct path from the beet ls output during import stage.
-                    logger.exception("Failed to execute beets command for %s",
-                    track_match.pymix_path)
+                await anyio.to_thread.run_sync(
+                    self._modify_bpm, user['username'], subbox_id, int(track.AverageBpm), track_match.pymix_path
+                )
             #logger.info(f"Mapped subbox_id={subbox_id} → beet_id={beet_id}")
             # todo create pydantic model for cues and attack to subbox track and pass this to the db controller
             self._db_controller.update_metadata(
