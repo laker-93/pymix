@@ -100,7 +100,7 @@ class SheetSyncService:
         logger.debug(f"sheet sync: syncing user {username} sheet={sheet_id}")
 
         try:
-            rows = self._google_sheets_service.read_rows(sheet_id)
+            rows = await self._google_sheets_service.read_rows(sheet_id)
         except Exception as e:
             logger.exception(f"sheet sync: failed to read sheet for user {username}")
             error_message = (
@@ -116,7 +116,7 @@ class SheetSyncService:
         status = "ok"
         error_message = None
         try:
-            self._google_sheets_service.check_write_access(sheet_id)
+            await self._google_sheets_service.check_write_access(sheet_id)
             self._db_controller.update_wishlist_sheet_status(username=username, status="ok", error=None)
         except Exception as e:
             error_message = (
@@ -167,7 +167,7 @@ class SheetSyncService:
                     f"sheet sync: row {row_index} for user {username} matches an existing wishlist item "
                     "— skipping import, writing status back"
                 )
-                self._write_status(sheet_id, row_index, "Added")
+                await self._write_status(sheet_id, row_index, "Added")
                 continue
 
             logger.info(
@@ -183,7 +183,7 @@ class SheetSyncService:
                 logger.exception(
                     f"sheet sync: failed to process row {row_index} for user {username}"
                 )
-                self._write_status(sheet_id, row_index, "Error - see logs")
+                await self._write_status(sheet_id, row_index, "Error - see logs")
                 errors += 1
 
         return SheetSyncResult(
@@ -282,12 +282,12 @@ class SheetSyncService:
             )
             return
 
-        self._write_status(sheet_id, row_index, "Added")
+        await self._write_status(sheet_id, row_index, "Added")
 
-    def _write_status(self, sheet_id: str, row_index: int, status: str) -> None:
+    async def _write_status(self, sheet_id: str, row_index: int, status: str) -> None:
         added_at = datetime.datetime.now().isoformat(timespec="seconds")
         try:
-            self._google_sheets_service.write_status(sheet_id, row_index, status, added_at)
+            await self._google_sheets_service.write_status(sheet_id, row_index, status, added_at)
             logger.info(f"sheet sync: wrote status {status!r} back to sheet {sheet_id} row {row_index}")
         except Exception:
             logger.exception(f"sheet sync: failed to write status back to sheet row {row_index}")

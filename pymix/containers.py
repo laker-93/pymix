@@ -208,6 +208,7 @@ class Container(containers.DeclarativeContainer):
     google_sheets_service = providers.Singleton(
         GoogleSheetsService,
         credentials_path=config.google_sheets.credentials_path,
+        timeout_s=config.google_sheets.timeout_s,
     )
 
     sheet_sync_service = providers.Singleton(

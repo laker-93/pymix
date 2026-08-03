@@ -30,3 +30,8 @@ yt-dlp>=2024.8.6
 musicbrainzngs~=0.7.1
 google-api-python-client~=2.100
 google-auth~=2.30
+# imported directly by google_sheets_service to build an explicitly-timed
+# transport; both already arrive via google-api-python-client, pinned here
+# because we import them rather than relying on them transitively.
+google-auth-httplib2~=0.2
+httplib2~=0.22
