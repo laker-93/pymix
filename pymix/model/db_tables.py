@@ -1,6 +1,7 @@
 from sqlalchemy import Column, String, Integer, Boolean, Float, BigInteger, JSON, Enum
 from sqlalchemy.orm import declarative_base
 
+from pymix.model.invite_request import InviteRequestStatus
 from pymix.model.wishlist import WishlistStatus
 
 Base = declarative_base()
@@ -106,6 +107,35 @@ class PlaylistPathRow(Base):
     user_id = Column(String, nullable=False)
     display_name = Column(String, nullable=False)
     path_components = Column(JSON, nullable=False)
+
+
+class InviteRequestRow(Base):
+    """Someone who asked for a beta invite from the demo/landing funnel.
+
+    Written by the unauthenticated `POST /invite-request`, so it holds no user_id — the
+    whole point is that the requester has no account yet. `email` is unique and the
+    write is an upsert: re-submitting refreshes `dj_software` and `updated_at` rather
+    than erroring, so a user who submits twice never sees a failure.
+    """
+
+    __tablename__ = 'invite_request_table'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+
+    email = Column(String, unique=True, nullable=False)
+
+    # 'rekordbox' | 'serato' | 'other' — see DjSoftware. Segments the list so invites
+    # can be prioritised towards the libraries subbox actually converts.
+    dj_software = Column(String, nullable=False)
+    # Free text, only set when dj_software == 'other'.
+    dj_software_other = Column(String)
+
+    # 'new' | 'invited' | 'declined' — see InviteRequestStatus. Fulfilment is manual
+    # (read the table, mint a UserTokenRow), so this is how a worked row is marked off.
+    status = Column(String, nullable=False, server_default=InviteRequestStatus.NEW.value)
+
+    created_at = Column(Float)
+    updated_at = Column(Float)
 
 
 class WishlistRow(Base):
