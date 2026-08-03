@@ -12,8 +12,8 @@ sqlalchemy~=2.0
 psycopg2-binary~=2.9
 alembic~=1.13
 pyserato~=0.2
-mediafile~=0.13.0
-beets~=2.2.0
+mediafile~=0.17.0
+beets==2.13.1
 jinja2~=3.1.4
 pydantic~=2.7.0
 # pydantic's EmailStr (invite-request capture) is a no-op without this — it raises on import.
