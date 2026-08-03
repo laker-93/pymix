@@ -40,6 +40,9 @@ update_job_period_s: 1
 google_sheets:
   credentials_path: /subbox/secrets/google-sheets-service-account.json
   poll_interval_s: 300
+  # hard cap on any single blocking Sheets HTTP call. Without it httplib2 blocks
+  # forever on a half-open socket (laker-93/pymix#81).
+  timeout_s: 30
 wishlist:
   # how often the background loop re-checks open wishlist items against each
   # user's Navidrome library (catches tracks that only become queryable after

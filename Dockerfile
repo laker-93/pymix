@@ -45,4 +45,9 @@ RUN useradd -u 1000 -m deploy
 USER deploy
 
 # ---------- Run ----------
-CMD python /app/pymix/runner.py -e $APP_ENVIRONMENT
+# Exec form so python is PID 1. With the shell form, `sh` is PID 1 and python a
+# child: a kernel OOM kill of python left sh to print "Killed" and exit 0, so
+# Docker recorded OOMKilled=false / ExitCode=0 and the kill was invisible to
+# `docker inspect` (laker-93/pymix#81). Exec form also delivers SIGTERM straight
+# to python, so shutdown is graceful instead of a 10s timeout.
+CMD ["sh", "-c", "exec python /app/pymix/runner.py -e $APP_ENVIRONMENT"]
