@@ -330,7 +330,7 @@ class RekordboxXMLController:
 
         # set a custom field of the username that uploaded the track. This allows to query tracks that a username has uploaded.
         # group-albums to allow importing correctly tracks with different album tags.
-        beets_command = f"beet import --group-albums --set user={username} --set public={public} -q /downloads"
+        beets_command = f"beet import -A --group-albums --set user={username} --set public={public} --set automatch_state=pending /downloads"
         logger.info(f'running beet import command {beets_command}')
         # One lock for the whole job (import -> duplicates -> subbox_id map): a
         # future automatch sweep or a concurrent watch-cycle for the same user
@@ -438,7 +438,7 @@ class RekordboxXMLController:
         # 1. invoke beets import on the audio files to import
         # set a custom field of the username that uploaded the track. This allows to query tracks that a username has uploaded.
         # group-albums to allow importing correctly tracks with different album tags.
-        beets_command = f"beet import --group-albums --set user={username} -q /downloads"
+        beets_command = f"beet import -A --group-albums --set user={username} --set automatch_state=pending /downloads"
         logger.info(f'running beet import command {beets_command}')
         # One lock for the whole job (import -> duplicates -> subbox_id map): see
         # the matching comment in _consume_from_filebrowser (#73).
