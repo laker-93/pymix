@@ -275,6 +275,26 @@ class SubsonicClient(BaseAPIClient):
         logger.info(f'completed scan of subsonic for user {username} with response {response}')
         return response['subsonic-response']['status'] == 'ok'
 
+    async def get_now_playing(self, user: dict) -> List[dict]:
+        """
+        The Subsonic ``getNowPlaying`` entries for this user, each carrying a
+        ``minutesAgo`` field. Used by the automatch sweep's idle test (#79) — a
+        recent entry means the user is actively listening and the sweep should not
+        start (or should yield if already running).
+        """
+        username = user['username']
+        password = user['password']
+        port = 4533  # since we're inside the same docker network, can call the private port
+        base_path = self._host.format(user=username, port=port)
+        url = self._subsonic_format_url(username, password, f"{base_path}/rest/getNowPlaying")
+        response = await self.get(url)
+        entries = response.get('subsonic-response', {}).get('nowPlaying', {}).get('entry', [])
+        # A single now-playing entry can come back as a bare dict rather than a
+        # one-item list, depending on how the server serialises XML->JSON.
+        if isinstance(entries, dict):
+            entries = [entries]
+        return entries
+
     async def get_playlists(self, user: dict) -> Optional[List[SubBoxPlaylist]]:
         username = user['username']
         password = user['password']

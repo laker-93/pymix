@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from pymix import constants
 from pymix.containers import Container
+from pymix.handlers.automatch_handler import automatch_sweep_loop
 from pymix.handlers.filebrowser_file_handler import poll_watchdir, trigger_processing
 from pymix.handlers.sheet_sync_handler import sheet_sync_loop
 from pymix.handlers.wishlist_reconcile_handler import wishlist_reconcile_loop
@@ -108,6 +109,9 @@ async def lifespan(app: FastAPI, container):
     wishlist_resolve_service = container.wishlist_resolve_service()
     resolve_interval_s = container.config()['wishlist']['resolve_interval_s']
 
+    automatch_service = container.automatch_service()
+    automatch_poll_interval_s = container.config()['automatch']['poll_interval_s']
+
     async with anyio.create_task_group() as tg:
         tg.start_soon(poll_watchdir, user_root, watch_subdir, send_stream, db_controller)
         tg.start_soon(trigger_processing, receive_stream, rb_xml_controller, db_controller)
@@ -117,6 +121,9 @@ async def lifespan(app: FastAPI, container):
         )
         tg.start_soon(
             wishlist_resolve_loop, wishlist_resolve_service, db_controller, resolve_interval_s
+        )
+        tg.start_soon(
+            automatch_sweep_loop, automatch_service, db_controller, automatch_poll_interval_s
         )
         yield
 

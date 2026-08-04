@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 _TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
 environment = Environment(loader=FileSystemLoader(str(_TEMPLATES_DIR)))
 beets_template = environment.get_template("beets/config.yaml")
+beets_automatch_template = environment.get_template("beets/automatch.yaml")
 navidrome_template = environment.get_template("navidrome/navidrome.toml")
 
 class ServicesOrchestrator:
@@ -202,6 +203,12 @@ class ServicesOrchestrator:
         with open(config_dst, 'w') as f:
             f.write(content)
 
+        # the automatch sweep's `-c` overlay (#79) -- no user-specific vars, but it
+        # lives alongside config.yaml in this user's mounted /config dir.
+        automatch_dst = Path(config_dst).parent / "automatch.yaml"
+        with open(automatch_dst, 'w') as f:
+            f.write(beets_automatch_template.render())
+
     async def migrate_beets_container(self, username: str) -> dict:
         """
         Re-render this user's beets config from the current template and recreate
@@ -231,6 +238,13 @@ class ServicesOrchestrator:
             )
             with open(config_dst, 'w') as f:
                 f.write(content)
+
+            # re-render the automatch overlay too (#79) -- it predates some existing
+            # users' containers and has no user-specific vars to go stale, but keeping
+            # it in lockstep with config.yaml avoids a second migration path later.
+            automatch_dst = Path(config_dst).parent / "automatch.yaml"
+            with open(automatch_dst, 'w') as f:
+                f.write(beets_automatch_template.render())
 
             self._env_file_handler.create_env_file(
                 Path(self._config['containers']['beets']['env_file']),

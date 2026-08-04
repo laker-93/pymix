@@ -1,8 +1,10 @@
 # Design: As-is import + async background automatch
 
-Status: **design revised, not started** (concurrency approach decided 2026-08-02; premise
+Status: **Phase 1 and Phase 2 shipped** (concurrency approach decided 2026-08-02; premise
 corrected and open questions resolved 2026-08-02 — see *Revision note*; Navidrome rename gate
-run 2026-08-04, failed — see *Renames and Navidrome* — sweep ships with `move: no`)
+run 2026-08-04, failed — see *Renames and Navidrome* — sweep ships with `move: no`; Phase 2
+sweep landed 2026-08-04, see *Build order* step 7). Phase 3 (UI-driven correction) is the
+only piece not yet built.
 
 ## Revision note (read this first if you read the earlier draft)
 
@@ -470,63 +472,80 @@ Caveats:
   `/subbox/users/{user}/beets/config/config.yaml` and beets version actually are. Local test
   containers are not evidence; two containers on this machine already disagree with each other
   and with the template.
-- **A live `-L` match** under the pinned 2.13.1 with `musicbrainz` enabled.
+- ~~**A live `-L` match** under the pinned 2.13.1 with `musicbrainz` enabled.~~ Done — see P2's
+  verification (2026-08-04): a genuine `mb_trackid` applied via `-L` reimport.
+
+Note both remaining items here are prod-rollout operations (audit + P3 migration run), not code
+— the Phase 2 sweep itself (step 7) is unit-tested and merged; it just hasn't reimported a real
+user's tracks yet, since no prod user has been migrated onto the `musicbrainz`-enabled template
+(P3) or the pinned image (`../subbox` P1) yet.
 
 ## Build order
 
-1. **Centralized beets-exec helper + per-user `threading.Lock`**, wrapping all existing call
+1. ~~**Centralized beets-exec helper + per-user `threading.Lock`**~~, wrapping all existing call
    sites, with the write/read split and the two event-loop-blocking call sites moved onto a
-   thread (see *Concurrency & churn*). Independent of the rest — it also fixes a pre-existing
-   race between the watch-dir loop and a foreground `/beets/import` for the same user — so do
-   it first and separately.
-2. **Phase 1 (`-A` + `--set automatch_state=pending`)** at all three import call sites.
-   Independent and shippable; corrects the behaviour to be deterministic rather than
-   accidental.
-3. **P1 — pin beets 2.13.1** (`requirements.txt` + `../subbox` per-host compose).
-4. **P3 — migration endpoint/script**, then migrate dev users and verify.
+   thread (see *Concurrency & churn*). Done — `clients/beets_exec.py`.
+2. ~~**Phase 1 (`-A` + `--set automatch_state=pending`)** at all three import call sites.~~ Done
+   — `_consume_from_filebrowser`, `_import_to_beets` (both rekordbox and serato) all set it.
+3. ~~**P1 — pin beets 2.13.1**~~ — `requirements.txt` done (`beets==2.13.1`). The
+   `../subbox` per-host compose pin (`lscr.io/linuxserver/beets:2.13.1-ls345`) is still
+   outstanding — a separate, cross-repo change per `docs/repositories.md`; every host still
+   provisions new containers off `:latest`.
+4. ~~**P3 — migration endpoint/script**~~ Done — the per-user re-render + recreate admin
+   endpoint; migrate real dev/prod users and verify is an operational follow-up, not a code
+   change.
 5. ~~**Navidrome rename verification** (the gate).~~ Done — failed; `move: no` added to the
    sweep override (see *Sweep-specific config override*), renaming recorded as deferred.
 6. ~~**P2 — enable the `musicbrainz` plugin** in the template.~~ Done — template updated;
    existing users still need the P3 migration to pick it up.
-7. **Phase 2 — `automatch_state` sweep**: new `automatch_handler` + service, reusing the
-   wishlist-loop scaffolding and the lock/helper from step 1, with chunked locking, the idle
-   test, the sweep config override, the explicit re-map, and the `error`-retry state.
-8. **Phase 3** correction endpoint + subbox-app UI (cross-repo, per `docs/integration.md`).
+7. ~~**Phase 2 — `automatch_state` sweep**~~ Done (2026-08-04) — `handlers/automatch_handler.py`
+   + `services/automatch_service.py`, reusing the wishlist-loop scaffolding and the
+   lock/helper from step 1: chunked locking (`chunk_size`), the idle test (in-progress job +
+   Navidrome `getNowPlaying` within `idle_recency_window_s`, re-checked between chunks so a
+   foreground import is never queued behind more than one chunk), a wall-clock budget per
+   user per cycle, an explicit id-keyed re-map (`RekordboxXMLController.remap_subbox_id_for_ids`,
+   not the empty-flexattr-only `_map_subbox_id_beet_id`), duplicate re-tagging
+   (`retag_duplicates`), the `pending -> matched | nomatch | error` state machine with an
+   `automatch_attempts` retry cap, a single end-of-batch Navidrome rescan, and the
+   `templates/beets/automatch.yaml` `-c` overlay (`fetchart.auto`/`embedart.auto: no`,
+   `move: no`) rendered per-user alongside `config.yaml`.
+8. **Phase 3** correction endpoint + subbox-app UI (cross-repo, per `docs/integration.md`) —
+   not started; the only remaining piece of this design.
 
-Steps 1–2 are safe to ship independently at any time. Steps 3–7 are a chain: none of them
-delivers user-visible value until step 7, so they can be batched, but the ordering within the
-chain is load-bearing.
+Steps 1–7 are all shipped. Step 8 (Phase 3) is a cross-repo change and was always scoped
+separately from the async-automatch chain that steps 1–7 form.
 
-## Code surface (anticipated)
+## Code surface
 
-- **New beets-exec helper** (e.g. `clients/beets_client.py`, which already exists for
-  `beet stats`, or a new `controllers/beets_exec.py`) — owns `docker exec beets{username}
-  beet ...`, the read/write classification, and the per-user `threading.Lock` dict; every call
-  site below routes through it instead of calling `docker.execute(...)` directly.
-- `controllers/rekordbox_xml_controller.py` — all ~10 direct `docker.execute` beets
-  invocations (`_consume_from_filebrowser:314`, `_import_to_beets:421`, `_remove_duplicates`,
-  `_get_duplicates`, `get_path_by_subbox_id`, `get_present_subbox_ids:130`,
-  `remove_tracks:149`, `_map_subbox_id_beet_id:198`, `_set_metadata_from_xml`) switch to the
-  shared helper; the two import commands (`:330`, `:434`) become `-A` +
-  `--set automatch_state=pending`; a reusable re-map that doesn't depend on an empty
-  `subbox_id` flexattr.
-- `controllers/serato_controller.py:115` — the third import command, plus the duplicated
-  beets-exec calls flagged in `CLAUDE.md` "Rough edges".
-- `templates/beets/config.yaml` — add `musicbrainz` to `plugins:` (P2).
-- **New sweep config** (e.g. `templates/beets/automatch.yaml`) — inherits the main config,
-  disables `fetchart.auto` / `embedart.auto`, sets `move: no` (rename gate, failed).
-- **New migration** (endpoint or script) — re-render config + recreate container per user,
-  mirroring the render in `orchestrators/services_orchestrator.py:190` (P3).
-- **New `handlers/automatch_handler.py` + service** (mirrors
-  `handlers/wishlist_reconcile_handler.py` / `services/wishlist_reconcile_service.py`),
-  using the shared helper for its `beet import -L` calls.
-- `containers.py` / `runner.py` — register the loop, the poll interval, the idle-window and
-  chunk-size config.
-- `requirements.txt` — `beets==2.13.1` (P1).
+Everything below is built except the last item (Phase 3, not started).
+
+- ~~**New beets-exec helper**~~ — `clients/beets_exec.py`'s `BeetsExec` — owns `docker exec
+  beets{username} beet ...`, the read/write classification, and the per-user `threading.Lock`
+  dict; every existing call site routes through it.
+- ~~`controllers/rekordbox_xml_controller.py` call sites switched to the shared helper~~; the
+  import commands are `-A` + `--set automatch_state=pending`; ~~a reusable re-map that doesn't
+  depend on an empty `subbox_id` flexattr~~ — `remap_subbox_id_for_ids` (#79), plus a
+  synchronous `retag_duplicates` entry point the sweep uses under its own held lock.
+- ~~`controllers/serato_controller.py` — the third import command~~ also sets `-A` +
+  `automatch_state=pending`.
+- ~~`templates/beets/config.yaml` — `musicbrainz` added to `plugins:`~~ (P2).
+- ~~**New sweep config** `templates/beets/automatch.yaml`~~ — `fetchart.auto`/`embedart.auto:
+  no`, `move: no` (rename gate, failed); rendered per-user alongside `config.yaml` in both
+  `_create_beets` and `_migrate_beets_container` (`orchestrators/services_orchestrator.py`).
+- ~~**New migration** (endpoint)~~ — re-renders config + recreates container per user (P3,
+  landed with #76, predates the automatch.yaml addition above but re-renders it too).
+- ~~**New `handlers/automatch_handler.py` + `services/automatch_service.py`**~~ (mirrors
+  `handlers/wishlist_reconcile_handler.py` / `services/wishlist_reconcile_service.py`), using
+  the shared helper for its `beet -c automatch.yaml import -L` calls, and
+  `SubsonicClient.get_now_playing` (new) for the idle test's recency check.
+- ~~`containers.py` / `runner.py` — register the loop~~, plus `config/config.{dev,prod}.yaml`'s
+  new `automatch:` section (`poll_interval_s`, `idle_recency_window_s`, `chunk_size`,
+  `wall_clock_budget_s`, `error_retry_cap`).
+- ~~`requirements.txt` — `beets==2.13.1`~~ (P1).
 - `../subbox`, `docker-compose/beets/docker-compose.yml`, **every host branch** —
-  `lscr.io/linuxserver/beets:2.13.1-ls345` (P1).
+  `lscr.io/linuxserver/beets:2.13.1-ls345` (P1) — still outstanding, cross-repo.
 - New router for Phase 3 correction (`routers/track.py` already handles per-`subbox_id`
-  track ops — likely extends there).
+  track ops — likely extends there) — not started.
 
 ## Out of scope / future
 

@@ -22,6 +22,7 @@ from pymix.orchestrators.rekordbox_xml_orchestrator import RekordboxXMLOrchestra
 from pymix.orchestrators.serato_crate_orchestrator import SeratoCrateOrchestrator
 from pymix.orchestrators.services_orchestrator import ServicesOrchestrator
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
+from pymix.services.automatch_service import AutomatchService
 from pymix.services.google_sheets_service import GoogleSheetsService
 from pymix.services.link_parse_service import LinkParseService
 from pymix.services.musicbrainz_match_service import MusicBrainzMatchService
@@ -150,6 +151,18 @@ class Container(containers.DeclarativeContainer):
         config.local_user_music_stem,
         config.containers.subsonic.serving_music_path_base,
         beets_exec,
+    )
+
+    automatch_service = providers.Singleton(
+        AutomatchService,
+        db_controller,
+        beets_exec,
+        subsonic_client,
+        rekordbox_xml_controller,
+        chunk_size=config.automatch.chunk_size,
+        wall_clock_budget_s=config.automatch.wall_clock_budget_s,
+        idle_recency_window_s=config.automatch.idle_recency_window_s,
+        error_retry_cap=config.automatch.error_retry_cap,
     )
 
     serato_crate_orchestrator = providers.Singleton(

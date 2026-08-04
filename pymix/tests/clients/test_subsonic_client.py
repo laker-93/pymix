@@ -44,6 +44,47 @@ async def test_get_playlist():
     assert expected_playlists == playlists
 
 
+# --- get_now_playing ---------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_get_now_playing_returns_entries():
+    subsonic_client = SubsonicClient(
+        "http://{user}:{port}", MagicMock(), "mock_version", "foo", "bar", None, "test"
+    )
+    subsonic_client.get = AsyncMock(return_value={
+        'subsonic-response': {
+            'status': 'ok',
+            'nowPlaying': {'entry': [{'id': 'abc', 'minutesAgo': 2}, {'id': 'def', 'minutesAgo': 5}]},
+        }
+    })
+    entries = await subsonic_client.get_now_playing({"username": "lajp", "password": "pw"})
+    assert entries == [{'id': 'abc', 'minutesAgo': 2}, {'id': 'def', 'minutesAgo': 5}]
+
+
+@pytest.mark.anyio
+async def test_get_now_playing_normalises_a_single_entry_to_a_list():
+    # Subsonic's XML->JSON serialisation can collapse a one-item entry list to a
+    # bare dict rather than a one-element list.
+    subsonic_client = SubsonicClient(
+        "http://{user}:{port}", MagicMock(), "mock_version", "foo", "bar", None, "test"
+    )
+    subsonic_client.get = AsyncMock(return_value={
+        'subsonic-response': {'status': 'ok', 'nowPlaying': {'entry': {'id': 'abc', 'minutesAgo': 1}}}
+    })
+    entries = await subsonic_client.get_now_playing({"username": "lajp", "password": "pw"})
+    assert entries == [{'id': 'abc', 'minutesAgo': 1}]
+
+
+@pytest.mark.anyio
+async def test_get_now_playing_returns_empty_list_when_nobody_playing():
+    subsonic_client = SubsonicClient(
+        "http://{user}:{port}", MagicMock(), "mock_version", "foo", "bar", None, "test"
+    )
+    subsonic_client.get = AsyncMock(return_value={'subsonic-response': {'status': 'ok', 'nowPlaying': {}}})
+    entries = await subsonic_client.get_now_playing({"username": "lajp", "password": "pw"})
+    assert entries == []
+
+
 def _client():
     # _find_best_match / _clean_track_for_match / get_track_match's tier control need no
     # network — the constructor args are irrelevant to the matching logic under test.

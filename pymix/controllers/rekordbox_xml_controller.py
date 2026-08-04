@@ -26,6 +26,7 @@ from pyserato.model.hot_cue import HotCue
 from pyserato.model.track import Track
 from pyserato.model.hot_cue_type import HotCueType
 
+from pymix.utils.beets_query import or_query
 from pymix.utils.make_readable import make_readable
 from pymix.utils.tag_subbox_id import get_subbox_id
 
@@ -115,18 +116,8 @@ class RekordboxXMLController:
 
     @staticmethod
     def _subbox_id_or_query(subbox_ids: List[str]) -> List[str]:
-        """
-        Build a beets query that matches any of the given subbox_ids. beets treats
-        a bare comma between terms as OR, so [A, B, C] becomes the argv
-        ``subbox_id::A , subbox_id::B , subbox_id::C`` (each token is its own argv
-        element — the comma must not be glued to a term).
-        """
-        query: List[str] = []
-        for i, subbox_id in enumerate(subbox_ids):
-            if i:
-                query.append(",")
-            query.append(f"subbox_id::{subbox_id}")
-        return query
+        """Build a beets query that matches any of the given subbox_ids exactly."""
+        return or_query("subbox_id", subbox_ids, exact=True)
 
     async def get_present_subbox_ids(
         self, username: str, subbox_ids: List[str], public: bool
@@ -200,6 +191,15 @@ class RekordboxXMLController:
             item.write()
         return duplicates_paths
 
+    def retag_duplicates(self, username: str, public: bool = False) -> Optional[List[str]]:
+        """
+        Synchronous form of :meth:`get_duplicates`, for callers that already run
+        inside a worker thread and need this to happen under a write lock they're
+        already holding (the automatch sweep, #79) rather than spawning their own
+        thread-offload via the async wrapper.
+        """
+        return self._get_duplicates(username, public)
+
     def _map_subbox_id_beet_id(self, username: str, public: bool):
         """
         After import, link beets track IDs to subbox IDs by reading the subbox_id
@@ -261,6 +261,61 @@ class RekordboxXMLController:
                 line = log.decode()
                 logger.info(f'{log_type}: {line}')
             logger.info(f"Mapped subbox_id={subbox_id} → beet_id={beet_id}")
+
+    def remap_subbox_id_for_ids(self, username: str, beet_ids: List[int], public: bool = False) -> None:
+        """
+        Re-map subbox_id → beet_id for an explicit set of beet ids (the automatch
+        sweep, #79), rather than relying on :meth:`_map_subbox_id_beet_id`'s
+        ``subbox_id::^$`` query.
+
+        That query only catches tracks whose ``subbox_id`` flexattr has never been
+        set, so it silently skips (and cannot repair) already-mapped tracks — which
+        is exactly what a background reimport touches. Synchronous and does not take
+        the write lock itself: it does a write (``beet modify``), so the caller must
+        already hold ``beets_exec.write_lock`` for this container as part of the
+        wider reimport operation it's a step of.
+        """
+        if not beet_ids:
+            return
+        container_name = "beets" if public else f"beets{username}"
+
+        beets_command = ["beet", "list", "-f", "$id:$path", *or_query("id", beet_ids)]
+        result = self._beets_exec.execute(container_name, beets_command)
+        for line in result.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                beet_id_str, path = line.split(":", 1)
+                beet_id = int(beet_id_str.strip())
+            except ValueError:
+                logger.warning(f"Skipping malformed line in beets output: {line}")
+                continue
+
+            entry_dir = path.strip().removeprefix('/music')
+            src_dir = f'{self._serving_music_path_base}/{username}'
+            p = Path(src_dir + entry_dir)
+            if not p.exists():
+                p = self._resolve_path_with_special_chars(p)
+                if p is None:
+                    logger.warning(f"Could not resolve path for beet_id={beet_id}, skipping remap.")
+                    continue
+                logger.info(f"Resolved path with special chars: {p}")
+            subbox_id = get_subbox_id(p)
+            if not subbox_id:
+                logger.warning(f"No subbox_id tag found for {p}, skipping remap.")
+                continue
+
+            self._db_controller.add_subbox_beet_map(
+                username=username,
+                subbox_id=subbox_id,
+                beet_id=beet_id,
+            )
+            modify_command = f"beet modify -y id:{beet_id} subbox_id={subbox_id}"
+            log_iter = self._beets_exec.execute(container_name, modify_command, stream=True)
+            for log_type, log in log_iter:
+                logger.info(f'{log_type}: {log.decode()}')
+            logger.info(f"Remapped subbox_id={subbox_id} → beet_id={beet_id}")
 
 
     # todo this controller is overloaded; this method has nothing to do with rekordbox xml and should live elsewhere.
