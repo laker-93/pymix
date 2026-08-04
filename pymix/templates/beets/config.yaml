@@ -1,7 +1,11 @@
 # no `web` plugin: pymix talks to beets via `docker exec` CLI calls instead of
 # its HTTP API, since running a Flask server per user is too memory-heavy for
 # the resource-limited DO droplet.
-plugins: fetchart lyrics lastgenre embedart duplicates info subsonicupdate
+# musicbrainz: the only metadata-source plugin loaded, so the autotagger has
+# candidates at all (beets >= 2.3 moved MusicBrainz out of core). Interactive
+# imports stay fast because they run with -A (--noautotag); this only matters
+# for the background automatch sweep (epic #72) and manual -L reimports.
+plugins: fetchart lyrics lastgenre embedart duplicates info subsonicupdate musicbrainz
 directory: /music
 library: /config/musiclibrary.blb
 art_filename: albumart

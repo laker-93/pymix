@@ -131,11 +131,20 @@ user at a time on prod (see P3), and check the beets changelog for library-DB mi
 between those versions before touching a real user. Take a copy of
 `/subbox/users/{user}/beets/config/musiclibrary.blb` before the first prod user is migrated.
 
-### P2. Enable the `musicbrainz` plugin
+### P2. Enable the `musicbrainz` plugin — done (2026-08-04)
 
-Add `musicbrainz` to the `plugins:` line in `templates/beets/config.yaml`. Without this the
+Added `musicbrainz` to the `plugins:` line in `templates/beets/config.yaml`. Without this the
 Phase 2 sweep runs, finds zero candidates, marks everything `nomatch`, and looks like a
 working feature that does nothing.
+
+Verified live against a scratch container provisioned from the updated template (beets
+2.13.1, isolated — no shared volumes, no interaction with any real user's containers): `beet
+version` lists `musicbrainz`; an `-A` as-is import of a real-metadata track ("The Beatles –
+Come Together" / "Abbey Road") left `mb_trackid` empty and completed in ~1.5s, confirming the
+interactive path is still fast and as-is; a subsequent `beet import -L automatch_state:pending`
+found the real MusicBrainz release (`musicbrainz.org/release/6bb3793b-…`) at 91.7% confidence
+and applied a genuine `mb_trackid`. Only affects newly-provisioned containers — existing users
+still need the P3 migration to pick this up.
 
 Note the interaction with Phase 1: enabling the plugin re-arms the autotagger for the
 *interactive* import too. Phase 1's `-A` is what keeps the fast path fast once the plugin is
@@ -477,8 +486,8 @@ Caveats:
 4. **P3 — migration endpoint/script**, then migrate dev users and verify.
 5. ~~**Navidrome rename verification** (the gate).~~ Done — failed; `move: no` added to the
    sweep override (see *Sweep-specific config override*), renaming recorded as deferred.
-6. **P2 — enable the `musicbrainz` plugin** in the template, and migrate. Must come after
-   step 2, or interactive imports get slower than they are today.
+6. ~~**P2 — enable the `musicbrainz` plugin** in the template.~~ Done — template updated;
+   existing users still need the P3 migration to pick it up.
 7. **Phase 2 — `automatch_state` sweep**: new `automatch_handler` + service, reusing the
    wishlist-loop scaffolding and the lock/helper from step 1, with chunked locking, the idle
    test, the sweep config override, the explicit re-map, and the `error`-retry state.
