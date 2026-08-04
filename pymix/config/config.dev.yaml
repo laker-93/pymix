@@ -57,3 +57,21 @@ wishlist:
   # cookies are needed. Uncomment (and drop a cookies.txt at the path) only to
   # reproduce the prod cookie flow. See config.prod.yaml for details.
   # ytdlp_cookies_path: /subbox/secrets/ytdlp-cookies.txt
+automatch:
+  # how often the background automatch sweep loop runs (epic #72, #79). Heavier
+  # than the wishlist loops -- a cycle can hold a user's beets write lock for real
+  # work -- so it runs less often.
+  poll_interval_s: 300
+  # a user counts as "not idle" if Navidrome reports them playing something within
+  # this many seconds ago (checked before the sweep starts, and again between
+  # chunks so a user who starts listening mid-sweep isn't kept waiting).
+  idle_recency_window_s: 600
+  # tracks reimported per `beet import -L` invocation / write-lock acquisition, so
+  # a foreground import never queues behind more than one chunk's worth of work.
+  chunk_size: 5
+  # wall-clock budget per user per cycle; any remaining chunks are deferred to the
+  # next cycle rather than run unbounded.
+  wall_clock_budget_s: 300
+  # how many times a track that hit `error` (network/timeout/MB rate-limit, not a
+  # confident no-match) is retried on later cycles before it's left alone.
+  error_retry_cap: 5

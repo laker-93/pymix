@@ -1,0 +1,20 @@
+# Overlay config for the automatch sweep's `beet -c automatch.yaml import -L ...`
+# (epic #72, #79). beets loads this on top of the user's regular config.yaml, at
+# higher priority -- these three keys are the only ones that need to differ for a
+# background reimport:
+#
+# - fetchart/embedart auto: off, so a reimport that only re-tags doesn't also
+#   re-download and re-embed cover art on every track, matched or not.
+# - move: no -- the Navidrome rename gate (docs/design-async-automatch-import.md,
+#   "Renames and Navidrome") found Navidrome 0.60.3 does not preserve playlists,
+#   stars, or play counts across a same-library rename, so the sweep must not move
+#   files even when a match changes the destination path a `paths:` template would
+#   compute.
+fetchart:
+    auto: no
+
+embedart:
+    auto: no
+
+import:
+    move: no
