@@ -95,7 +95,8 @@ class Container(containers.DeclarativeContainer):
         db_controller,
         navidrome_client,
         env_file_handler,
-        config
+        config,
+        beets_exec,
     )
 
     subsonic_orchestrator = providers.Singleton(

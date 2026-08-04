@@ -4,20 +4,29 @@ import pwd
 import shutil
 import logging
 import stat
+import time
 from pathlib import Path
 from typing import Optional
 
+import anyio
 from aiohttp import ClientConnectorError
 from python_on_whales import DockerClient, docker
 from jinja2 import Environment, FileSystemLoader
 
+from pymix.clients.beets_exec import BeetsExec
 from pymix.clients.navidrome_client import NavidromeClient
 from pymix.controllers.db_controller import DbController
 from pymix.handlers.env_file_handler import DockerEnvFileHandler
+from pymix.utils.tag_subbox_id import get_subbox_id
 
 logger = logging.getLogger(__name__)
 
-environment = Environment(loader=FileSystemLoader("/app/pymix/templates/"))
+# Resolved relative to this file rather than hardcoded to /app (the Docker image's
+# WORKDIR) so importing this module works the same in the container and on a plain
+# checkout — this used to make any test importing the DI Container uncollectable
+# outside Docker. Resolves to the identical path inside the container.
+_TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates"
+environment = Environment(loader=FileSystemLoader(str(_TEMPLATES_DIR)))
 beets_template = environment.get_template("beets/config.yaml")
 navidrome_template = environment.get_template("navidrome/navidrome.toml")
 
@@ -27,12 +36,14 @@ class ServicesOrchestrator:
             db_controller: DbController,
             navidrome_client: NavidromeClient,
             env_file_handler: DockerEnvFileHandler,
-            config: dict
+            config: dict,
+            beets_exec: BeetsExec,
     ):
         self._db_controller = db_controller
         self._navidrome_client = navidrome_client
         self._env_file_handler = env_file_handler
         self._config = config
+        self._beets_exec = beets_exec
         self._max_number_of_users = config['max_number_of_users']
 
     async def create(self, username: str, password: str, email: str, token: str) -> Optional[str]:
@@ -190,6 +201,109 @@ class ServicesOrchestrator:
         content = beets_template.render(username=username, password=user['password'], user_navidrome=f'navidrome{username}')
         with open(config_dst, 'w') as f:
             f.write(content)
+
+    async def migrate_beets_container(self, username: str) -> dict:
+        """
+        Re-render this user's beets config from the current template and recreate
+        their beets container so it picks up the pinned image (#76). Explicit,
+        per-user, re-runnable — never triggered automatically on startup, so a
+        deploy can't silently recreate every user's container at once.
+        """
+        return await anyio.to_thread.run_sync(self._migrate_beets_container, username)
+
+    def _migrate_beets_container(self, username: str) -> dict:
+        user = self._db_controller.get_user(username)
+        container_name = f'beets{username}'
+        config_dst = self._config['containers']['beets']['config_file_dst'].format(user=username)
+        if not Path(config_dst).exists():
+            raise ValueError(f'no beets container provisioned for {username} (missing {config_dst})')
+
+        # One lock for the whole job: a foreground import for this user must not
+        # run concurrently with their container being reconfigured/recreated (#73).
+        with self._beets_exec.write_lock(container_name):
+            before = self._beets_status(container_name, username)
+
+            backup_name = f'musiclibrary.blb.bak-{int(time.time())}'
+            self._beets_exec.execute(container_name, ['cp', '/config/musiclibrary.blb', f'/config/{backup_name}'])
+
+            content = beets_template.render(
+                username=username, password=user['password'], user_navidrome=f'navidrome{username}'
+            )
+            with open(config_dst, 'w') as f:
+                f.write(content)
+
+            self._env_file_handler.create_env_file(
+                Path(self._config['containers']['beets']['env_file']),
+                username,
+                user['beets_port'],
+                container_name,
+            )
+            docker_client = DockerClient(
+                compose_files=[self._config['containers']['beets']['docker_compose_file']],
+                compose_env_file=self._config['containers']['beets']['env_file'],
+                compose_project_name=container_name,
+            )
+            # force_recreate + pull=always: this is the only step that actually
+            # matters if the image tag itself hasn't changed since the last
+            # recreate (e.g. still on :latest) — it re-pulls and swaps the
+            # container so a config-only change also takes effect.
+            docker_client.compose.up(detach=True, force_recreate=True, pull='always')
+
+            # a freshly recreated container may not accept `docker exec` the
+            # instant `compose up` returns; retry briefly rather than racing it.
+            after = self._beets_status(container_name, username, attempts=10)
+
+        return {
+            'username': username,
+            'backup_file': backup_name,
+            'before': before,
+            'after': after,
+            'stats_match': before['stats'] == after['stats'],
+            'sample_match': before['sample'] == after['sample'],
+        }
+
+    def beets_status(self, username: str) -> dict:
+        """
+        Read-only status check (beet version/plugins, stats, one subbox_id spot
+        check) — no lock, no mutation. Supports auditing a user's actual current
+        beets version/config before deciding whether to migrate them (#76).
+        """
+        container_name = f'beets{username}'
+        return self._beets_status(container_name, username)
+
+    def _beets_status(self, container_name: str, username: str, attempts: int = 1) -> dict:
+        last_exc: Optional[Exception] = None
+        for attempt in range(attempts):
+            try:
+                version = self._beets_exec.execute(container_name, 'beet version')
+                stats = self._beets_exec.execute(container_name, 'beet stats')
+                sample = self._spot_check_sample(container_name, username)
+                return {'version': version, 'stats': stats, 'sample': sample}
+            except Exception as ex:
+                last_exc = ex
+                if attempt < attempts - 1:
+                    time.sleep(1)
+        raise last_exc
+
+    def _spot_check_sample(self, container_name: str, username: str) -> dict:
+        result = self._beets_exec.execute(container_name, ['beet', 'list', '-f', '$id\t$path\t$subbox_id'])
+        if not result or not result.strip():
+            return {'checked': False, 'reason': 'empty library'}
+        line = result.strip().splitlines()[0]
+        try:
+            beet_id, path, subbox_id_flexattr = line.split('\t', 2)
+        except ValueError:
+            return {'checked': False, 'reason': f'unparseable beet list output: {line!r}'}
+        serving_base = self._config['containers']['subsonic']['serving_music_path_base']
+        resolved = Path(f"{serving_base}/{username}{path.removeprefix('/music')}")
+        file_tag = get_subbox_id(resolved) if resolved.exists() else None
+        return {
+            'checked': True,
+            'beet_id': beet_id,
+            'subbox_id_flexattr': subbox_id_flexattr or None,
+            'file_tag': file_tag,
+            'path_exists': resolved.exists(),
+        }
 
     def _create_filebrowser_account(self, user: dict):
         filebrowser_container = docker.container.inspect("filebrowser")
