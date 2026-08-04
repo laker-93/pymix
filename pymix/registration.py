@@ -18,7 +18,7 @@ from pymix.handlers.filebrowser_file_handler import poll_watchdir, trigger_proce
 from pymix.handlers.sheet_sync_handler import sheet_sync_loop
 from pymix.handlers.wishlist_reconcile_handler import wishlist_reconcile_loop
 from pymix.handlers.wishlist_resolve_handler import wishlist_resolve_loop
-from pymix.routers import auth, maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, wishlist, invite_request
+from pymix.routers import admin, auth, maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, wishlist, invite_request
 
 
 logger = logging.getLogger(__name__)
@@ -148,6 +148,7 @@ def create_app(container):
     app.include_router(track.router)
     app.include_router(wishlist.router)
     app.include_router(invite_request.router)
+    app.include_router(admin.router)
     return app
 
 
@@ -170,7 +171,7 @@ def create_container(environment="dev"):
     )
     container.wire(
         modules=[
-            auth, maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, wishlist, invite_request, sys.modules[__name__]
+            auth, maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, wishlist, invite_request, admin, sys.modules[__name__]
         ]
     )
     return container
