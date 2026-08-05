@@ -72,9 +72,11 @@ def test_remap_subbox_id_for_ids_queries_by_explicit_ids_and_remaps_each():
         c.args[1] for c in mock_docker.execute.call_args_list
         if isinstance(c.args[1], list) and c.args[1][:2] == ["beet", "modify"]
     ]
+    # -M (never move): a rename mid-modify is what loses Navidrome identity
+    # on rename, see #94.
     assert modify_calls == [
-        ["beet", "modify", "-y", "id:1", "subbox_id=SBX-1"],
-        ["beet", "modify", "-y", "id:2", "subbox_id=SBX-2"],
+        ["beet", "modify", "-y", "-M", "id:1", "subbox_id=SBX-1"],
+        ["beet", "modify", "-y", "-M", "id:2", "subbox_id=SBX-2"],
     ]
 
 
