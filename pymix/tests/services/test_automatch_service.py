@@ -149,7 +149,9 @@ async def test_sweep_user_selects_pending_and_under_cap_error_tracks_and_restamp
         call.args[1] for call in mock_docker.execute.call_args_list
         if isinstance(call.args[1], list) and call.args[1][:2] == ["beet", "modify"]
     ]
-    stamped = {c[3].removeprefix("id:"): c[4] for c in modify_calls}
+    # -M (never move) on every restamp -- see #94.
+    assert all(c[:4] == ["beet", "modify", "-y", "-M"] for c in modify_calls)
+    stamped = {c[4].removeprefix("id:"): c[5] for c in modify_calls}
     assert stamped["1"] == "automatch_state=matched"
     assert stamped["2"] == "automatch_state=nomatch"
     assert stamped["3"] == "automatch_state=matched"
@@ -203,7 +205,8 @@ async def test_sweep_user_stamps_error_and_bumps_attempts_when_reimport_raises()
         if isinstance(call.args[1], list) and call.args[1][:2] == ["beet", "modify"]
     ]
     assert len(modify_calls) == 1
-    assert modify_calls[0][3] == "id:1"
+    assert modify_calls[0][:4] == ["beet", "modify", "-y", "-M"]  # never move -- see #94
+    assert modify_calls[0][4] == "id:1"
     assert "automatch_state=error" in modify_calls[0]
     assert "automatch_attempts=1" in modify_calls[0]
 

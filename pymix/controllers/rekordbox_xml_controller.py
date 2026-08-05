@@ -311,7 +311,13 @@ class RekordboxXMLController:
                 subbox_id=subbox_id,
                 beet_id=beet_id,
             )
-            modify_command = f"beet modify -y id:{beet_id} subbox_id={subbox_id}"
+            # -M: never move files here. This runs against tracks the automatch
+            # reimport (`import.move: no`, automatch.yaml) already retagged in
+            # place; `beet modify` has no move default of its own and falls
+            # back to the base config's `import.move: yes`, which would relocate
+            # the file in the same operation that retags it -- exactly the
+            # ordering that loses Navidrome identity (pid) on rename. See #94.
+            modify_command = f"beet modify -y -M id:{beet_id} subbox_id={subbox_id}"
             log_iter = self._beets_exec.execute(container_name, modify_command, stream=True)
             for log_type, log in log_iter:
                 logger.info(f'{log_type}: {log.decode()}')

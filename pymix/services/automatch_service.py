@@ -225,6 +225,8 @@ class AutomatchService:
                     "beet",
                     "modify",
                     "-y",
+                    # -M: don't move. See _restamp_state below for why.
+                    "-M",
                     f"id:{candidate.beet_id}",
                     f"automatch_state={AUTOMATCH_STATE_ERROR}",
                     f"automatch_attempts={attempts}",
@@ -246,6 +248,15 @@ class AutomatchService:
                     "beet",
                     "modify",
                     "-y",
+                    # -M: never move files here. `beet modify` has no move
+                    # default of its own -- it falls back to the base config's
+                    # `import.move: yes` (this chunk's earlier `-c
+                    # automatch.yaml` reimport doesn't apply to this call), so
+                    # an unqualified modify would relocate any track whose
+                    # album row the reimport just renamed, in the same
+                    # operation that retags it. That's the ordering that loses
+                    # Navidrome identity (pid) on rename -- see #94.
+                    "-M",
                     f"id:{beet_id_str.strip()}",
                     f"automatch_state={state}",
                     "automatch_attempts=0",
