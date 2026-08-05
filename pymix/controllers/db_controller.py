@@ -616,13 +616,6 @@ class DbController:
             rows = session.query(UserRow).filter(UserRow.wishlist_sheet_id.isnot(None)).all()
             return [_row_to_dict(r) for r in rows]
 
-    def get_all_users(self) -> list[dict]:
-        """Every provisioned user, for the automatch sweep (#79) which -- unlike the
-        wishlist loops -- has no narrower pre-filter than "has a beets container"."""
-        with self._session_factory() as session:
-            rows = session.query(UserRow).all()
-            return [_row_to_dict(r) for r in rows]
-
     def delete_user(self, username: str):
         with self._session_factory() as session:
             user = session.query(UserRow).filter(UserRow.username == username).one()

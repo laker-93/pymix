@@ -1,6 +1,19 @@
 # Design: As-is import + async background automatch
 
-Status: **Phase 1 and Phase 2 shipped** (concurrency approach decided 2026-08-02; premise
+Status: **Phase 2's background sweep removed 2026-08-05, superseded by a manual
+reimport endpoint** (`POST /beets/reimport`, `AutomatchService.manual_reimport` —
+laker-93/pymix#95). The idle-detection/chunking/wall-clock-budget machinery this doc
+describes below existed to let the sweep run safely against every enabled user's
+whole library unattended; in practice its main real-world use was reimporting a
+track a human had already noticed was mismatched (#95), which a synchronous,
+caller-scoped endpoint does more directly with none of that machinery. The rest of
+this doc (Phase 1's as-is import, the Navidrome rename-preservation gate, the
+`automatch.yaml` overlay) is still current — only the *background, unattended*
+sweep described in *Build order* step 7 onward and *Phase 2* is gone. Phase 3
+(UI-driven correction) is now moot as originally scoped; a manual query is the UI
+surface for now.
+
+Status (historical): **Phase 1 and Phase 2 shipped** (concurrency approach decided 2026-08-02; premise
 corrected and open questions resolved 2026-08-02 — see *Revision note*; Navidrome rename gate
 run 2026-08-04, failed — see *Renames and Navidrome* — sweep ships with `move: no`; Phase 2
 sweep landed 2026-08-04, see *Build order* step 7). Phase 3 (UI-driven correction) is the
