@@ -109,8 +109,13 @@ async def lifespan(app: FastAPI, container):
     wishlist_resolve_service = container.wishlist_resolve_service()
     resolve_interval_s = container.config()['wishlist']['resolve_interval_s']
 
-    automatch_service = container.automatch_service()
+    # awaited: its graph reaches the async `aiohttp_session` Resource (via
+    # subsonic_client), so the provider resolves to a Future rather than the
+    # service itself -- same as rekordbox_xml_controller and
+    # wishlist_reconcile_service above.
+    automatch_service = await container.automatch_service()
     automatch_poll_interval_s = container.config()['automatch']['poll_interval_s']
+    automatch_enabled_users = container.config()['automatch'].get('enabled_users', [])
 
     async with anyio.create_task_group() as tg:
         tg.start_soon(poll_watchdir, user_root, watch_subdir, send_stream, db_controller)
@@ -123,7 +128,8 @@ async def lifespan(app: FastAPI, container):
             wishlist_resolve_loop, wishlist_resolve_service, db_controller, resolve_interval_s
         )
         tg.start_soon(
-            automatch_sweep_loop, automatch_service, db_controller, automatch_poll_interval_s
+            automatch_sweep_loop, automatch_service, db_controller, automatch_poll_interval_s,
+            automatch_enabled_users,
         )
         yield
 

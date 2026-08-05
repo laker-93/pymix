@@ -58,6 +58,12 @@ wishlist:
   # reproduce the prod cookie flow. See config.prod.yaml for details.
   # ytdlp_cookies_path: /subbox/secrets/ytdlp-cookies.txt
 automatch:
+  # opt-in allowlist of usernames the sweep may touch (see config.prod.yaml for
+  # why it isn't just "every user"). '*' = every provisioned user, which is fine
+  # locally where every container is disposable and freshly provisioned from the
+  # current template.
+  enabled_users:
+    - '*'
   # how often the background automatch sweep loop runs (epic #72, #79). Heavier
   # than the wishlist loops -- a cycle can hold a user's beets write lock for real
   # work -- so it runs less often.
