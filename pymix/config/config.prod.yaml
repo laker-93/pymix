@@ -66,30 +66,3 @@ wishlist:
   # source. Export from a logged-in browser and drop it at this path (same /subbox/secrets
   # mount as the google-sheets cred). Missing file → parsing falls back to anonymous.
   ytdlp_cookies_path: /subbox/secrets/ytdlp-cookies.txt
-automatch:
-  # opt-in allowlist of usernames the sweep is allowed to touch. Deliberately not
-  # "every provisioned user": `demo` has no beets container of its own (its
-  # Navidrome identity lives inside demoadmin's), and any user whose container
-  # predates the #76 migration has no `automatch.yaml` for the reimport to load,
-  # so sweeping them just stamps `automatch_state=error` across their library.
-  # Widen one user at a time, per #75's rollout checklist (back up
-  # `musiclibrary.blb` first). '*' means every user -- dev only, never here.
-  enabled_users:
-    - demoadmin
-  # how often the background automatch sweep loop runs (epic #72, #79). Heavier
-  # than the wishlist loops -- a cycle can hold a user's beets write lock for real
-  # work -- so it runs less often.
-  poll_interval_s: 300
-  # a user counts as "not idle" if Navidrome reports them playing something within
-  # this many seconds ago (checked before the sweep starts, and again between
-  # chunks so a user who starts listening mid-sweep isn't kept waiting).
-  idle_recency_window_s: 600
-  # tracks reimported per `beet import -L` invocation / write-lock acquisition, so
-  # a foreground import never queues behind more than one chunk's worth of work.
-  chunk_size: 5
-  # wall-clock budget per user per cycle; any remaining chunks are deferred to the
-  # next cycle rather than run unbounded.
-  wall_clock_budget_s: 300
-  # how many times a track that hit `error` (network/timeout/MB rate-limit, not a
-  # confident no-match) is retried on later cycles before it's left alone.
-  error_retry_cap: 5

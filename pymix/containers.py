@@ -155,14 +155,9 @@ class Container(containers.DeclarativeContainer):
 
     automatch_service = providers.Singleton(
         AutomatchService,
-        db_controller,
         beets_exec,
         subsonic_client,
         rekordbox_xml_controller,
-        chunk_size=config.automatch.chunk_size,
-        wall_clock_budget_s=config.automatch.wall_clock_budget_s,
-        idle_recency_window_s=config.automatch.idle_recency_window_s,
-        error_retry_cap=config.automatch.error_retry_cap,
     )
 
     serato_crate_orchestrator = providers.Singleton(
