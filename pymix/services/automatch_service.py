@@ -1,7 +1,8 @@
 import dataclasses
 import logging
+import shlex
 import time
-from typing import List
+from typing import List, Tuple
 
 import anyio
 
@@ -39,6 +40,17 @@ class SweepResult:
     chunks_total: int = 0
 
 
+@dataclasses.dataclass
+class ManualReimportResult:
+    """Outcome of one on-demand :meth:`AutomatchService.manual_reimport` call."""
+
+    username: str
+    query: str
+    matched: List[int]
+    nomatch: List[int]
+    errored: bool = False
+
+
 class AutomatchService:
     """
     The Phase 2 background automatch sweep (epic laker-93/pymix#72, issue #79):
@@ -54,6 +66,14 @@ class AutomatchService:
     idle test is re-checked between chunks so a foreground import is never kept
     waiting behind a multi-minute background sweep (see docs/design-async-automatch-import.md,
     "The sweep must yield to foreground work").
+
+    Also exposes :meth:`manual_reimport` (laker-93/pymix#95): a one-shot, caller-scoped
+    reimport driven by ``POST /beets/reimport`` rather than the idle sweep. It shares
+    the sweep's core write step (:meth:`_reimport_and_restamp`) but skips the idle
+    check, chunking, and wall-clock budget entirely — the caller has already scoped
+    the beets query to something small and deliberate (e.g. one busted subdirectory)
+    and is waiting synchronously on the HTTP response, so there is nothing to yield
+    for and no multi-cycle backlog to ration a budget across.
     """
 
     def __init__(
@@ -125,6 +145,45 @@ class AutomatchService:
             chunks_total=len(chunks),
         )
 
+    async def manual_reimport(self, user: dict, query: str) -> ManualReimportResult:
+        """One-shot reimport of whatever ``query`` (raw beets query syntax, e.g.
+        ``path:Artist/Album``) resolves to in ``user``'s library — the escape hatch
+        for a specific bad match a human already found (laker-93/pymix#95), rather
+        than waiting for the idle sweep to happen to select it. No idle check, no
+        chunking, no wall-clock budget, no error-retry bookkeeping: this is a single
+        bounded operation the caller is waiting on, not a recurring background cycle.
+
+        Never raises: a bad query or a beets/Navidrome failure comes back as
+        ``errored=True`` (or an empty ``matched``/``nomatch``), for the router to
+        turn into an HTTP response rather than a 500.
+        """
+        username = user["username"]
+        container_name = f"beets{username}"
+
+        try:
+            beet_ids = await anyio.to_thread.run_sync(self._resolve_query, container_name, query)
+        except Exception:
+            logger.exception(f"automatch: manual reimport query failed for {username}: {query!r}")
+            return ManualReimportResult(username=username, query=query, matched=[], nomatch=[], errored=True)
+
+        if not beet_ids:
+            return ManualReimportResult(username=username, query=query, matched=[], nomatch=[])
+
+        ok, matched, nomatch = await anyio.to_thread.run_sync(self._reimport_and_restamp, user, beet_ids)
+        if not ok:
+            return ManualReimportResult(username=username, query=query, matched=[], nomatch=[], errored=True)
+
+        try:
+            await self._subsonic.scan(user)
+        except Exception:
+            logger.exception(f"automatch: post-reimport Navidrome scan failed for {username}")
+
+        logger.info(
+            f"automatch: manual reimport for {username}, query {query!r} — "
+            f"{len(matched)} matched, {len(nomatch)} nomatch"
+        )
+        return ManualReimportResult(username=username, query=query, matched=matched, nomatch=nomatch)
+
     async def _is_idle(self, user: dict) -> bool:
         """Idle = no in-progress import job for this user, and no Navidrome play
         activity within the configured recency window. Any failure to check is
@@ -186,13 +245,31 @@ class AutomatchService:
         return candidates
 
     def _process_chunk(self, user: dict, chunk: List[_Candidate]) -> None:
-        """One logical operation -- reimport, re-map, re-tag duplicates, re-stamp
-        state -- under a single write-lock acquisition (see BeetsExec: "Lock
-        granularity: per operation, not per exec"), so a concurrent foreground
-        import for this user can't interleave between these steps."""
+        """Sweep-cycle entry point: reimport a chunk of candidates, stamping
+        ``error`` (with a bumped attempt count) on the whole chunk if the reimport
+        itself raised. Shares the actual write step with :meth:`manual_reimport`
+        via :meth:`_reimport_and_restamp` -- see that method for what "one logical
+        operation" covers."""
         username = user["username"]
         container_name = f"beets{username}"
         beet_ids = [c.beet_id for c in chunk]
+
+        ok, _matched, _nomatch = self._reimport_and_restamp(user, beet_ids)
+        if not ok:
+            self._stamp_error(container_name, chunk)
+
+    def _reimport_and_restamp(self, user: dict, beet_ids: List[int]) -> Tuple[bool, List[int], List[int]]:
+        """The actual write, shared by the sweep and manual reimport: reimport,
+        re-map, re-tag duplicates, re-stamp state -- under a single write-lock
+        acquisition (see BeetsExec: "Lock granularity: per operation, not per
+        exec"), so a concurrent foreground import for this user can't interleave
+        between these steps. Returns (success, matched ids, nomatch ids); a failed
+        reimport comes back ``(False, [], [])`` with ``automatch_state`` left
+        untouched here -- it's the caller's job to decide what a failed reimport
+        means for state (the sweep retries via ``error``; a manual reimport just
+        reports it and leaves state as it was)."""
+        username = user["username"]
+        container_name = f"beets{username}"
 
         with self._beets_exec.write_lock(container_name):
             try:
@@ -206,15 +283,26 @@ class AutomatchService:
                     *or_query("id", beet_ids),
                 ]
                 result = self._beets_exec.execute(container_name, beets_command)
-                logger.info(f"automatch: reimport result for {username}, chunk {beet_ids}: {result}")
+                logger.info(f"automatch: reimport result for {username}, ids {beet_ids}: {result}")
             except Exception:
-                logger.exception(f"automatch: reimport failed for {username}, chunk {beet_ids}")
-                self._stamp_error(container_name, chunk)
-                return
+                logger.exception(f"automatch: reimport failed for {username}, ids {beet_ids}")
+                return False, [], []
 
             self._rekordbox_xml_controller.remap_subbox_id_for_ids(username, beet_ids, public=False)
             self._rekordbox_xml_controller.retag_duplicates(username, public=False)
-            self._restamp_state(container_name, beet_ids)
+            matched, nomatch = self._restamp_state(container_name, beet_ids)
+            return True, matched, nomatch
+
+    def _resolve_query(self, container_name: str, query: str) -> List[int]:
+        """Reads only -- exempt from the write lock (see BeetsExec). ``query`` is
+        split with ``shlex`` the same way a human typing ``beet list <query>`` at a
+        shell would expect: each whitespace-separated token becomes its own argv
+        element (so a quoted term like ``'album:"Vol. 1"'`` stays one term), then
+        handed to beets as its own query language -- this never touches a shell, so
+        there is no injection surface, only beets' own query parsing."""
+        beets_command = ["beet", "list", "-f", "$id", *shlex.split(query)]
+        result = self._beets_exec.execute(container_name, beets_command)
+        return [int(line.strip()) for line in result.splitlines() if line.strip()]
 
     def _stamp_error(self, container_name: str, chunk: List[_Candidate]) -> None:
         for candidate in chunk:
@@ -233,15 +321,21 @@ class AutomatchService:
                 ],
             )
 
-    def _restamp_state(self, container_name: str, beet_ids: List[int]) -> None:
+    def _restamp_state(self, container_name: str, beet_ids: List[int]) -> Tuple[List[int], List[int]]:
+        """Returns (matched ids, nomatch ids) -- callers that only need the state
+        machine side effect (the sweep) are free to ignore it; :meth:`manual_reimport`
+        reuses it to report its own outcome without a second `beet list` round trip."""
         beets_command = ["beet", "list", "-f", "$id:$mb_trackid", *or_query("id", beet_ids)]
         result = self._beets_exec.execute(container_name, beets_command)
+        matched, nomatch = [], []
         for line in result.splitlines():
             line = line.strip()
             if not line:
                 continue
             beet_id_str, _, mb_trackid = line.partition(":")
+            beet_id = int(beet_id_str.strip())
             state = AUTOMATCH_STATE_MATCHED if mb_trackid.strip() else AUTOMATCH_STATE_NOMATCH
+            (matched if state == AUTOMATCH_STATE_MATCHED else nomatch).append(beet_id)
             self._beets_exec.execute(
                 container_name,
                 [
@@ -262,3 +356,4 @@ class AutomatchService:
                     "automatch_attempts=0",
                 ],
             )
+        return matched, nomatch

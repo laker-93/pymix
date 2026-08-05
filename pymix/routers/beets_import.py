@@ -11,6 +11,7 @@ from pymix.controllers.db_controller import DbController
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.routers.auth import require_uploader, require_username
+from pymix.services.automatch_service import AutomatchService
 
 router = APIRouter()
 
@@ -19,6 +20,13 @@ logger = logging.getLogger(__name__)
 
 class BeetsImportRequest(BaseModel):
     public: bool
+
+
+class BeetsReimportRequest(BaseModel):
+    # Raw beets query syntax (e.g. "path:Artist/Album", "album:'Vol. 1'"),
+    # scoped to whatever subset of the caller's own library they're fixing --
+    # see AutomatchService.manual_reimport.
+    query: str
 
 
 router = APIRouter()
@@ -125,6 +133,42 @@ async def run_import_task(rekordbox_xml_controller, username, public, job_id, db
     finally:
         logger.info(f'marking import job for user {username} as {success}')
         db_controller.job_completed(job_id, success)
+
+
+@router.post("/beets/reimport", tags=["import"])
+@inject
+async def beets_reimport(
+    request: BeetsReimportRequest,
+    user: dict = Depends(require_uploader),
+    automatch_service: AutomatchService = Depends(Provide[Container.automatch_service]),
+) -> dict:
+    """Reimport the caller's own library, scoped to ``request.query`` (raw beets
+    query syntax -- e.g. ``path:Artist/Album`` for one busted subdirectory), against
+    MusicBrainz. Synchronous: the query is expected to be small and deliberate
+    (laker-93/pymix#95's manual escape hatch), not a whole-library sweep -- there is
+    no job/progress polling here, unlike /beets/import.
+    """
+    username = user['username']
+    result = await automatch_service.manual_reimport(user, request.query)
+
+    if result.errored:
+        logger.error(f"beets reimport failed for {username}, query {request.query!r}")
+        return {
+            'success': False,
+            'matched': result.matched,
+            'nomatch': result.nomatch,
+            'reason': f"reimport failed for query {request.query!r} -- see server logs.",
+        }
+
+    n_matched, n_nomatch = len(result.matched), len(result.nomatch)
+    reason = "" if (n_matched or n_nomatch) else f"query {request.query!r} matched no tracks in {username}'s library"
+    logger.info(f"beets reimport for {username}, query {request.query!r}: {n_matched} matched, {n_nomatch} nomatch")
+    return {
+        'success': True,
+        'matched': result.matched,
+        'nomatch': result.nomatch,
+        'reason': reason,
+    }
 
 
 @router.get("/beets/import/progress", tags=["import"])

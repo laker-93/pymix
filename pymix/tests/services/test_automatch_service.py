@@ -2,7 +2,8 @@
 Tests for the Phase 2 background automatch sweep (laker-93/pymix#79): the idle
 test, chunked+yielding reimport, the `pending -> matched | nomatch | error` state
 machine (including the error-retry cap), and the single end-of-batch Navidrome
-rescan.
+rescan. Also covers the on-demand manual reimport (laker-93/pymix#95) that shares
+the sweep's write step but skips idle/chunking/budget entirely.
 
 Uses a real BeetsExec (so write_lock genuinely serializes, same pattern as
 test_beets_exec.py / test_services_orchestrator_beets_migration.py) with the
@@ -297,3 +298,139 @@ async def test_sweep_user_respects_wall_clock_budget():
 
     assert result.candidates == 2
     assert result.chunks_processed == 0  # budget already exhausted before the first chunk
+
+
+# --- manual reimport (laker-93/pymix#95) -----------------------------------------
+
+@pytest.mark.anyio
+async def test_manual_reimport_with_no_matching_tracks_does_not_import():
+    subsonic_client = mock.AsyncMock()
+    beets_exec = BeetsExec()
+
+    def fake_execute(container_name, command, stream=False):
+        cmd = command if isinstance(command, list) else command.split()
+        if cmd[:4] == ["beet", "list", "-f", "$id"] and cmd[4:] == ["path:Nonexistent"]:
+            return ""
+        return ""
+
+    with mock.patch("pymix.clients.beets_exec.docker") as mock_docker:
+        mock_docker.execute.side_effect = fake_execute
+        service, *_ = _make_service(beets_exec, subsonic_client=subsonic_client)
+        result = await service.manual_reimport(USER, "path:Nonexistent")
+
+    assert result.matched == []
+    assert result.nomatch == []
+    assert result.errored is False
+    subsonic_client.scan.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_manual_reimport_resolves_query_reimports_and_reports_state():
+    rekordbox_xml_controller = mock.Mock()
+    subsonic_client = mock.AsyncMock()
+    beets_exec = BeetsExec()
+
+    def fake_execute(container_name, command, stream=False):
+        cmd = command if isinstance(command, list) else command.split()
+        if cmd[:4] == ["beet", "list", "-f", "$id"] and cmd[4:] == ["path:Artist/Album"]:
+            return "1\n2\n"
+        if cmd[:2] == ["beet", "-c"]:
+            return "import ok"
+        if cmd[:4] == ["beet", "list", "-f", "$id:$mb_trackid"]:
+            return "1:mbid-1\n2:\n"
+        return ""
+
+    with mock.patch("pymix.clients.beets_exec.docker") as mock_docker:
+        mock_docker.execute.side_effect = fake_execute
+        service, db_controller, subsonic_client, rekordbox_xml_controller = _make_service(
+            beets_exec, subsonic_client=subsonic_client, rekordbox_xml_controller=rekordbox_xml_controller
+        )
+        result = await service.manual_reimport(USER, "path:Artist/Album")
+
+    assert result.matched == [1]
+    assert result.nomatch == [2]
+    assert result.errored is False
+    rekordbox_xml_controller.remap_subbox_id_for_ids.assert_called_once_with("demoadmin", [1, 2], public=False)
+    rekordbox_xml_controller.retag_duplicates.assert_called_once_with("demoadmin", public=False)
+    subsonic_client.scan.assert_awaited_once_with(USER)
+
+
+@pytest.mark.anyio
+async def test_manual_reimport_reports_error_when_reimport_raises():
+    rekordbox_xml_controller = mock.Mock()
+    subsonic_client = mock.AsyncMock()
+    beets_exec = BeetsExec()
+
+    def fake_execute(container_name, command, stream=False):
+        cmd = command if isinstance(command, list) else command.split()
+        if cmd[:4] == ["beet", "list", "-f", "$id"] and cmd[4:] == ["path:Artist/Album"]:
+            return "1\n"
+        if cmd[:2] == ["beet", "-c"]:
+            raise RuntimeError("musicbrainz.org unreachable")
+        return ""
+
+    with mock.patch("pymix.clients.beets_exec.docker") as mock_docker:
+        mock_docker.execute.side_effect = fake_execute
+        service, db_controller, subsonic_client, rekordbox_xml_controller = _make_service(
+            beets_exec, subsonic_client=subsonic_client, rekordbox_xml_controller=rekordbox_xml_controller
+        )
+        result = await service.manual_reimport(USER, "path:Artist/Album")
+
+    assert result.errored is True
+    assert result.matched == []
+    assert result.nomatch == []
+    rekordbox_xml_controller.remap_subbox_id_for_ids.assert_not_called()
+    rekordbox_xml_controller.retag_duplicates.assert_not_called()
+    subsonic_client.scan.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_manual_reimport_reports_error_when_query_resolution_raises():
+    beets_exec = BeetsExec()
+
+    def fake_execute(container_name, command, stream=False):
+        cmd = command if isinstance(command, list) else command.split()
+        if cmd[:4] == ["beet", "list", "-f", "$id"]:
+            raise RuntimeError("beets: malformed query")
+        return ""
+
+    with mock.patch("pymix.clients.beets_exec.docker") as mock_docker:
+        mock_docker.execute.side_effect = fake_execute
+        service, *_ = _make_service(beets_exec)
+        result = await service.manual_reimport(USER, "not a valid query :::")
+
+    assert result.errored is True
+    assert result.matched == []
+    assert result.nomatch == []
+
+
+@pytest.mark.anyio
+async def test_manual_reimport_does_not_check_idle_state():
+    """Unlike sweep_user, a manual reimport is a caller-scoped, waited-on request --
+    it must run even while the sweep's idle test would refuse to (an in-progress
+    job, a recent play), since the whole point is a human deliberately triggering it
+    right now."""
+    db_controller = mock.Mock()
+    db_controller.get_number_of_jobs.return_value = 1
+    subsonic_client = mock.AsyncMock()
+    subsonic_client.get_now_playing.return_value = [{"minutesAgo": 0}]
+    beets_exec = BeetsExec()
+
+    def fake_execute(container_name, command, stream=False):
+        cmd = command if isinstance(command, list) else command.split()
+        if cmd[:4] == ["beet", "list", "-f", "$id"] and cmd[4:] == ["path:Artist/Album"]:
+            return "1\n"
+        if cmd[:2] == ["beet", "-c"]:
+            return "ok"
+        if cmd[:4] == ["beet", "list", "-f", "$id:$mb_trackid"]:
+            return "1:mbid-1\n"
+        return ""
+
+    with mock.patch("pymix.clients.beets_exec.docker") as mock_docker:
+        mock_docker.execute.side_effect = fake_execute
+        service, *_ = _make_service(beets_exec, db_controller=db_controller, subsonic_client=subsonic_client)
+        result = await service.manual_reimport(USER, "path:Artist/Album")
+
+    db_controller.get_number_of_jobs.assert_not_called()
+    subsonic_client.get_now_playing.assert_not_called()
+    assert result.matched == [1]
