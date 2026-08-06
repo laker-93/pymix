@@ -26,6 +26,13 @@ from pyserato.model.hot_cue import HotCue
 from pyserato.model.track import Track
 from pyserato.model.hot_cue_type import HotCueType
 
+from pymix.services.import_progress import ImportPhase, reporter_or_null
+from pymix.utils.beets_batch import (
+    MATCH_BY_ID,
+    build_set_field_command,
+    chunked,
+    parse_applied,
+)
 from pymix.utils.beets_query import or_query
 from pymix.utils.make_readable import make_readable
 from pymix.utils.tag_subbox_id import get_subbox_id
@@ -200,12 +207,55 @@ class RekordboxXMLController:
         """
         return self._get_duplicates(username, public)
 
-    def _map_subbox_id_beet_id(self, username: str, public: bool):
+    def _set_field_batched(
+        self,
+        container_name: str,
+        field: str,
+        match_field: str,
+        pairs: List[tuple],
+        write_tags: bool,
+    ) -> bool:
+        """
+        Apply every (key, value) in ``pairs`` in as few `docker exec`s as possible
+        (#51), using beets' Python API inside the container rather than one
+        `beet modify` per pair. Returns False — without raising — if the batch
+        couldn't be applied, so the caller can fall back to the per-track loop:
+        per-user containers freeze their beets version at provisioning, so this
+        has to degrade rather than break an import.
+        """
+        if not pairs:
+            return True
+        try:
+            for chunk in chunked(pairs):
+                command = build_set_field_command(field, match_field, chunk, write_tags)
+                # Not streamed: the script's output is a summary plus one line per
+                # unmatched key, and we need the summary to confirm it ran at all.
+                result = self._beets_exec.execute(container_name, command)
+                if not isinstance(result, str):
+                    raise ValueError(f"unexpected batch beets output type {type(result)!r}")
+                applied = parse_applied(result)
+                logger.info(
+                    f"batched beets write on {container_name}: set {field} on {applied}/{len(chunk)} "
+                    f"item(s) matched by {match_field}"
+                )
+                for line in result.splitlines():
+                    if line.startswith("MISSING "):
+                        logger.warning(f"no beets item for {match_field}={line.split(' ', 1)[1]}, skipped")
+        except Exception:
+            logger.exception(
+                f"batched beets write of {field} on {container_name} failed for {len(pairs)} item(s); "
+                f"falling back to one beet modify per item"
+            )
+            return False
+        return True
+
+    def _map_subbox_id_beet_id(self, username: str, public: bool, progress=None):
         """
         After import, link beets track IDs to subbox IDs by reading the subbox_id
         tag from each track using the music-tag package.
         """
         container_name = "beets" if public else f"beets{username}"
+        progress = reporter_or_null(progress)
 
         # 1️⃣ Run beets command to get all tracks missing subbox_id
         beets_command = "beet list -f $id:$path subbox_id::^$"
@@ -225,9 +275,15 @@ class RekordboxXMLController:
                 beet_entries.append((int(beet_id.strip()), path.strip()))
 
         logger.info(f"Found {len(beet_entries)} tracks with unset subbox_id.")
+        progress.start_phase(ImportPhase.MAPPING_IDS, len(beet_entries))
 
-        # 3️⃣ Read subbox_id tag using music-tag for each path
+        # 3️⃣ Read subbox_id tag using music-tag for each path, and record the DB
+        # mapping. The beets-side write is collected and applied in one batch below
+        # rather than one `beet modify` per track (#51) — the reads and the tag
+        # parsing are local and cheap; it was the per-track exec that cost minutes.
+        to_write: List[tuple] = []
         for beet_id, path in beet_entries:
+            progress.advance()
             entry_dir = path.removeprefix('/music')
             src_dir = f'{self._serving_music_path_base}/{username}'
             p = Path(src_dir + entry_dir)
@@ -251,16 +307,24 @@ class RekordboxXMLController:
                 subbox_id=subbox_id,
                 beet_id=beet_id
             )
+            to_write.append((beet_id, subbox_id))
 
-            # 5 Run beets command to write subbox_id tag to track
-            beets_command = f"beet modify -y id:{beet_id} subbox_id={subbox_id}"
-            # detach to avoid returning potentially large stdout from the docker logs.
-            # Instead logs are streamed incrementally
-            log_iter = self._beets_exec.execute(container_name, beets_command, stream=True)
-            for log_type, log in log_iter:
-                line = log.decode()
-                logger.info(f'{log_type}: {line}')
-            logger.info(f"Mapped subbox_id={subbox_id} → beet_id={beet_id}")
+        # 5 Write the subbox_id into beets for every mapped track. No file write:
+        # subbox_id is a flexattr with no MediaFile field behind it, and the
+        # SUBBOX_ID tag we just read is already on disk — the beets DB is the only
+        # thing that needs updating.
+        if not self._set_field_batched(
+            container_name, "subbox_id", MATCH_BY_ID, to_write, write_tags=False
+        ):
+            for beet_id, subbox_id in to_write:
+                beets_command = f"beet modify -y -M id:{beet_id} subbox_id={subbox_id}"
+                # detach to avoid returning potentially large stdout from the docker logs.
+                # Instead logs are streamed incrementally
+                log_iter = self._beets_exec.execute(container_name, beets_command, stream=True)
+                for log_type, log in log_iter:
+                    line = log.decode()
+                    logger.info(f'{log_type}: {line}')
+                logger.info(f"Mapped subbox_id={subbox_id} → beet_id={beet_id}")
 
     def remap_subbox_id_for_ids(self, username: str, beet_ids: List[int], public: bool = False) -> None:
         """
@@ -325,8 +389,8 @@ class RekordboxXMLController:
 
 
     # todo this controller is overloaded; this method has nothing to do with rekordbox xml and should live elsewhere.
-    async def consume_from_filebrowser(self, username: str, public: bool, watch: bool = False) -> str:
-        result = await anyio.to_thread.run_sync(self._consume_from_filebrowser, username, public, watch)
+    async def consume_from_filebrowser(self, username: str, public: bool, watch: bool = False, progress=None) -> str:
+        result = await anyio.to_thread.run_sync(self._consume_from_filebrowser, username, public, watch, progress)
         # Once the import has landed in beets (subbox_ids mapped), resolve any open
         # wishlist items whose track now exists in the user's Navidrome. Only for the
         # user's own (private) library — public imports don't reach a user's Navidrome.
@@ -375,13 +439,17 @@ class RekordboxXMLController:
             except Exception:
                 logger.info(f'[{label}] {f.name} → <UNREADABLE>')
 
-    def _consume_from_filebrowser(self, username: str, public: bool, watch) -> str:
+    def _consume_from_filebrowser(self, username: str, public: bool, watch, progress=None) -> str:
         """
         # steps:
         # 1. user uploads to filebrowser
         # 2. stage filebrowser/data to beets import
         # 3. do beet import
         """
+        # No start_phase for the audio phase: the job row is created in it, with the
+        # staged track count as its total, and its progress is read from beets'
+        # track count rather than reported from here (#51).
+        progress = reporter_or_null(progress)
 
         self._file_browser_file_handler.stage_for_import(username, public, watch)
 
@@ -424,7 +492,7 @@ class RekordboxXMLController:
                 # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
                 # todo move this logic out of the rb xml controller
                 self._get_duplicates(username, False)
-                self._map_subbox_id_beet_id(username, False)
+                self._map_subbox_id_beet_id(username, False, progress)
 
 
     async def create_rekordbox_xml_from_subsonic_playlists(
@@ -486,12 +554,14 @@ class RekordboxXMLController:
         self._rekordbox_xml_orchestrator.save_xml(rekordbox_xml, xml_output_path)
 
     # todo this function should be part of the beets client or beets controller class and removed from here and rekordbox_xml_controller.py
-    def _import_to_beets(self, username: str, zip_path: Optional[Path], audio_path: Optional[Path], rekordbox_xml: RekordboxXml):
+    def _import_to_beets(self, username: str, zip_path: Optional[Path], audio_path: Optional[Path], rekordbox_xml: RekordboxXml, progress=None):
         """
         Import into beets in quiet mode. Any exceptions will interrupt the process.
         beets should import in to the directory navidrome is working off.
         Users can use APIs after import to correct any mistakes from the beets quiet import.
         """
+        # See _consume_from_filebrowser on why the audio phase isn't reported here.
+        progress = reporter_or_null(progress)
         if zip_path:
             self._rb_backup_file_handler.restore_track_meta_and_stage_for_import(username, zip_path, rekordbox_xml)
         if audio_path:
@@ -528,7 +598,7 @@ class RekordboxXMLController:
                 # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
                 # todo move this logic out of the rb xml controller
                 self._get_duplicates(username, False)
-                self._map_subbox_id_beet_id(username, False)
+                self._map_subbox_id_beet_id(username, False, progress)
 
     async def create_subsonic_playlists_from_xml(
             self,
@@ -537,6 +607,7 @@ class RekordboxXMLController:
             zip_path: Optional[Path],
             audio_path: Optional[Path],
             playlist_names: Optional[List[List[str]]] = None,
+            progress=None,
     ):
         username = user['username']
         # parsed fresh per call and threaded explicitly through the rest of this request -
@@ -545,12 +616,12 @@ class RekordboxXMLController:
         rekordbox_xml = self._rekordbox_xml_orchestrator.create_xml(xml_path)
 
         if zip_path or audio_path:
-            await anyio.to_thread.run_sync(self._import_to_beets, username, zip_path, audio_path, rekordbox_xml)
+            await anyio.to_thread.run_sync(self._import_to_beets, username, zip_path, audio_path, rekordbox_xml, progress)
         # must trigger a navidrome scan so the tracks will be queryable when creating and moving in to playlists in the
         # next step
         await self._subsonic_orchestrator.scan(user)
         await anyio.sleep(2)
-        await self._set_data_from_xml(user, rekordbox_xml, playlist_names)
+        await self._set_data_from_xml(user, rekordbox_xml, playlist_names, progress)
         # the fb path is removed here as we only want to remove data in fb once import is successful to avoid
         # unnecessarily having to reupload data from the client after a beets import failure
         self._file_browser_file_handler.remove_fb_data_path(username)
@@ -576,30 +647,44 @@ class RekordboxXMLController:
                     break
         return result
 
-    def _modify_bpm(self, username: str, subbox_id: str, bpm: int, pymix_path: Path):
-        beets_command = f"beet modify -y subbox_id:{subbox_id} bpm={bpm}"
+    def _modify_bpms(self, username: str, bpms_by_subbox_id: List[tuple]):
+        """
+        Write every track's bpm into beets in one batched exec (#51), falling back
+        to the old one-`beet modify`-per-track loop if the batch can't run.
+        """
+        if not bpms_by_subbox_id:
+            return
         container_name = f"beets{username}"
-        try:
-            with self._beets_exec.write_lock(container_name):
-                log_iter = self._beets_exec.execute(container_name, beets_command, stream=True)
-                for log_type, log in log_iter:
-                    line = log.decode()
-                    logger.info(f'{log_type}: {line}')
-        except Exception:
-            # if the logic to set the subbox_id tag in beets db failed in
-            # the import step (e.g. because the logic to parse the path from
-            # the output of beet ls failed) then the above beet modify step
-            # will fail as beets is unaware of any track with that
-            # subbox_id. The fix here is to fix the logic of parsing the
-            # correct path from the beet ls output during import stage.
-            logger.exception("Failed to execute beets command for %s", pymix_path)
+        with self._beets_exec.write_lock(container_name):
+            # bpm is a real media field, unlike subbox_id: write_tags mirrors
+            # `beet modify`'s default of writing the value back to the file.
+            if self._set_field_batched(
+                container_name, "bpm", "subbox_id", bpms_by_subbox_id, write_tags=True
+            ):
+                return
+            for subbox_id, bpm in bpms_by_subbox_id:
+                beets_command = f"beet modify -y subbox_id:{subbox_id} bpm={bpm}"
+                try:
+                    log_iter = self._beets_exec.execute(container_name, beets_command, stream=True)
+                    for log_type, log in log_iter:
+                        line = log.decode()
+                        logger.info(f'{log_type}: {line}')
+                except Exception:
+                    # if the logic to set the subbox_id tag in beets db failed in
+                    # the import step (e.g. because the logic to parse the path from
+                    # the output of beet ls failed) then the above beet modify step
+                    # will fail as beets is unaware of any track with that
+                    # subbox_id. The fix here is to fix the logic of parsing the
+                    # correct path from the beet ls output during import stage.
+                    logger.exception("Failed to execute beets command for subbox_id %s", subbox_id)
 
-    async def _set_data_from_xml(self, user: dict, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None):
+    async def _set_data_from_xml(self, user: dict, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None, progress=None):
         # todo make this logic more similar to serato_controller where subbox_id is used for look up
         await self._create_playlists_from_xml(user, rekordbox_xml, playlist_names)
-        await self._set_metadata_from_xml(user, rekordbox_xml, playlist_names)
+        await self._set_metadata_from_xml(user, rekordbox_xml, playlist_names, progress)
 
-    async def _set_metadata_from_xml(self, user, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None):
+    async def _set_metadata_from_xml(self, user, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None, progress=None):
+        progress = reporter_or_null(progress)
         allowed_track_ids = None
         if playlist_names:
             rekordbox_xml_playlists = self._rekordbox_xml_orchestrator.get_all_xml_playlists(rekordbox_xml)
@@ -620,9 +705,17 @@ class RekordboxXMLController:
         #  and set the rating of the track in navidrome from the rating taken from xml
         await self._subsonic_orchestrator.set_ratings(user, rated_tracks)
         #encoder = V2Mp3Encoder()
-        for track in rekordbox_xml.get_tracks():
-            if allowed_track_ids is not None and track.TrackID not in allowed_track_ids:
-                continue
+        xml_tracks = [
+            t for t in rekordbox_xml.get_tracks()
+            if allowed_track_ids is None or t.TrackID in allowed_track_ids
+        ]
+        progress.start_phase(ImportPhase.APPLYING_METADATA, len(xml_tracks))
+        # bpm writes are collected here and applied in one batched exec after the
+        # loop, instead of a `beet modify` per track (#51). The per-track cost that
+        # remains is the Subsonic match lookup below, which is a local HTTP call.
+        bpms_by_subbox_id: List[tuple] = []
+        for track in xml_tracks:
+            progress.advance()
             marks = track.marks
             cues = list(filter(lambda m: m.Type == 'cue', marks))
             loops = list(filter(lambda m: m.Type == 'loop', marks))
@@ -644,9 +737,7 @@ class RekordboxXMLController:
                 logger.info(f"No AverageBpm in XML for track {track.Name}, skipping bpm update.")
             else:
                 # doesn't support float value for bpm so convert to int
-                await anyio.to_thread.run_sync(
-                    self._modify_bpm, user['username'], subbox_id, int(track.AverageBpm), track_match.pymix_path
-                )
+                bpms_by_subbox_id.append((subbox_id, int(track.AverageBpm)))
             #logger.info(f"Mapped subbox_id={subbox_id} → beet_id={beet_id}")
             # todo create pydantic model for cues and attack to subbox track and pass this to the db controller
             self._db_controller.update_metadata(
@@ -674,6 +765,9 @@ class RekordboxXMLController:
                 source_app="rekordbox",
                 change_type="upload"
             )
+
+        # One exec for every track's bpm, after the loop — see #51.
+        await anyio.to_thread.run_sync(self._modify_bpms, user['username'], bpms_by_subbox_id)
 
 
     async def _create_playlists_from_xml(self, user: dict, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None):

@@ -46,7 +46,7 @@ All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 | Method/Path | Purpose |
 |---|---|
 | POST `/beets/import` | Lower-level: import staged files from filebrowser into beets (`consume_from_filebrowser`). |
-| GET `/beets/import/progress` | Poll an import job's progress. |
+| GET `/beets/import/progress` | Poll an import job's progress. Returns `phase` (`importing_audio`/`mapping_ids`/`applying_metadata`/`complete`) plus `phase_n_processed`/`phase_n_total`; `percentage_complete` composes them and only reads 100 once the job is finished (#51). |
 | GET `/beets/import/tracks_imported` | Count of tracks currently in beets (`BeetsClient.get_number_of_tracks`). |
 | GET `/beets/import/tracks_to_be_imported` | Count of staged tracks awaiting import. |
 | GET `/beets/duplicates` | List duplicate tracks (`beet duplicates`). |

@@ -41,7 +41,16 @@ On any failure the user + session are rolled back.
    - `_set_metadata_from_xml` — set ratings, write BPM into beets, and store
      cue/loop metadata in `library_table` keyed by `subbox_id`.
 6. Remove the filebrowser upload dir (only on success).
-Progress polled via `/beets/import/progress`.
+
+Progress polled via `/beets/import/progress`. An import is **three** phases, not one
+(`ImportPhase` in `services/import_progress.py`): `importing_audio` (step 3's `beet
+import`), `mapping_ids` (the subbox_id↔beet map), `applying_metadata` (step 5's BPM +
+cue/loop pass), then `complete`. Only the first is visible in beets' track count, so
+the job row carries the current phase and that phase's own n/total and the endpoint
+composes one percentage from both — reporting the beets count alone pinned the bar at
+100% for the whole tail (#51). Steps 3 and 5 batch their beets writes into a single
+`docker exec` each (`utils/beets_batch.py`); they used to shell in once per track,
+which cost ~13 min on a 100-track import.
 
 ## 3. Rekordbox export (`POST /rekordbox/export`)
 `create_rekordbox_xml_from_subsonic_playlists`:
