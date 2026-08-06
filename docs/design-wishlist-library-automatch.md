@@ -20,9 +20,17 @@ downloaded → available → ignored`.
 - `downloaded` — file has landed but not yet in beets.
 - `available` — in the collection / playable now.
 
-Because **Navidrome serves directly off the beets library** (the `subsonicupdate`
-beets plugin pings Navidrome to rescan as part of `beet import`), "in beets" already
-means "playable now". There was previously a separate `imported` state, but it meant
+Because **Navidrome serves directly off the beets library**, "in beets" already
+means "playable now" — modulo Navidrome having indexed the file. This used to credit
+the `subsonicupdate` beets plugin with rescanning Navidrome as part of `beet import`;
+it never did, because its URL was wrong (#60, #63), and the plugin has since been
+dropped. Indexing is covered without it: the Rekordbox/Serato import paths call
+`SubsonicOrchestrator.scan` explicitly, and for the watch-dir path (which doesn't)
+Navidrome's own filesystem watcher does the work — in 0.60.3 it runs unconditionally
+with a 5s debounce, and `scanner.schedule` defaults to `0`, so the watcher rather
+than a cron is what catches new files. `wishlist_reconcile_loop`'s fixed interval is
+the backstop for the window between a file landing and Navidrome indexing it.
+There was previously a separate `imported` state, but it meant
 exactly the same real-world thing as `available`, so the two were **collapsed into
 `available`** (migration `010`). The auto-match sets `available` directly.
 

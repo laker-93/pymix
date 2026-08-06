@@ -147,8 +147,13 @@ async def test_migrate_rerenders_config_with_current_template(tmp_path):
     from pathlib import Path
     content = Path(config_dst).read_text()
     assert "placeholder" not in content
-    assert username in content
-    assert f"navidrome{username}" in content
+    # The username/navidrome host used to prove the re-render, via the `subsonic:`
+    # block that interpolated them. That block went with the subsonicupdate plugin
+    # (#60, #63) and the template now has no per-user values at all, so assert on
+    # content only the current template produces.
+    plugins_line = next(line for line in content.splitlines() if line.startswith("plugins:"))
+    assert "subsonicupdate" not in plugins_line
+    assert "library: /config/musiclibrary.blb" in content
 
 
 @pytest.mark.anyio

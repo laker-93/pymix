@@ -325,6 +325,9 @@ container — a pre-existing, unrelated break in that plugin's HTTP call. It did
 rename or this verification (the explicit Subsonic `startScan` call was used instead), but the
 plugin's auto-rescan-on-write is currently silently broken and worth its own issue.
 
+*(Filed as #60 and #63; the plugin has since been dropped from the config template — the
+URL had an extra path segment, and pymix already triggers the real scan itself.)*
+
 ### Decision
 
 The sweep (Phase 2, not yet built — see *Build order* step 7) must run with `move: no` in its

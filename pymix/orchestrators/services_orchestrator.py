@@ -199,7 +199,10 @@ class ServicesOrchestrator:
         # overwrite the default beets config with subbox specific beets config
         config_dst = self._config['containers']['beets']['config_file_dst'].format(user=username)
 
-        content = beets_template.render(username=username, password=user['password'], user_navidrome=f'navidrome{username}')
+        # No template vars any more: the only per-user values in this config were the
+        # `subsonic:` block's url/user/pass, which went with the subsonicupdate plugin
+        # (#60, #63). Still rendered rather than copied, so adding one is a one-liner.
+        content = beets_template.render()
         with open(config_dst, 'w') as f:
             f.write(content)
 
@@ -233,9 +236,7 @@ class ServicesOrchestrator:
             backup_name = f'musiclibrary.blb.bak-{int(time.time())}'
             self._beets_exec.execute(container_name, ['cp', '/config/musiclibrary.blb', f'/config/{backup_name}'])
 
-            content = beets_template.render(
-                username=username, password=user['password'], user_navidrome=f'navidrome{username}'
-            )
+            content = beets_template.render()
             with open(config_dst, 'w') as f:
                 f.write(content)
 
