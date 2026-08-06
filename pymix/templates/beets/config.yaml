@@ -5,7 +5,14 @@
 # candidates at all (beets >= 2.3 moved MusicBrainz out of core). Interactive
 # imports stay fast because they run with -A (--noautotag); this only matters
 # for the background automatch sweep (epic #72) and manual -L reimports.
-plugins: fetchart lyrics lastgenre embedart duplicates info subsonicupdate musicbrainz
+# no `subsonicupdate` plugin: pymix triggers the post-import Navidrome scan itself
+# (SubsonicOrchestrator.scan, called from create_subsonic_playlists_from_xml), so the
+# plugin's scan was redundant — and it was also broken, pointing at a URL with an
+# extra path segment that Navidrome doesn't serve, so every beets command that wrote
+# to the DB logged `subsonic: Error: Expecting value: line 1 column 1 (char 0)`
+# (#60, #63). If it's ever re-enabled, note the URL is `http://<host>:4533` with no
+# suffix — see `containers.subsonic.host` in config.prod.yaml.
+plugins: fetchart lyrics lastgenre embedart duplicates info musicbrainz
 directory: /music
 library: /config/musiclibrary.blb
 art_filename: albumart
@@ -92,8 +99,3 @@ duplicates:
         - title
         - album
     tag: dup=1
-
-subsonic:
-    url: http://{{ user_navidrome }}:4533/{{ user_navidrome }}
-    user: {{ username }}
-    pass: {{ password }}
