@@ -1,5 +1,6 @@
 import datetime
 from unittest.mock import AsyncMock, MagicMock
+import aiohttp
 import pytest
 
 import pymix.clients.subsonic_client as subsonic_client_module
@@ -242,7 +243,13 @@ async def test_set_rating_issues_one_call_per_rated_track_and_never_sleeps(monke
 
 @pytest.mark.anyio
 async def test_set_rating_logs_and_continues_when_one_write_fails():
-    """A single rejected rating must not abort the rest of the pass."""
+    """
+    A single rejected rating must not abort the rest of the pass.
+
+    Code 70 is "data not found" — the id is not in the library, which a second
+    identical request cannot change — so this one is not retried either: three
+    tracks, three calls.
+    """
     client = SubsonicClient(
         "http://{user}:{port}", MagicMock(), "mock_version", "foo", "bar", None, "test"
     )
@@ -258,4 +265,82 @@ async def test_set_rating_logs_and_continues_when_one_write_fails():
     )
 
     assert client.get.await_count == 3
+
+
+@pytest.mark.anyio
+async def test_set_rating_retries_a_generic_error_once_and_the_write_lands():
+    """
+    Code 0 is where an internal fault surfaces — a SQLite write losing to a lock held
+    by a concurrent scan reaches the client as HTTP 200 + `status: failed, code: 0`.
+    Without a retry that rating is silently dropped, so retry it once.
+    """
+    client = SubsonicClient(
+        "http://{user}:{port}", MagicMock(), "mock_version", "foo", "bar", None, "test"
+    )
+    client.get = AsyncMock(side_effect=[
+        {'subsonic-response': {'status': 'failed', 'error': {'code': 0, 'message': 'Internal Server Error'}}},
+        {'subsonic-response': {'status': 'ok'}},
+        {'subsonic-response': {'status': 'ok'}},
+    ])
+
+    await client.set_rating({"username": "lajp", "password": "pw"}, [_rated(1, 5), _rated(2, 3)])
+
+    # 2 tracks, 3 calls: the first one was retried, and the retry carried the same write.
+    assert client.get.await_count == 3
+    first, retry = (c.args[0] for c in client.get.await_args_list[:2])
+    assert "id=1" in first and "rating=5" in first
+    assert "id=1" in retry and "rating=5" in retry
+
+
+@pytest.mark.anyio
+async def test_set_rating_retries_a_dropped_connection():
+    """A transport-level failure never reaches the Subsonic body, so catch it too."""
+    client = SubsonicClient(
+        "http://{user}:{port}", MagicMock(), "mock_version", "foo", "bar", None, "test"
+    )
+    client.get = AsyncMock(side_effect=[
+        aiohttp.ClientConnectionError("connection reset"),
+        {'subsonic-response': {'status': 'ok'}},
+    ])
+
+    await client.set_rating({"username": "lajp", "password": "pw"}, [_rated(1, 5)])
+
+    assert client.get.await_count == 2
+
+
+@pytest.mark.anyio
+async def test_set_rating_retry_is_budgeted_so_it_cannot_stall_a_large_import(monkeypatch):
+    """
+    The retry must not put back the per-track stall this loop exists to avoid.
+
+    With every write failing transiently, an unbounded retry would sleep once per
+    track — the same linear cost as the old `asyncio.sleep(1)`. The budget caps the
+    added time at RATING_RETRY_BUDGET backoffs no matter how large the library is.
+    """
+    slept = []
+
+    async def _record_sleep(delay, *args, **kwargs):
+        slept.append(delay)
+
+    monkeypatch.setattr(subsonic_client_module.asyncio, "sleep", _record_sleep)
+
+    tracks = 200
+    client = SubsonicClient(
+        "http://{user}:{port}", MagicMock(), "mock_version", "foo", "bar", None, "test"
+    )
+    client.get = AsyncMock(
+        return_value={'subsonic-response': {'status': 'failed', 'error': {'code': 0}}}
+    )
+
+    await client.set_rating(
+        {"username": "lajp", "password": "pw"},
+        [_rated(i, 4) for i in range(1, tracks + 1)],
+    )
+
+    budget = subsonic_client_module.RATING_RETRY_BUDGET
+    assert len(slept) == budget, f"expected the retries to stop at {budget}, slept {len(slept)}x"
+    assert slept == [subsonic_client_module.RATING_RETRY_BACKOFF] * budget
+    # One call per track, plus one extra for each of the budgeted retries — and the
+    # pass still visits every track rather than giving up at the budget.
+    assert client.get.await_count == tracks + budget
 

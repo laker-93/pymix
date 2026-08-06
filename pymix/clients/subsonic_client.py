@@ -28,6 +28,20 @@ make_logger_suppressible(logger)
 
 IGNORED_TITLE_WORDS = {'remix'}
 
+# Navidrome answers every Subsonic error with HTTP 200 and a code in the body
+# (server/subsonic/api.go:sendError), so a failed write has to be spotted by code.
+# Code 0 ("a generic error") is the bucket internal faults land in — including a
+# transient SQLite "database is locked" while a scan holds the write lock. Every
+# other code (10/20/30/40/50/60/70: bad params, auth, unknown id) is permanent for
+# the life of the pass, and retrying one only burns a request and a backoff.
+SUBSONIC_ERROR_GENERIC = 0
+# One retry per write, and at most this many across the whole pass. The cap is the
+# point: an unbounded per-track retry would put back exactly the linear stall this
+# loop had removed (a 1,000-track import sleeping once per track). Bounded, the
+# worst case adds RATING_RETRY_BACKOFF * RATING_RETRY_BUDGET regardless of size.
+RATING_RETRY_BACKOFF = 0.2
+RATING_RETRY_BUDGET = 20
+
 # Independent floor the *core* song title (parentheticals stripped) must clear before a
 # candidate is eligible at all — gated regardless of how well artist/album/qualifier line
 # up. Without it, an exact artist match could drag a completely different song over a low
@@ -600,6 +614,17 @@ class SubsonicClient(BaseAPIClient):
         Subsonic call in this client throttles (`get_track_match` runs hundreds of
         times per import unthrottled), so it was a debugging leftover rather than a
         rate limit Navidrome asks for.
+
+        There is no batch form to collapse this into: Navidrome's `setRating` reads a
+        single `id` and a single `rating` (`p.String`/`p.Int` take the first value and
+        discard the rest) and still answers `ok`, so extra ids are dropped silently.
+        Verified live on 0.60.3 against repeated `id` params, comma-joined ids, paired
+        id/rating params, and a `formPost` body — every shape wrote only the first pair.
+        `star`/`unstar` do take many ids; ratings do not.
+
+        A failed write gets one retry, budgeted — see RATING_RETRY_BUDGET. Writes land
+        in SQLite, so one can lose to a lock held by a concurrent scan; without the
+        retry that rating is dropped on the floor with only a log line.
         """
         username = user['username']
         password = user['password']
@@ -611,6 +636,7 @@ class SubsonicClient(BaseAPIClient):
                 song_ids_ratings.append(
                     (track.sub_track_id, track.rating)
                 )
+        retry_budget = RATING_RETRY_BUDGET
         for song_id_rating in song_ids_ratings:
             song_id = song_id_rating[0]
             rating = song_id_rating[1]
@@ -618,6 +644,38 @@ class SubsonicClient(BaseAPIClient):
                 username, password, f"{base_path}/rest/setRating",
                 params=[('id', song_id), ('rating', rating)]
             )
+            failure = await self._attempt_set_rating(url)
+            if failure is not None and retry_budget > 0 and self._rating_failure_is_transient(failure):
+                retry_budget -= 1
+                await asyncio.sleep(RATING_RETRY_BACKOFF)
+                failure = await self._attempt_set_rating(url)
+            if failure is not None:
+                logger.error(f'failed to set status on song id {song_id} with response: {failure}')
+
+    async def _attempt_set_rating(self, url: str) -> Optional[Union[dict, Exception]]:
+        """
+        Issue one ``setRating`` call. Returns None on success, otherwise the thing that
+        went wrong — the failed response body, or the exception the request raised.
+        """
+        try:
             response = await self.get(url)
-            if response['subsonic-response']['status'] != 'ok':
-                logger.error(f'failed to set status on song id {song_id} with response: {response}')
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            return e
+        if response['subsonic-response']['status'] != 'ok':
+            return response
+        return None
+
+    @staticmethod
+    def _rating_failure_is_transient(failure: Union[dict, Exception]) -> bool:
+        """
+        Whether a failed rating write is worth one more attempt.
+
+        A dropped connection or a timeout is transient by nature. A Subsonic-level
+        failure is only worth retrying when Navidrome reports the generic/internal
+        code — the named codes describe the request itself, so a second identical
+        request gets the same answer.
+        """
+        if isinstance(failure, Exception):
+            return True
+        error = failure['subsonic-response'].get('error') or {}
+        return error.get('code') == SUBSONIC_ERROR_GENERIC
