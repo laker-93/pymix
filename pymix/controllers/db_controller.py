@@ -16,6 +16,7 @@ from pymix.model.db_tables import (
 from pymix.model.invite_request import InviteRequestStatus
 from pymix.model.original_track_meta import OriginalTracks
 from pymix.model.wishlist import MetadataSource, ResolveState, WishlistStatus
+from pymix.services.import_progress import ImportPhase
 from pymix.utils.get_available_port import get_available_port
 
 
@@ -489,6 +490,21 @@ class DbController:
             job = session.query(JobRow).filter(JobRow.job_id == job_id).one()
             job.in_progress = False
             job.result = result
+            job.phase = ImportPhase.COMPLETE.value
+            session.commit()
+
+    def update_job_phase(self, job_id: str, phase: Optional[str], n_processed: int, n_total: int):
+        """
+        Record which pass of a multi-pass import job is running and how far
+        through it is (#51). Called from the import's worker thread on every
+        step, so it stays a single small UPDATE and never touches the job's
+        in_progress/result — only the router's job_completed owns those.
+        """
+        with self._session_factory() as session:
+            job = session.query(JobRow).filter(JobRow.job_id == job_id).one()
+            job.phase = phase
+            job.phase_n_processed = n_processed
+            job.phase_n_total = n_total
             session.commit()
 
     def _add_import_job(self, job_id: str, number_of_tracks_to_import: int, total_n_imported_tracks: int):
@@ -500,6 +516,11 @@ class DbController:
                 total_n_imported_tracks=total_n_imported_tracks,
                 in_progress=True,
                 result=None,
+                # The job starts in the audio phase the moment it's created — the
+                # first poll can land before the background task has said anything.
+                phase=ImportPhase.IMPORTING_AUDIO.value,
+                phase_n_processed=0,
+                phase_n_total=number_of_tracks_to_import,
             ))
             session.commit()
 

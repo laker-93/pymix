@@ -13,6 +13,7 @@ from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.routers.auth import require_reader, require_uploader
 from pymix.routers.beets_import import BeetsImportRequest
+from pymix.services.import_progress import ImportProgressReporter
 
 router = APIRouter()
 
@@ -96,6 +97,9 @@ async def run_import_task(rekordbox_xml_controller, username, job_id, db_control
             zip_path=zip_path,
             audio_path=audio_path,
             playlist_names=playlist_names,
+            # so the post-import passes report their own progress instead of the
+            # job sitting at a frozen 100% for the whole tail (#51)
+            progress=ImportProgressReporter(db_controller, job_id),
         )
         logger.info(f'finished RB import for user {username}')
     except Exception as ex:

@@ -80,6 +80,12 @@ class JobRow(Base):
     n_exported_tracks = Column(Integer, nullable=True)
     in_progress = Column(Boolean, default=True)
     result = Column(Boolean, nullable=True)
+    # Which pass of a multi-pass import job this is in, and that pass's own
+    # n/total — see pymix.services.import_progress.ImportPhase (#51). Null on
+    # export jobs and on any import row written before migration 016.
+    phase = Column(String, nullable=True)
+    phase_n_processed = Column(Integer, nullable=True)
+    phase_n_total = Column(Integer, nullable=True)
 
 
 class OriginalTrackMetaRow(Base):

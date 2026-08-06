@@ -12,6 +12,7 @@ from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.routers.auth import require_uploader, require_username
 from pymix.services.automatch_service import AutomatchService
+from pymix.services.import_progress import ImportProgressReporter, overall_percentage
 
 router = APIRouter()
 
@@ -125,7 +126,9 @@ async def run_import_task(rekordbox_xml_controller, username, public, job_id, db
     success = True
     try:
         logger.info(f'starting import for user {username}')
-        await rekordbox_xml_controller.consume_from_filebrowser(username, public)
+        await rekordbox_xml_controller.consume_from_filebrowser(
+            username, public, progress=ImportProgressReporter(db_controller, job_id)
+        )
     except Exception as ex:
         success = False
         msg = f'error occurred importing the following path in to beets for user {username} {repr(ex)}'
@@ -180,6 +183,16 @@ async def tracks_imported(
         beets_client: BeetsClient = Depends(Provide[Container.beets_client]),
         db_controller: DbController = Depends(Provide[Container.db_controller]),
 ) -> dict:
+    """
+    Progress of an import job, per phase.
+
+    An import is several passes, not one — `beet import`, then the subbox_id map,
+    then the XML metadata — and only the first is visible in beets' track count.
+    Reporting that count alone pinned the percentage at 100 for the whole tail
+    (laker-93/pymix#51), so the response also carries the phase the job is in and
+    that phase's own n/total, and `percentage_complete` composes the two. Only a
+    finished job ever reads 100.
+    """
     reason = ""
     percentage_complete = 0
     n_tracks_imported = 0
@@ -190,16 +203,22 @@ async def tracks_imported(
     original_n_tracks_to_import = job['n_tracks_to_import']
     in_progress = job['in_progress']
     result = job['result']
+    phase = job.get('phase')
+    phase_n_processed = job.get('phase_n_processed') or 0
+    phase_n_total = job.get('phase_n_total') or 0
     if original_n_tracks_to_import:
         total_n_imported_tracks = await beets_client.get_number_of_tracks(user, public)
         n_tracks_imported = total_n_imported_tracks - original_total_n_imported_tracks
-        percentage_complete = round((n_tracks_imported / original_n_tracks_to_import) * 100, 2)
+        audio_fraction = n_tracks_imported / original_n_tracks_to_import
+        phase_fraction = (phase_n_processed / phase_n_total) if phase_n_total else 0.0
+        percentage_complete = overall_percentage(phase, phase_fraction, audio_fraction)
         if job['in_progress'] is False and job['result'] is True:
             # it's possible due to duplicate tracks that the maths won't quite work out at 100%.
             # however, if the import job has been marked as complete, then we know we are done.
             percentage_complete = 100
         logger.debug(f'Started with a total of {original_total_n_imported_tracks} already imported tracks.')
         logger.debug(f'A total of {total_n_imported_tracks} have been imported so far.')
+        logger.debug(f'in phase {phase} ({phase_n_processed}/{phase_n_total})')
         logger.debug(f'have complete {percentage_complete}% out of {original_n_tracks_to_import}')
     else:
         reason = f"no in-progress jobs found for user {username}"
@@ -209,6 +228,9 @@ async def tracks_imported(
         'n_tracks_to_process': original_n_tracks_to_import,
         'n_tracks_processed': n_tracks_imported,
         'percentage_complete': percentage_complete,
+        'phase': phase,
+        'phase_n_processed': phase_n_processed,
+        'phase_n_total': phase_n_total,
         'result': result
     }
 
