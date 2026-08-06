@@ -2,6 +2,7 @@ import datetime
 from unittest.mock import AsyncMock, MagicMock
 import pytest
 
+import pymix.clients.subsonic_client as subsonic_client_module
 from pymix.clients.subsonic_client import (
     SubsonicClient,
     _split_title,
@@ -194,4 +195,67 @@ async def test_get_track_match_max_tier_2_skips_token_search():
     # token tier (which would call query_track_by_name per token) must not run.
     client.query_tracks_by.assert_awaited_once()
     client.query_track_by_name.assert_awaited_once_with({"username": "u", "password": "p"}, "Rodent")
+
+
+# --- set_rating -------------------------------------------------------------------
+
+def _rated(sub_track_id, rating):
+    t = SubBoxTrack(name=f"t{sub_track_id}", artist="Burial", album=None)
+    t.sub_track_id = sub_track_id
+    t.rating = rating
+    return t
+
+
+@pytest.mark.anyio
+async def test_set_rating_issues_one_call_per_rated_track_and_never_sleeps(monkeypatch):
+    """
+    One `setRating` per rated track, and no delay between them.
+
+    This loop used to `asyncio.sleep(1)` after every call, which cost one second per
+    rated track and dominated a Rekordbox import (~99s of a ~121s, 99-track import).
+    Navidrome has no such rate limit — it accepts the writes back to back — and
+    `setRating` takes a single id, so there is no batch call to collapse this into.
+    Assert the sleep stays gone rather than trusting a comment.
+    """
+    slept = []
+
+    async def _fail_on_sleep(delay, *args, **kwargs):
+        slept.append(delay)
+
+    monkeypatch.setattr(subsonic_client_module.asyncio, "sleep", _fail_on_sleep)
+
+    client = SubsonicClient(
+        "http://{user}:{port}", MagicMock(), "mock_version", "foo", "bar", None, "test"
+    )
+    client.get = AsyncMock(return_value={'subsonic-response': {'status': 'ok'}})
+
+    # The unrated track must be skipped entirely.
+    tracks = [_rated(1, 5), _rated(2, 3), _rated(3, 4), _track("unrated")]
+    await client.set_rating({"username": "lajp", "password": "pw"}, tracks)
+
+    assert client.get.await_count == 3
+    assert slept == []
+    called = [c.args[0] for c in client.get.await_args_list]
+    for song_id, rating in ((1, 5), (2, 3), (3, 4)):
+        assert any(f"id={song_id}" in u and f"rating={rating}" in u for u in called), called
+
+
+@pytest.mark.anyio
+async def test_set_rating_logs_and_continues_when_one_write_fails():
+    """A single rejected rating must not abort the rest of the pass."""
+    client = SubsonicClient(
+        "http://{user}:{port}", MagicMock(), "mock_version", "foo", "bar", None, "test"
+    )
+    client.get = AsyncMock(side_effect=[
+        {'subsonic-response': {'status': 'ok'}},
+        {'subsonic-response': {'status': 'failed', 'error': {'code': 70}}},
+        {'subsonic-response': {'status': 'ok'}},
+    ])
+
+    await client.set_rating(
+        {"username": "lajp", "password": "pw"},
+        [_rated(1, 5), _rated(2, 3), _rated(3, 4)],
+    )
+
+    assert client.get.await_count == 3
 

@@ -589,6 +589,18 @@ class SubsonicClient(BaseAPIClient):
         return response['subsonic-response']['status'] == 'ok'
 
     async def set_rating(self, user: dict, tracks: List[SubBoxTrack]):
+        """
+        Apply each track's rating in Navidrome, one ``setRating`` call per rated track.
+
+        The requests are issued sequentially, so only one is ever in flight — there is
+        no throttle beyond that. This loop used to `asyncio.sleep(1)` after every call,
+        which made the pass cost one second per rated track and dominated the whole
+        import: a 99-track Rekordbox XML spent ~99s of its ~121s here, doing nothing.
+        The sleep arrived undocumented in an early "minor fixes" commit and no other
+        Subsonic call in this client throttles (`get_track_match` runs hundreds of
+        times per import unthrottled), so it was a debugging leftover rather than a
+        rate limit Navidrome asks for.
+        """
         username = user['username']
         password = user['password']
         port = 4533 # since we're inside the same docker network, can call the private port
@@ -609,4 +621,3 @@ class SubsonicClient(BaseAPIClient):
             response = await self.get(url)
             if response['subsonic-response']['status'] != 'ok':
                 logger.error(f'failed to set status on song id {song_id} with response: {response}')
-            await asyncio.sleep(1)
