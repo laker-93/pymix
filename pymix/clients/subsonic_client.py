@@ -307,21 +307,39 @@ class SubsonicClient(BaseAPIClient):
         so the caller just does the queries it would have done anyway.
         """
         username = user['username']
+        status = await self.get_scan_status(user)
+        if status is None:
+            logger.warning(f'unable to read scan status for {username}; assuming the library is not empty')
+            return False
+        empty = not status.get('scanning', False) and status.get('count', -1) == 0
+        if empty:
+            logger.info(f'navidrome has indexed no tracks for {username} and is not scanning')
+        return empty
+
+    async def get_scan_status(self, user: dict) -> Optional[dict]:
+        """
+        The raw Subsonic ``scanStatus`` object, or None if it couldn't be read.
+
+        Carries ``scanning`` (a scan is running now), ``count`` (tracks indexed so
+        far) and ``lastScan`` (when the most recent scan *finished*). Callers use
+        the trio to tell "not indexed yet" apart from "indexed and absent" --
+        :meth:`library_is_empty` for a single point-in-time answer, and
+        SubsonicOrchestrator.scan_and_wait to follow one scan to completion.
+
+        Returns None rather than raising so a flaky status read degrades into the
+        caller's own timeout/fallback instead of failing an import outright.
+        """
+        username = user['username']
         password = user['password']
         port = 4533  # since we're inside the same docker network, can call the private port
         base_path = self._host.format(user=username, port=port)
         url = self._subsonic_format_url(username, password, f"{base_path}/rest/getScanStatus")
         try:
             response = await self.get(url)
-            status = response['subsonic-response']['scanStatus']
-            empty = not status.get('scanning', False) and status.get('count', -1) == 0
+            return response['subsonic-response']['scanStatus']
         except Exception:
-            logger.warning(f'unable to read scan status for {username}; assuming the library is not empty',
-                           exc_info=True)
-            return False
-        if empty:
-            logger.info(f'navidrome has indexed no tracks for {username} and is not scanning')
-        return empty
+            logger.warning(f'unable to read scan status for {username}', exc_info=True)
+            return None
 
     async def get_now_playing(self, user: dict) -> List[dict]:
         """

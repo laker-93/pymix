@@ -17,6 +17,12 @@ logger = logging.getLogger(__name__)
 # actually needed (Rekordbox/Serato export) — see laker-93/pymix#66 follow-up.
 SUBSONIC_PLAYLIST_FETCH_CONCURRENCY = int(os.environ.get("SUBSONIC_PLAYLIST_FETCH_CONCURRENCY", "16"))
 
+# How scan_and_wait follows a Navidrome scan to completion. The timeout is a
+# backstop, not a target: it only decides how long we tolerate a scan that never
+# reports finishing before carrying on anyway.
+SCAN_WAIT_TIMEOUT_S = float(os.environ.get("SCAN_WAIT_TIMEOUT_S", "300"))
+SCAN_WAIT_POLL_INTERVAL_S = float(os.environ.get("SCAN_WAIT_POLL_INTERVAL_S", "0.25"))
+
 
 class SubsonicOrchestrator:
     def __init__(self, subsonic_client: SubsonicClient):
@@ -71,6 +77,72 @@ class SubsonicOrchestrator:
     async def scan(self, user: dict):
         result = await self._subsonic_client.scan(user)
         assert result
+
+    async def scan_and_wait(
+        self,
+        user: dict,
+        timeout_s: float = SCAN_WAIT_TIMEOUT_S,
+        poll_interval_s: float = SCAN_WAIT_POLL_INTERVAL_S,
+    ) -> bool:
+        """
+        Trigger a Navidrome scan and return once it has actually finished.
+
+        An import has to wait for this: `startScan` is asynchronous, and everything
+        downstream (playlist creation, the rated pass, the cue/metadata pass) finds
+        its tracks by querying Navidrome. Anything not yet indexed when those run is
+        simply not found, and the import completes "successfully" having silently
+        skipped it.
+
+        This replaces a flat ``sleep(2)``, which was wrong in both directions: on a
+        small import it burnt 2s of a ~10s job for nothing, and on a large one it
+        expired long before the scan finished, which is the failure above. Measured
+        on a 99-track dev import, the scan was still running ~5s after the import had
+        already declared itself done.
+
+        Completion is "a scan finished that had not finished when we started", i.e.
+        ``lastScan`` moved on and nothing is running now. Waiting for
+        ``scanning == False`` alone would race the trigger -- Navidrome reports
+        ``scanning: false`` for the moments between accepting startScan and beginning
+        work, so a poll landing in that window would return instantly and wait for
+        nothing. ``seen_scanning`` is the belt-and-braces path for a Navidrome that
+        doesn't move ``lastScan`` the way we expect.
+
+        Returns True if it saw the scan finish, False if it gave up. False is not
+        fatal and does not raise: the caller carries on and may match against a
+        partially indexed library, which is strictly what the old sleep did every
+        time. It is logged at warning so it's visible when it happens.
+        """
+        username = user['username']
+        before = await self._subsonic_client.get_scan_status(user)
+        baseline_last_scan = (before or {}).get('lastScan')
+
+        await self.scan(user)
+
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        seen_scanning = False
+        while asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(poll_interval_s)
+            status = await self._subsonic_client.get_scan_status(user)
+            if status is None:
+                # Transient status-read failure. The deadline still applies, so this
+                # can't spin forever; keep polling rather than give up on one miss.
+                continue
+            if status.get('scanning', False):
+                seen_scanning = True
+                continue
+            finished = status.get('lastScan') != baseline_last_scan or seen_scanning
+            if finished:
+                logger.info(
+                    f"navidrome scan for {username} finished with "
+                    f"{status.get('count')} track(s) indexed"
+                )
+                return True
+
+        logger.warning(
+            f"navidrome scan for {username} did not report finishing within {timeout_s}s; "
+            f"continuing anyway -- tracks it has not indexed yet will not be matched"
+        )
+        return False
 
     async def create_playlists(self, user: dict, subbox_playlists: List[SubBoxPlaylist]):
         """
