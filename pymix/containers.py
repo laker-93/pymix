@@ -190,7 +190,7 @@ class Container(containers.DeclarativeContainer):
     beets_client = providers.Singleton(
         BeetsClient,
         app_env=config.app_env,
-        beets_exec=beets_exec,
+        serving_music_path_base=config.containers.subsonic.serving_music_path_base,
     )
 
     youtube_match_service = providers.Singleton(

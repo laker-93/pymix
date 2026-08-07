@@ -6,9 +6,11 @@ from typing import Optional
 
 from mutagen import File
 
-
 logger = logging.getLogger(__name__)
 
+AUDIO_EXTENSIONS = {
+    '.mp3', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.wav', '.aiff', '.aif', '.wma', '.alac', '.zip',
+}
 
 SUPPORTED_MUTAGEN_AUDIO_TYPES = {
     "MP3",

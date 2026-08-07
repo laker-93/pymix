@@ -57,7 +57,7 @@ async def serato_import(
         #    'reason': f"user {username} has attempted to import before uploading any tracks."
         #}
 
-    total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
+    total_n_imported_tracks = await beets_client.count_tracks_on_disk(user)
     job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
     logger.info(f'Serato importing {total_n_tracks_for_import} tracks for user {username}')
     background_tasks.add_task(run_import_task, serato_controller, username, job_id, db_controller,
@@ -117,7 +117,7 @@ async def serato_export(
     user_root = request.user_root
     # todo: check number of tracks in xml export matches that in beets matches that in the export zip etc.
     try:
-        n_beets_tracks = await beets_client.get_number_of_tracks(user)
+        n_beets_tracks = await beets_client.count_tracks_on_disk(user)
         #job_id = db_controller.create_export_job(username, n_beets_tracks)
         logger.info(f'exporting {n_beets_tracks} tracks for user {username}')
         output_path = fb_file_handler.get_crate_output_path(username)

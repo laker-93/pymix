@@ -66,7 +66,7 @@ async def rekordbox_import(
         #    'reason': f"user {username} has not uploaded any files to import."
         #}
 
-    total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
+    total_n_imported_tracks = await beets_client.count_tracks_on_disk(user)
     job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
     logger.info(f'RB importing {total_n_tracks_for_import} tracks for user {username}')
     requested_playlists = [p for p in request.playlistNames if p] if request.playlistNames else None
@@ -107,7 +107,7 @@ async def run_import_task(rekordbox_xml_controller, username, job_id, db_control
         msg = f'error occurred importing the following path in to beets for user {username} {repr(ex)}'
         logger.error(msg, exc_info=True)
     else:
-        #total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
+        #total_n_imported_tracks = await beets_client.count_tracks_on_disk(user)
         logger.info(f'successfully RB imported {total_n_tracks_for_import} for user {username}')
     finally:
         logger.info(f"beets output {beets_output}")
@@ -138,7 +138,7 @@ async def rekordbox_export(
     user_root = request.user_root
     # todo: check number of tracks in xml export matches that in beets matches that in the export zip etc.
     try:
-        n_beets_tracks = await beets_client.get_number_of_tracks(user)
+        n_beets_tracks = await beets_client.count_tracks_on_disk(user)
         #job_id = db_controller.create_export_job(username, n_beets_tracks)
         logger.info(f'exporting {n_beets_tracks} tracks for user {username}')
         xml_output_path = fb_file_handler.get_xml_output_path(username)

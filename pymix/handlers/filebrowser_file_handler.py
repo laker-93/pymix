@@ -17,13 +17,9 @@ from pymix.controllers.db_controller import DbController
 from pymix.model.original_track_meta import OriginalTracks, OriginalTrackMeta
 from pymix.model.subboxtrack import SubBoxTrack
 from pymix.utils.tag_subbox_id import tag_subbox_id
-from pymix.utils.utility import detect_audio_type, detect_audio_type_with_reason
+from pymix.utils.utility import AUDIO_EXTENSIONS, detect_audio_type, detect_audio_type_with_reason
 
 logger = logging.getLogger(__name__)
-
-AUDIO_EXTENSIONS = {
-    '.mp3', '.flac', '.m4a', '.aac', '.ogg', '.opus', '.wav', '.aiff', '.aif', '.wma', '.alac', '.zip',
-}
 
 
 def _has_audio_files(directory: Path) -> bool:
