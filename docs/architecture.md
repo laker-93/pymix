@@ -11,6 +11,10 @@ controllers/     coordinate a use-case across multiple orchestrators/handlers/cl
    │
 orchestrators/   business logic over ONE domain (subsonic, rekordbox xml, serato crates, services)
    │
+services/        cross-cutting logic that isn't one domain and often has no HTTP caller
+                 (wishlist resolve/reconcile, sheet sync, track matching, link parsing
+                  via yt-dlp, MusicBrainz/YouTube matching, automatch, import progress)
+   │
 clients/         async wrappers over external services (Navidrome/Subsonic REST HTTP, beets CLI via docker exec)
 handlers/        side-effecting helpers (filesystem staging, docker compose, env/zip files)
    │
@@ -37,10 +41,11 @@ through a handler. A controller never builds a URL; it goes through a client.
 **When you add a router**: include it in `create_app`'s `app.include_router(...)`
 list AND add its module to the `wire(...)` list in `create_container`.
 
-## Lifespan / background watcher
+## Lifespan / background loops
 
-`registration.lifespan` starts two long-lived anyio tasks connected by a memory
-object stream:
+`registration.lifespan` starts **five** long-lived anyio tasks in one task group. The
+first two are connected by a memory object stream and form the watch-dir import path:
+
 - `poll_watchdir` (in `handlers/filebrowser_file_handler.py`) — watches
   `/user-updownloads/<user>/watch/` for new audio (debounced 15s, stability-checked),
   enforces per-user storage limits, and sends the username downstream.
@@ -48,8 +53,19 @@ object stream:
   `RekordboxXMLController.consume_from_filebrowser(user, public=False, watch=True)`,
   wrapped in a job row.
 
-This is the "drop files in a folder and they auto-import" path, distinct from the
-explicit `/rekordbox/import` endpoint.
+That is the "drop files in a folder and they auto-import" path, distinct from the
+explicit `/rekordbox/import` endpoint. The other three poll on their own intervals
+(all configured under `google_sheets` / `wishlist` in `config.*.yaml`):
+
+- `sheet_sync_loop` (`services/sheet_sync_service.py`) — pulls wishlist rows from each
+  user's attached Google Sheet.
+- `wishlist_reconcile_loop` (`services/wishlist_reconcile_service.py`) — flips open
+  wishlist items to `available` once the track shows up in the user's library.
+- `wishlist_resolve_loop` (`services/wishlist_resolve_service.py`) — resolves pending
+  free-text items to a canonical MusicBrainz match before anything searches for them.
+
+**None of these has an HTTP caller**, so a failure inside one is invisible to the user
+(they just see "nothing happened"). Keep them defensive, and log loudly.
 
 ## Container topology (per user)
 
