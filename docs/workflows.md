@@ -52,6 +52,13 @@ composes one percentage from both — reporting the beets count alone pinned the
 `docker exec` each (`utils/beets_batch.py`); they used to shell in once per track,
 which cost ~13 min on a 100-track import.
 
+Step 5's three passes all resolve the same XML tracks against Navidrome, so they
+share one `TrackMatcher` (`services/track_matcher.py`) for the job: it resolves each
+distinct `(title, artist, album)` once and runs the remaining lookups
+`IMPORT_MATCH_CONCURRENCY` (16) at a time. Before that, a track in two playlists was
+looked up once per playlist *and* again in each tail pass — ~4 sequential Subsonic
+round trips per track, which is invisible locally and 12-32 s on a prod RTT (#104).
+
 ## 3. Rekordbox export (`POST /rekordbox/export`)
 `create_rekordbox_xml_from_subsonic_playlists`:
 1. Fetch Navidrome playlists + their tracks.
@@ -84,6 +91,14 @@ Matching is fuzzy (`SubsonicClient.get_track_match` / `_find_best_match`) with
 escalating fallbacks: title+artist → title → per-token → bracket-stripped, each
 with a lower similarity threshold. `subbox_id` presence is the fast path
 (`/tracks/presence`) before falling back to fuzzy matching.
+
+A *hit* costs one Subsonic query; a *miss* walks every tier — 2 + one query per
+title token — so the widen is what the fan-out endpoints pay for. The token tier's
+queries run together rather than in series, and `/sync/match_tracks` (the client's
+pre-upload preview, whose normal first-time answer is "you have none of this")
+spends one `getScanStatus` instead of a doomed widen per track when Navidrome has
+indexed nothing yet and isn't scanning — `TrackMatcher(skip_if_library_empty=True)`,
+which the import deliberately does not set (#105).
 
 ## 7. Metadata (cues/loops) — `/track/metadata/*`
 Cue/loop data is validated against `cue_schema` (in `routers/track.py`), stored

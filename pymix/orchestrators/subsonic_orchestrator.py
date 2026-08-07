@@ -6,6 +6,7 @@ from typing import List, Set, AsyncIterator, Optional
 from pymix.clients.subsonic_client import SubsonicClient
 from pymix.model.subboxplaylist import SubBoxPlaylist
 from pymix.model.subboxtrack import SubBoxTrack
+from pymix.services.track_matcher import TrackMatcher
 
 logger = logging.getLogger(__name__)
 
@@ -94,10 +95,24 @@ class SubsonicOrchestrator:
         await self._subsonic_client.set_rating(user, tracks)
 
 
-    async def update_tracks_with_subid(self, user: dict, subbox_playlists: Optional[List[SubBoxPlaylist]] = None, tracks: Optional[List[SubBoxTrack]] = None) -> None:
+    async def update_tracks_with_subid(
+        self,
+        user: dict,
+        subbox_playlists: Optional[List[SubBoxPlaylist]] = None,
+        tracks: Optional[List[SubBoxTrack]] = None,
+        matcher: Optional[TrackMatcher] = None,
+    ) -> None:
         """
         Given list of subbox playlists (e.g. formed from parsing XML), update the playlist
         track with the id of the subsonic track.
+
+        Playlist membership produces a *distinct* SubBoxTrack per playlist, so flattening
+        the playlists yields the same track once per playlist it belongs to. Each lookup
+        also stands alone -- it only sets that track's own ``sub_track_id``. So the
+        lookups go through a :class:`TrackMatcher`, which does them a few at a time and
+        resolves each distinct (title, artist, album) exactly once (#104). Pass ``matcher``
+        to share one cache with the caller's other passes over the same tracks; without
+        one, the dedup is still scoped to this call.
         """
         # todo can use the db here to get the original user location from xml and look up subbox id from original meta data
         # then use subbox id and beets query to find new path
@@ -110,12 +125,19 @@ class SubsonicOrchestrator:
                     tracks_to_update.extend(playlist.tracks)
         else:
             tracks_to_update = tracks
-        for track in tracks_to_update:
-            name = track.name
+        if matcher is None:
+            matcher = TrackMatcher(self._subsonic_client)
+
+        async def update_one(track: SubBoxTrack) -> None:
             if track.sub_track_id is not None:
-                continue
+                return
             try:
-                matched_track = await self._subsonic_client.get_track_match(user, title=name, artist=track.artist)
+                # album matters: without it get_track_match strips the artist out of the
+                # title, so a track titled "DJ John - IT" is searched for as "IT" and the
+                # correct Navidrome candidate is rejected (#96).
+                matched_track = await matcher.match(
+                    user, title=track.name, artist=track.artist, album=track.album or None
+                )
             except (KeyError, AssertionError) as ex:
                 logger.warning(f'unable to find track in navidrome {track}. This track will not be imported properly. Please ensure name of track in rekordbox is correct. Exception {ex}')
             else:
@@ -124,6 +146,8 @@ class SubsonicOrchestrator:
                     track.sub_track_id = match.sub_track_id
                 else:
                     logger.warning(f'unable to find track in navidrome {track}. This track will not be imported properly. Please ensure name of track in rekordbox is correct.')
+
+        await asyncio.gather(*(update_one(track) for track in tracks_to_update))
 
     async def get_all_tracks(self, user: dict) -> AsyncIterator[List[SubBoxTrack]]:
         return self._subsonic_client.get_all_tracks(user, 50)

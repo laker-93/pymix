@@ -289,6 +289,40 @@ class SubsonicClient(BaseAPIClient):
         logger.info(f'completed scan of subsonic for user {username} with response {response}')
         return response['subsonic-response']['status'] == 'ok'
 
+    async def library_is_empty(self, user: dict) -> bool:
+        """
+        True only when Navidrome has indexed nothing for this user *and* is not
+        currently scanning.
+
+        One call that can stand in for a whole fan-out of doomed matches: against an
+        empty library every ``get_track_match`` is a guaranteed miss, and a miss walks
+        all three tiers -- 2 + one query per title token (#105). The client's upload
+        preview hits exactly this, matching a whole XML against a library that has
+        nothing in it yet.
+
+        The ``scanning`` guard is what makes this safe to trust for a whole job: an
+        import triggers ``startScan`` and Navidrome indexes asynchronously, so a
+        count of 0 during a running scan means "not indexed yet", not "will never
+        match". Anything unexpected (a failed or unparseable response) reports False
+        so the caller just does the queries it would have done anyway.
+        """
+        username = user['username']
+        password = user['password']
+        port = 4533  # since we're inside the same docker network, can call the private port
+        base_path = self._host.format(user=username, port=port)
+        url = self._subsonic_format_url(username, password, f"{base_path}/rest/getScanStatus")
+        try:
+            response = await self.get(url)
+            status = response['subsonic-response']['scanStatus']
+            empty = not status.get('scanning', False) and status.get('count', -1) == 0
+        except Exception:
+            logger.warning(f'unable to read scan status for {username}; assuming the library is not empty',
+                           exc_info=True)
+            return False
+        if empty:
+            logger.info(f'navidrome has indexed no tracks for {username} and is not scanning')
+        return empty
+
     async def get_now_playing(self, user: dict) -> List[dict]:
         """
         The Subsonic ``getNowPlaying`` entries for this user, each carrying a
@@ -446,7 +480,7 @@ class SubsonicClient(BaseAPIClient):
             return None
 
         logger.info(f'no matches querying by {title}. Querying on tokens of title...')
-        candidate_tracks = []
+        tokens: List[str] = []
         seen_tokens: set[str] = set()
         raw_tokens = title.split()
         for raw_token in raw_tokens:
@@ -463,9 +497,15 @@ class SubsonicClient(BaseAPIClient):
             if token in seen_tokens:
                 continue
             seen_tokens.add(token)
-            candidate_tracks.extend(
-                await self.query_track_by_name(user, token)
-            )
+            tokens.append(token)
+        # One query per token, but run together rather than one after another: this
+        # tier is only reached on a miss, so a miss used to cost 2 + one round trip
+        # per title token in series -- 8 for a six-word title (#105). The candidate
+        # lists are concatenated in token order either way, so scoring is unchanged.
+        token_results = await asyncio.gather(
+            *(self.query_track_by_name(user, token) for token in tokens)
+        )
+        candidate_tracks = [track for result in token_results for track in result]
         match = await self._get_best_track_match(title, artist, album, candidate_tracks, max(0.5, min_confidence))
         if match:
             return match

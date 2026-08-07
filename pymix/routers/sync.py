@@ -17,6 +17,7 @@ from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.model.original_track_meta import OriginalTracks
 from pymix.routers.auth import require_reader, require_uploader
+from pymix.services.track_matcher import TrackMatcher
 
 router = APIRouter()
 
@@ -157,13 +158,17 @@ async def match_tracks(
         subsonic_client: SubsonicClient = Depends(Provide[Container.subsonic_client])
 ) -> MatchedTracksResponse:
 
-    semaphore = asyncio.Semaphore(MATCH_TRACKS_CONCURRENCY)
+    # One matcher per request: same bounded concurrency as before, plus it resolves a
+    # repeated (title, artist, album) once, and — the case this endpoint actually lives
+    # in — spends one getScanStatus instead of a doomed 3-tier widen per track when the
+    # library it is matching against is still empty (#105). This is the client's
+    # pre-upload preview, so an empty library is the normal first-time answer.
+    matcher = TrackMatcher(
+        subsonic_client, concurrency=MATCH_TRACKS_CONCURRENCY, skip_if_library_empty=True
+    )
 
     async def match_one(track: Track) -> MatchedTrack:
-        async with semaphore:
-            match = await subsonic_client.get_track_match(
-                user, track.title, track.artist, track.album
-            )
+        match = await matcher.match(user, track.title, track.artist, track.album)
         if match:
             match = match[0]
             logger.info(f'matched track {track} with {match}')
@@ -172,6 +177,7 @@ async def match_tracks(
 
     # gather preserves input order, so the response lines up 1:1 with tracks.tracks.
     matched_tracks = await asyncio.gather(*(match_one(t) for t in tracks.tracks))
+    matcher.log_stats("sync/match_tracks")
 
     return MatchedTracksResponse(
         success=True,
