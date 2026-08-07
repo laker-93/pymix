@@ -35,10 +35,10 @@ class BeetsClient:
         result = self._beets_exec.execute(container_name, beets_command)
         return self._parse_track_count(result)
 
-    async def count_tracks_on_disk(self, user: dict) -> int:
+    async def count_tracks_on_disk(self, user: dict, public: bool = False) -> int:
         """
-        Count a user's landed audio files directly on the host filesystem, instead
-        of shelling `beet stats` into their container.
+        Count landed audio files directly on the host filesystem, instead of
+        shelling `beet stats` into a container.
 
         This exists for the import-progress poll (laker-93/pymix#106), which is
         called roughly every 3s for the whole duration of an import and, backed by
@@ -50,21 +50,17 @@ class BeetsClient:
         that (3s sleep + exec time) apart, never closer.
 
         pymix already reads/writes this same directory directly elsewhere without
-        `docker exec` (e.g. ServicesOrchestrator._spot_check_sample) — the user's
-        beets container mounts `{serving_music_path_base}/{username}` on the host
-        as `/music` (`directory: /music` in templates/beets/config.yaml), which is
-        exactly where `beet import --move` lands files. Counting files there is a
-        local filesystem walk, not a cross-container exec, and is at least as fresh
-        as `beet stats` for progress purposes: the two can only disagree while a
-        file is mid-move, self-correcting on the next poll.
-
-        Only covers per-user imports. The public/shared library has no verified
-        on-disk mapping through this codebase, and is a rare admin-triggered
-        refresh rather than the polled hot path this exists to fix, so it still
-        goes through `get_number_of_tracks`.
+        `docker exec` (e.g. ServicesOrchestrator._spot_check_sample) — a beets
+        container mounts `{serving_music_path_base}/{username}` (or `/public` for
+        the shared library) on the host as `/music` (`directory: /music` in
+        templates/beets/config.yaml), exactly where `beet import --move` lands
+        files. Counting files there is a local filesystem walk, not a
+        cross-container exec, and is at least as fresh as `beet stats` for
+        progress purposes: the two can only disagree while a file is mid-move,
+        self-correcting on the next poll.
         """
-        username = user['username']
-        library_dir = Path(f"{self._serving_music_path_base}/{username}")
+        subdir = 'public' if public else user['username']
+        library_dir = Path(f"{self._serving_music_path_base}/{subdir}")
         return await anyio.to_thread.run_sync(self._count_audio_files, library_dir)
 
     @staticmethod

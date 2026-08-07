@@ -82,3 +82,20 @@ async def test_count_tracks_on_disk_returns_zero_before_any_import(tmp_path):
 
     assert count == 0
     mock_beets_exec.execute.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_count_tracks_on_disk_public_reads_the_shared_library_directory(tmp_path):
+    mock_beets_exec = mock.Mock(spec=BeetsExec)
+    beets_client = _make_client(mock_beets_exec, tmp_path)
+
+    public_dir = tmp_path / "public"
+    public_dir.mkdir()
+    (public_dir / "track1.mp3").write_bytes(b"")
+    (tmp_path / "demoadmin").mkdir()
+    (tmp_path / "demoadmin" / "track1.mp3").write_bytes(b"")
+
+    count = await beets_client.count_tracks_on_disk({"username": "demoadmin"}, public=True)
+
+    assert count == 1
+    mock_beets_exec.execute.assert_not_called()
