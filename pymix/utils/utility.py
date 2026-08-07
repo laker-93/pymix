@@ -1,9 +1,13 @@
+import logging
 from urllib.parse import urlencode
 import urllib.parse as urlparse
 from pathlib import Path
 from typing import Optional
 
 from mutagen import File
+
+
+logger = logging.getLogger(__name__)
 
 
 SUPPORTED_MUTAGEN_AUDIO_TYPES = {
@@ -51,7 +55,11 @@ def detect_audio_type(path: str | Path) -> Optional[str]:
 
 
 def detect_audio_type_with_reason(path: str | Path) -> tuple[Optional[str], str]:
-    audio = File(str(path))
+    try:
+        audio = File(str(path))
+    except Exception:
+        logger.warning(f'failed to parse {path} as audio, skipping', exc_info=True)
+        return None, 'unreadable'
     if audio is None:
         return None, 'mutagen_unrecognized_file'
     audio_type = type(audio).__name__
