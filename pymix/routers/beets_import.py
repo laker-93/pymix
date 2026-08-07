@@ -207,7 +207,14 @@ async def tracks_imported(
     phase_n_processed = job.get('phase_n_processed') or 0
     phase_n_total = job.get('phase_n_total') or 0
     if original_n_tracks_to_import:
-        total_n_imported_tracks = await beets_client.get_number_of_tracks(user, public)
+        # Reads the landed-file count off the host filesystem rather than shelling
+        # `beet stats` into the container on every poll (laker-93/pymix#106). The
+        # public/shared library import has no verified on-disk mapping and is a rare
+        # admin-triggered refresh, not this hot path, so it still goes via `beet stats`.
+        if public:
+            total_n_imported_tracks = await beets_client.get_number_of_tracks(user, public)
+        else:
+            total_n_imported_tracks = await beets_client.count_tracks_on_disk(user)
         n_tracks_imported = total_n_imported_tracks - original_total_n_imported_tracks
         audio_fraction = n_tracks_imported / original_n_tracks_to_import
         phase_fraction = (phase_n_processed / phase_n_total) if phase_n_total else 0.0
