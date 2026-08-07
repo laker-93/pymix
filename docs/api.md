@@ -2,8 +2,8 @@
 
 App `root_path="/pymix"` (so behind the proxy everything is prefixed `/pymix`).
 CORS allows the feishin/sub-box web origins with credentials; methods limited to
-GET/POST/DELETE/OPTIONS. Auth is by the `session_id` cookie (set on create/login) and
-nothing else; `/user/storage_check` also accepts that session id as a Bearer token.
+GET/POST/DELETE/PATCH/OPTIONS. Auth is by the `session_id` cookie (set on create/login)
+and nothing else; `/user/storage_check` also accepts that session id as a Bearer token.
 
 User-scoped endpoints resolve their caller with the `require_user` / `require_username`
 dependency in `routers/auth.py`, which returns **401** when the cookie is missing,
@@ -13,9 +13,23 @@ naming them. It has been removed — `username` now appears only where it is an 
 rather than a claim of identity (`/user/create`, `/user/login`, and the `[db]` lookup
 helpers).
 
-`POST /invite-request` is the sole exception — an unauthenticated write, because its
-caller has no account by definition. See "Beta invites" below for the controls that
-replace the session cookie there; don't treat it as a precedent for anything else.
+Two variants exist for the `demo` account, which has no container stack of its own
+(also in `routers/auth.py`):
+
+- **`require_reader`** — library *reads*, i.e. `/sync*`, `/rekordbox/export`,
+  `/serato/export`. Resolves `demo` to demoadmin's user row, so every downstream client
+  targets demoadmin's containers.
+- **`require_uploader`** — library *writes*, i.e. `/rekordbox/import`, `/serato/import`,
+  `/beets/import`, `/beets/reimport`, `/beets/import/progress`, `/sync/match_tracks`,
+  `/sync/map_meta`. **403s `demo` outright.** (The remaining `/beets/*` read-only count
+  and duplicate endpoints just use `require_username`.)
+
+Both are hardcoded username checks, not a role system — `demo` is a one-off account.
+
+Two endpoints sit outside the session cookie entirely: `/admin/*` (a shared-secret
+header — see "Admin" below) and `POST /invite-request`, an unauthenticated write
+because its caller has no account by definition (see "Beta invites"). Neither is a
+precedent for anything else.
 
 All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 
@@ -51,6 +65,7 @@ All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 | GET `/beets/import/tracks_to_be_imported` | Count of staged tracks awaiting import. |
 | GET `/beets/duplicates` | List duplicate tracks (`beet duplicates`). |
 | DELETE `/beets/duplicates` | Remove duplicates. |
+| POST `/beets/reimport` | Reimport the caller's own tracks against MusicBrainz, scoped to `query` (raw beets query syntax, e.g. `path:Artist/Album`). **Synchronous** — no job/progress polling; it's the deliberate, small-scope escape hatch (#95) that replaced the removed background automatch sweep. Returns `{matched, nomatch}`. |
 
 ## Export progress — `routers/export_progress.py`
 | GET `/export/progress` | Poll an export job. |
@@ -63,6 +78,7 @@ All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 | POST `/sync/plan` | Compute a sync plan: which requested tracks are already present vs missing on server, download size, metadata updates. Read-only. |
 | POST `/sync` and POST `/sync/tracks` | Resolve requested tracks on the server and zip them into the user's downloads dir for download. `/sync/tracks` uses a more lenient multi-stage matcher. |
 | POST `/sync/playlists` | Zip the tracks of selected server playlists, excluding ones the client already has. |
+| GET `/sync/download/{filename}` | Stream back a file a previous call wrote to the user's downloads dir (zip or Rekordbox XML). Exists so the client fetches through its pymix session instead of filebrowser directly — which is what makes `demo` able to download at all, since its own filebrowser credential can't see demoadmin's dir (#66). |
 
 ## Tracks & metadata — `routers/track.py`
 | Method/Path | Purpose |
@@ -71,6 +87,42 @@ All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 | POST `/track/metadata/update` | Versioned update of a track's cue/loop metadata (`cuedata` validated against `cue_schema`). `source_app` ∈ {serato, rekordbox}, `change_type` ∈ {upload, edit, sync, merge}. |
 | GET `/track/metadata/{track_id}` | Fetch latest cue/loop metadata for a track. |
 | DELETE `/track` | Delete tracks (by `subbox_id` list) from DB tables + remove from beets. |
+
+## Wishlist — `routers/wishlist.py`
+
+The wishlist is "tracks the user wants but doesn't have yet". Statuses and the
+resolve/reconcile lifecycle are in `docs/design-wishlist-library-automatch.md`; the
+`../subbox-slskd` downloader is a second client of these routes.
+
+| Method/Path | Purpose |
+|---|---|
+| GET `/wishlist` | List the caller's items. Optional `status` / `resolve_state` query filters (validated against the enums; 400 on an unknown value). |
+| POST `/wishlist`, POST `/wishlist/bulk` | Create one / many items. |
+| GET `/wishlist/{id}`, PATCH `/wishlist/{id}`, DELETE `/wishlist/{id}` | Fetch, update (status transitions land here — `download_wishlist.py` uses PATCH to flip an item to `downloaded`), delete. |
+| POST `/wishlist/parse-link` | Extract artist/title metadata from a pasted YouTube/Bandcamp/SoundCloud URL via `LinkParseService` (yt-dlp). 400 if nothing usable comes back. |
+| POST `/wishlist/match-metadata` | Resolve free-text (hand-typed, or an `inbox` note) to a canonical MusicBrainz artist/title. |
+| POST `/wishlist/{id}/match-youtube` | Find a YouTube match for one item. |
+| POST `/wishlist/reconcile` | Run the library reconcile for the caller now, instead of waiting for the background loop: flips open items to `available` when the track has appeared in their library. |
+| PATCH `/wishlist/sheet`, GET `/wishlist/sheet/status` | Attach a Google Sheet as a wishlist source, and read its last sync status/error. |
+
+## Admin — `routers/admin.py`
+
+**Not part of the client-facing API** — operator-only infra maintenance, gated by an
+`X-Admin-Token` header compared against the `PYMIX_ADMIN_TOKEN` env var
+(`require_admin_token`). It **fails closed**: an unset env var 503s every admin request
+rather than opening the routes. There is no admin role in the user model; this is
+deliberately the minimal gate, not a general auth scheme.
+
+| Method/Path | Purpose |
+|---|---|
+| GET `/admin/beets/{username}/status` | Read-only audit of that user's beets container: beet version, plugins, stats, one-track `subbox_id` spot check. No lock, no mutation. |
+| POST `/admin/beets/{username}/migrate` | Recreate that user's beets container on the current template/version (#76). |
+
+## Vestigial — `routers/create.py`
+
+`GET /create/subsonic` and `GET /create/xml` are pre-product leftovers with hardcoded
+`/Users/lajp/...` paths. Nothing calls them and they can't work as deployed. Don't
+extend them; the live equivalents are `/rekordbox/import` and `/rekordbox/export`.
 
 ## Beta invites — `routers/invite_request.py`
 | Method/Path | Purpose |
@@ -93,8 +145,9 @@ that costs, and how it's paid for:
   already on the list, and `create_invite_request` returns nothing, so the route can't
   leak who has signed up.
 
-There is deliberately **no listing endpoint** — pymix has no HTTP admin-auth pattern and
-inventing one for this isn't worth it. Fulfilment is manual: read `invite_request_table`,
+There is deliberately **no listing endpoint**. (`require_admin_token` has since arrived
+for `/admin/*`, so one is now *possible* — it still isn't worth it while fulfilment is a
+handful of rows read by hand.) Fulfilment is manual: read `invite_request_table`,
 mint a `user_token_table` row, then set the request's `status` to `invited`/`declined` by
 hand. If that becomes routine, add a script under `scripts/` rather than an
 unauthenticated route.
@@ -106,6 +159,8 @@ unauthenticated route.
    `username: str = Depends(require_username)`) from `routers/auth.py`. Never take a
    `username` param as the caller's identity — it is unauthenticated. Don't hand-roll a
    guard block; the dependency 401s on its own, so the handler body can assume a user.
+   If the route reads a library use `require_reader`, if it writes one use
+   `require_uploader` — picking the wrong one either breaks `demo` or lets it write.
 3. `@inject` your collaborators with `Depends(Provide[Container.x])`.
 4. Delegate to a controller/orchestrator — keep the router thin.
 5. Match the response style of the router you're in (plain dict vs Pydantic model).

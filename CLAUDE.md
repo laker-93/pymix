@@ -18,6 +18,11 @@ context lives in `../subbox-workspace/`.
 
 Only then read source, guided by the docs.
 
+`docs/design-*.md` are per-feature designs, not descriptions of current behaviour. Each
+opens with a **Status** header saying which parts shipped and which were later removed —
+read that header before trusting the body (the automatch one describes a background
+sweep that no longer exists).
+
 ## Invariants
 
 - **`subbox_id` is the cross-system track identity** — a `SUBBOX_ID` UUID tagged into
