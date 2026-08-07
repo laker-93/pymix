@@ -92,6 +92,14 @@ escalating fallbacks: title+artist → title → per-token → bracket-stripped,
 with a lower similarity threshold. `subbox_id` presence is the fast path
 (`/tracks/presence`) before falling back to fuzzy matching.
 
+A *hit* costs one Subsonic query; a *miss* walks every tier — 2 + one query per
+title token — so the widen is what the fan-out endpoints pay for. The token tier's
+queries run together rather than in series, and `/sync/match_tracks` (the client's
+pre-upload preview, whose normal first-time answer is "you have none of this")
+spends one `getScanStatus` instead of a doomed widen per track when Navidrome has
+indexed nothing yet and isn't scanning — `TrackMatcher(skip_if_library_empty=True)`,
+which the import deliberately does not set (#105).
+
 ## 7. Metadata (cues/loops) — `/track/metadata/*`
 Cue/loop data is validated against `cue_schema` (in `routers/track.py`), stored
 versioned in `library_table`, with full history in `meta_history_table`. Keyed by

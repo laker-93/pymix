@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 from unittest.mock import AsyncMock, MagicMock
 import aiohttp
@@ -196,6 +197,92 @@ async def test_get_track_match_max_tier_2_skips_token_search():
     # token tier (which would call query_track_by_name per token) must not run.
     client.query_tracks_by.assert_awaited_once()
     client.query_track_by_name.assert_awaited_once_with({"username": "u", "password": "p"}, "Rodent")
+
+
+@pytest.mark.anyio
+async def test_token_tier_queries_run_together():
+    # A miss walks all three tiers, and the token tier is one query per title token;
+    # in series that is 2 + N round trips for a guaranteed-None answer (#105). They
+    # are independent, so they overlap.
+    client = _client()
+    client.query_tracks_by = AsyncMock(return_value=[])
+    in_flight = 0
+    max_in_flight = 0
+
+    async def query_track_by_name(user, name):
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        return []
+
+    client.query_track_by_name = query_track_by_name
+    match = await client.get_track_match(
+        {"username": "u", "password": "p"}, "Rodent Loner Etched Headplate", "Burial", None,
+    )
+
+    assert match is None
+    # Tier 2's title-only query is still on its own; the 4 token queries overlap.
+    assert max_in_flight == 4
+
+
+@pytest.mark.anyio
+async def test_token_tier_candidates_keep_token_order():
+    # gather preserves order, so the concatenated candidate list -- and therefore
+    # which track wins a scoring tie -- is exactly what the serial loop produced.
+    client = _client()
+    client.query_tracks_by = AsyncMock(return_value=[])
+    by_token = {"rodent": [_track("Rodent")], "loner": [_track("Loner")]}
+
+    async def query_track_by_name(user, name):
+        return by_token.get(name, [])
+
+    client.query_track_by_name = query_track_by_name
+    seen = []
+    original = client._get_best_track_match
+
+    async def spy(title, artist, album, tracks, threshold, **kwargs):
+        seen.append([t.name for t in tracks])
+        return await original(title, artist, album, tracks, threshold, **kwargs)
+
+    client._get_best_track_match = spy
+    await client.get_track_match({"username": "u", "password": "p"}, "Rodent Loner", "Burial", None)
+
+    assert seen[-1] == ["Rodent", "Loner"]
+
+
+# --- library_is_empty -------------------------------------------------------------
+
+def _scan_status(**status):
+    return {'subsonic-response': {'status': 'ok', 'scanStatus': status}}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status,expected", [
+    ({'scanning': False, 'count': 0}, True),
+    ({'scanning': False, 'count': 60}, False),
+    # Mid-scan a count of 0 means "not indexed yet", not "will never match" — an
+    # import triggers a scan and starts matching 2s later.
+    ({'scanning': True, 'count': 0}, False),
+    ({'scanning': True, 'count': 12}, False),
+])
+async def test_library_is_empty(status, expected):
+    client = SubsonicClient(
+        "http://{user}:{port}", MagicMock(), "mock_version", "foo", "bar", None, "test"
+    )
+    client.get = AsyncMock(return_value=_scan_status(**status))
+    assert await client.library_is_empty({"username": "u", "password": "p"}) is expected
+
+
+@pytest.mark.anyio
+async def test_library_is_empty_reports_false_when_the_probe_fails():
+    # The probe is an optimisation; if it can't be read, do the queries anyway.
+    client = SubsonicClient(
+        "http://{user}:{port}", MagicMock(), "mock_version", "foo", "bar", None, "test"
+    )
+    client.get = AsyncMock(side_effect=aiohttp.ClientError("boom"))
+    assert await client.library_is_empty({"username": "u", "password": "p"}) is False
 
 
 # --- set_rating -------------------------------------------------------------------

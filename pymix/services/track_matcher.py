@@ -25,6 +25,13 @@ In-flight requests are shared, not just completed ones: the entry is the
 lookup. Awaiting a task re-raises its exception to every caller, which keeps
 each call site's own error handling working unchanged.
 
+There is also a third saving, opt-in via ``skip_if_library_empty``, for the case
+where none of the lookups can succeed: if Navidrome has indexed nothing for this
+user and isn't scanning, one ``getScanStatus`` replaces the whole fan-out. That
+case is not hypothetical -- the client's upload preview matches an entire XML
+against a library that is still empty, and every one of those misses walks all
+three tiers of ``get_track_match``, 2 + one query per title token (#105).
+
 The cached :class:`SubBoxTrack` is shared between callers -- treat it as
 read-only (all three call sites only read ``sub_track_id`` / ``pymix_path``).
 
@@ -52,12 +59,29 @@ MatchResult = Optional[Tuple[SubBoxTrack, float]]
 class TrackMatcher:
     """Resolves XML tracks to Navidrome tracks, once each, several at a time."""
 
-    def __init__(self, subsonic_client: SubsonicClient, concurrency: int = IMPORT_MATCH_CONCURRENCY):
+    def __init__(
+        self,
+        subsonic_client: SubsonicClient,
+        concurrency: int = IMPORT_MATCH_CONCURRENCY,
+        skip_if_library_empty: bool = False,
+    ):
+        """
+        ``skip_if_library_empty`` is opt-in because it is only sound when nothing is
+        filling the library underneath the matcher. The rekordbox import has exactly
+        such a writer: it fires ``startScan`` and waits a fixed 2 s, so Navidrome can
+        legitimately still report 0 indexed tracks when matching starts. Today that
+        race costs the tracks matched too early; a cached "empty" verdict would cost
+        the whole import. The upload preview runs against a library nobody is
+        writing to, so it opts in.
+        """
         self._subsonic_client = subsonic_client
         self._semaphore = asyncio.Semaphore(concurrency)
         self._tasks: dict[tuple, asyncio.Task] = {}
+        self._skip_if_library_empty = skip_if_library_empty
+        self._empty_check: Optional[asyncio.Task] = None
         self._n_requests = 0
         self._n_lookups = 0
+        self._n_skipped = 0
 
     @staticmethod
     def _key(title: str, artist: str, album: Optional[str]) -> tuple:
@@ -69,6 +93,9 @@ class TrackMatcher:
     async def match(self, user: dict, title: str, artist: str, album: Optional[str] = None) -> MatchResult:
         """Return ``get_track_match``'s result, reusing an earlier or in-flight lookup."""
         self._n_requests += 1
+        if await self._library_is_empty(user):
+            self._n_skipped += 1
+            return None
         key = self._key(title, artist, album)
         task = self._tasks.get(key)
         if task is None:
@@ -83,7 +110,22 @@ class TrackMatcher:
         async with self._semaphore:
             return await self._subsonic_client.get_track_match(user, title, artist, album)
 
+    async def _library_is_empty(self, user: dict) -> bool:
+        """Answer once per matcher, sharing the single probe between concurrent callers."""
+        if not self._skip_if_library_empty:
+            return False
+        if self._empty_check is None:
+            self._empty_check = asyncio.ensure_future(self._subsonic_client.library_is_empty(user))
+        return await asyncio.shield(self._empty_check)
+
     def log_stats(self, context: str) -> None:
+        if self._n_skipped:
+            logger.info(
+                "track match cache (%s): %s request(s) skipped -- navidrome has indexed nothing yet",
+                context,
+                self._n_skipped,
+            )
+            return
         logger.info(
             "track match cache (%s): %s request(s) served by %s Navidrome lookup(s)",
             context,
@@ -98,3 +140,7 @@ class TrackMatcher:
     @property
     def n_lookups(self) -> int:
         return self._n_lookups
+
+    @property
+    def n_skipped(self) -> int:
+        return self._n_skipped

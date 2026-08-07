@@ -125,6 +125,57 @@ async def test_negative_result_is_cached():
 
 
 @pytest.mark.anyio
+async def test_empty_library_costs_one_probe_instead_of_a_lookup_per_track():
+    # Against a library Navidrome has indexed nothing for, every lookup is a
+    # guaranteed miss and every miss walks all three tiers of get_track_match
+    # (#105). One getScanStatus stands in for the lot.
+    client = mock.AsyncMock()
+    client.library_is_empty = mock.AsyncMock(return_value=True)
+    client.get_track_match = mock.AsyncMock()
+
+    matcher = TrackMatcher(client, skip_if_library_empty=True)
+    results = await asyncio.gather(
+        *(matcher.match(USER, f'track {i}', 'Szare', 'bar') for i in range(20))
+    )
+
+    assert results == [None] * 20
+    client.get_track_match.assert_not_awaited()
+    # One probe for the whole batch, not one per track.
+    assert client.library_is_empty.await_count == 1
+    assert (matcher.n_skipped, matcher.n_lookups) == (20, 0)
+
+
+@pytest.mark.anyio
+async def test_non_empty_library_is_probed_once_and_then_matched_normally():
+    client = mock.AsyncMock()
+    client.library_is_empty = mock.AsyncMock(return_value=False)
+    client.get_track_match = mock.AsyncMock(side_effect=lambda user, title, artist, album=None: _match(title))
+
+    matcher = TrackMatcher(client, skip_if_library_empty=True)
+    await matcher.match(USER, 'Volya', 'Szare', 'bar')
+    await matcher.match(USER, 'Flagship', 'Blu Peter', 'bar')
+
+    assert client.library_is_empty.await_count == 1
+    assert client.get_track_match.await_count == 2
+    assert matcher.n_skipped == 0
+
+
+@pytest.mark.anyio
+async def test_empty_library_check_is_opt_in():
+    # The import can't use it: it fires startScan and waits a fixed 2s, so a
+    # count of 0 there means "not indexed yet", not "will never match".
+    client = mock.AsyncMock()
+    client.library_is_empty = mock.AsyncMock(return_value=True)
+    client.get_track_match = mock.AsyncMock(return_value=None)
+
+    matcher = TrackMatcher(client)
+    await matcher.match(USER, 'Volya', 'Szare', 'bar')
+
+    client.library_is_empty.assert_not_awaited()
+    client.get_track_match.assert_awaited_once()
+
+
+@pytest.mark.anyio
 async def test_failure_reaches_every_caller_and_is_not_retried():
     # Callers handle KeyError/AssertionError themselves (update_tracks_with_subid
     # warns and moves on), so a shared failed lookup must still raise for each of
