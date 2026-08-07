@@ -1,5 +1,7 @@
 """
-Batch field writes into a user's beets library in ONE `docker exec`.
+Collapse a user's beets library work into as few `docker exec`s as possible --
+batched field writes (below) and the merged post-import read
+(:func:`build_import_reads_command`).
 
 Why this exists (laker-93/pymix#51): the post-import passes used to shell into the
 beets container once per track -- `beet modify -y id:<n> subbox_id=<uuid>` for the
@@ -115,6 +117,114 @@ def chunked(pairs: Sequence[Tuple[object, object]], size: int = DEFAULT_CHUNK_SI
     """Yield ``pairs`` in argv-sized chunks."""
     for start in range(0, len(pairs), size):
         yield pairs[start:start + size]
+
+
+# Markers, not a bare blank-line split: a beets path can contain anything, so the
+# only safe delimiter is one that cannot appear in `beet list -f` output.
+_DUPLICATES_MARKER = "---PYMIX-DUPLICATES---"
+_UNMAPPED_MARKER = "---PYMIX-UNMAPPED---"
+_END_MARKER = "---PYMIX-END---"
+
+# Both post-import reads in ONE `docker exec`.
+#
+# The two used to be `beet duplicates -p` followed by `beet list -f $id:$path
+# subbox_id::^$` -- two processes, each paying a full interpreter start plus the
+# container's whole plugin chain (fetchart lyrics lastgenre embedart duplicates
+# info musicbrainz) to run one query. Measured locally at ~0.35s of pure startup
+# each; on prod a beets exec costs 3-6s (#100), so the second one is pure waste.
+#
+# Unlike _SET_FIELD_SCRIPT this goes through `beets.ui._raw_main` rather than
+# driving Library directly, because `duplicates` IS one of those plugins -- there
+# is no supported Python entry point for it, and reimplementing its matching here
+# would be a semantic fork of the thing we're trying to speed up. Running beets'
+# own CLI dispatch twice in one process keeps both queries byte-identical to what
+# they were while paying the startup once.
+#
+# _raw_main is private API. That is exactly why callers must treat a failure here
+# as recoverable and fall back to the two separate `beet` invocations: per-user
+# containers freeze their beets version at provisioning (see the container-drift
+# note in docs/dev.md), so a future container may not have it.
+_IMPORT_READS_SCRIPT = """
+import io
+import sys
+from contextlib import redirect_stdout
+
+from beets import ui
+
+
+def run(args):
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        ui._raw_main(args)
+    return buf.getvalue()
+
+
+duplicates = run(['duplicates', '-p'])
+unmapped = run(['list', '-f', '$id:$path', 'subbox_id::^$'])
+
+sys.stdout.write('%s\\n' % sys.argv[1])
+sys.stdout.write(duplicates)
+if duplicates and not duplicates.endswith('\\n'):
+    sys.stdout.write('\\n')
+sys.stdout.write('%s\\n' % sys.argv[2])
+sys.stdout.write(unmapped)
+if unmapped and not unmapped.endswith('\\n'):
+    sys.stdout.write('\\n')
+sys.stdout.write('%s\\n' % sys.argv[3])
+"""
+
+
+def build_import_reads_command() -> List[str]:
+    """
+    argv for the merged post-import read: duplicate paths and the (beet id, path)
+    of every item still missing a ``subbox_id``, in one exec.
+    """
+    return [
+        "python3",
+        "-c",
+        _IMPORT_READS_SCRIPT,
+        _DUPLICATES_MARKER,
+        _UNMAPPED_MARKER,
+        _END_MARKER,
+    ]
+
+
+def parse_import_reads(output: str) -> Tuple[List[str], List[Tuple[int, str]]]:
+    """
+    Split the merged read into ``(duplicate_paths, unmapped_items)``.
+
+    Raises ValueError if any marker is missing or the sections are out of order --
+    the script emits all three unconditionally, so their absence means the exec did
+    not do what we asked (wrong interpreter, no _raw_main, truncated output) and the
+    caller must fall back to the separate reads rather than treat an empty result as
+    "nothing to do". An empty library and a failed exec look identical otherwise,
+    and the difference is a silently unmapped import.
+    """
+    lines = output.splitlines()
+    try:
+        start = lines.index(_DUPLICATES_MARKER)
+        middle = lines.index(_UNMAPPED_MARKER)
+        end = lines.index(_END_MARKER)
+    except ValueError:
+        raise ValueError(f"missing section markers in merged beets read: {output!r}")
+    if not start < middle < end:
+        raise ValueError(f"section markers out of order in merged beets read: {output!r}")
+
+    duplicate_paths = [line for line in lines[start + 1:middle] if line.strip()]
+
+    unmapped: List[Tuple[int, str]] = []
+    for line in lines[middle + 1:end]:
+        if not line.strip():
+            continue
+        beet_id, sep, path = line.partition(":")
+        if not sep:
+            logger.warning(f"Skipping malformed line in beets output: {line}")
+            continue
+        try:
+            unmapped.append((int(beet_id.strip()), path.strip()))
+        except ValueError:
+            logger.warning(f"Skipping malformed line in beets output: {line}")
+    return duplicate_paths, unmapped
 
 
 def parse_applied(output: str) -> int:

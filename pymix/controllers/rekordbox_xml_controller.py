@@ -31,9 +31,11 @@ from pymix.services.import_progress import ImportPhase, reporter_or_null
 from pymix.services.track_matcher import MatchResult, TrackMatcher
 from pymix.utils.beets_batch import (
     MATCH_BY_ID,
+    build_import_reads_command,
     build_set_field_command,
     chunked,
     parse_applied,
+    parse_import_reads,
 )
 from pymix.utils.beets_query import or_query
 from pymix.utils.make_readable import make_readable
@@ -172,14 +174,29 @@ class RekordboxXMLController:
     def _get_duplicates(self, username: str, public: bool) -> Optional[List[str]]:
         """
         """
+        return self._tag_duplicate_paths(username, self._fetch_duplicate_paths(username, public))
+
+    def _fetch_duplicate_paths(self, username: str, public: bool) -> List[str]:
+        """
+        The `beet duplicates -p` read on its own, so the merged post-import read can
+        supply the same paths without this exec (see :meth:`_post_import_reads`).
+        """
         container_name = "beets" if public else f"beets{username}"
         beets_command = "beet duplicates -p"
         result = self._beets_exec.execute(container_name, beets_command)
         logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
         if not result:
+            return []
+        return [line for line in result.split('\n') if line.strip()]
+
+    def _tag_duplicate_paths(self, username: str, duplicates_paths: List[str]) -> Optional[List[str]]:
+        """
+        Write the `dup` tag onto each duplicate. Runs pymix-side against the mounted
+        library, not in the container, so it is independent of how the paths were read.
+        """
+        if not duplicates_paths:
             return
 
-        duplicates_paths = result.split('\n')
         FooPlugin()
         for duplicate in duplicates_paths:
             path_in_pymix = duplicate.removeprefix('/music')
@@ -251,21 +268,16 @@ class RekordboxXMLController:
             return False
         return True
 
-    def _map_subbox_id_beet_id(self, username: str, public: bool, progress=None):
+    def _fetch_unmapped_entries(self, container_name: str) -> List[tuple[int, str]]:
         """
-        After import, link beets track IDs to subbox IDs by reading the subbox_id
-        tag from each track using the music-tag package.
+        The `beet list` read of every item still missing a subbox_id, on its own --
+        the fallback when the merged read isn't available (see :meth:`_post_import_reads`).
         """
-        container_name = "beets" if public else f"beets{username}"
-        progress = reporter_or_null(progress)
-
-        # 1️⃣ Run beets command to get all tracks missing subbox_id
         beets_command = "beet list -f $id:$path subbox_id::^$"
         # detach to avoid returning potentially large stdout from the docker logs.
         # Instead logs are streamed incrementally
         log_iter = self._beets_exec.execute(container_name, beets_command, stream=True)
         beet_entries: List[tuple[int, str]] = []
-        # 2️⃣ Parse beet_id:path pairs from command output
         for log_type, log in log_iter:
             line = log.decode()
             logger.info(f'{log_type}: {line}')
@@ -275,6 +287,61 @@ class RekordboxXMLController:
                 logger.warning(f"Skipping malformed line in beets output: {line}")
             else:
                 beet_entries.append((int(beet_id.strip()), path.strip()))
+        return beet_entries
+
+    def _post_import_reads(self, username: str, public: bool, progress=None):
+        """
+        The two post-import passes (duplicate tagging, subbox_id mapping) sharing ONE
+        exec for their reads instead of one each (see build_import_reads_command).
+
+        Falls back to the separate reads on any failure -- per-user containers freeze
+        their beets version at provisioning, and the merged read leans on private
+        beets API, so this has to degrade rather than break an import. Only the reads
+        are merged: the subbox_id *write* still needs its own exec, because the values
+        it writes come from reading each file's SUBBOX_ID tag pymix-side, in between.
+        """
+        container_name = "beets" if public else f"beets{username}"
+        try:
+            result = self._beets_exec.execute(container_name, build_import_reads_command())
+            if not isinstance(result, str):
+                raise ValueError(f"unexpected merged beets read output type {type(result)!r}")
+            duplicate_paths, beet_entries = parse_import_reads(result)
+        except Exception:
+            logger.exception(
+                f"merged post-import beets read on {container_name} failed; "
+                f"falling back to separate duplicates and list execs"
+            )
+            self._get_duplicates(username, public)
+            self._map_subbox_id_beet_id(username, public, progress)
+            return
+
+        logger.info(
+            f"merged post-import beets read on {container_name}: "
+            f"{len(duplicate_paths)} duplicate(s), {len(beet_entries)} unmapped item(s)"
+        )
+        self._tag_duplicate_paths(username, duplicate_paths)
+        self._map_subbox_id_beet_id(username, public, progress, beet_entries=beet_entries)
+
+    def _map_subbox_id_beet_id(
+        self,
+        username: str,
+        public: bool,
+        progress=None,
+        beet_entries: Optional[List[tuple[int, str]]] = None,
+    ):
+        """
+        After import, link beets track IDs to subbox IDs by reading the subbox_id
+        tag from each track using the music-tag package.
+
+        ``beet_entries`` lets a caller that has already read the unmapped items pass
+        them in (the merged post-import read) instead of paying a second exec for the
+        same query; left None, this does its own `beet list`.
+        """
+        container_name = "beets" if public else f"beets{username}"
+        progress = reporter_or_null(progress)
+
+        if beet_entries is None:
+            beet_entries = self._fetch_unmapped_entries(container_name)
 
         logger.info(f"Found {len(beet_entries)} tracks with unset subbox_id.")
         progress.start_phase(ImportPhase.MAPPING_IDS, len(beet_entries))
@@ -493,8 +560,7 @@ class RekordboxXMLController:
                 #make_readable(Path(src_dir))
                 # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
                 # todo move this logic out of the rb xml controller
-                self._get_duplicates(username, False)
-                self._map_subbox_id_beet_id(username, False, progress)
+                self._post_import_reads(username, False, progress)
 
 
     async def create_rekordbox_xml_from_subsonic_playlists(
@@ -599,8 +665,7 @@ class RekordboxXMLController:
                 #make_readable(Path(src_dir))
                 # todo - get the duplicates before the import and before tagging the new duplicates, untag the old ones and do so atomically.
                 # todo move this logic out of the rb xml controller
-                self._get_duplicates(username, False)
-                self._map_subbox_id_beet_id(username, False, progress)
+                self._post_import_reads(username, False, progress)
 
     async def create_subsonic_playlists_from_xml(
             self,
@@ -620,9 +685,9 @@ class RekordboxXMLController:
         if zip_path or audio_path:
             await anyio.to_thread.run_sync(self._import_to_beets, username, zip_path, audio_path, rekordbox_xml, progress)
         # must trigger a navidrome scan so the tracks will be queryable when creating and moving in to playlists in the
-        # next step
-        await self._subsonic_orchestrator.scan(user)
-        await anyio.sleep(2)
+        # next step -- and wait for it to actually finish, not a fixed guess at how
+        # long that takes (see SubsonicOrchestrator.scan_and_wait).
+        await self._subsonic_orchestrator.scan_and_wait(user)
         await self._set_data_from_xml(user, rekordbox_xml, playlist_names, progress)
         # the fb path is removed here as we only want to remove data in fb once import is successful to avoid
         # unnecessarily having to reupload data from the client after a beets import failure
