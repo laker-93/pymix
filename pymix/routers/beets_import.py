@@ -107,7 +107,7 @@ async def beets_import(
             'reason': f"user {username} has attempted to import before uploading any tracks."
         }
 
-    total_n_imported_tracks = await beets_client.get_number_of_tracks(user)
+    total_n_imported_tracks = await beets_client.count_tracks_on_disk(user)
     job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
     logger.info(f'importing {total_n_tracks_for_import} tracks for user {username}')
 
