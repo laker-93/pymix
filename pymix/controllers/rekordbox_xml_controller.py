@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import re
@@ -27,6 +28,7 @@ from pyserato.model.track import Track
 from pyserato.model.hot_cue_type import HotCueType
 
 from pymix.services.import_progress import ImportPhase, reporter_or_null
+from pymix.services.track_matcher import MatchResult, TrackMatcher
 from pymix.utils.beets_batch import (
     MATCH_BY_ID,
     build_set_field_command,
@@ -680,11 +682,19 @@ class RekordboxXMLController:
 
     async def _set_data_from_xml(self, user: dict, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None, progress=None):
         # todo make this logic more similar to serato_controller where subbox_id is used for look up
-        await self._create_playlists_from_xml(user, rekordbox_xml, playlist_names)
-        await self._set_metadata_from_xml(user, rekordbox_xml, playlist_names, progress)
+        # One matcher for the whole job: the playlist pass, the rated pass and the
+        # metadata loop below all resolve the same XML tracks against Navidrome, so
+        # they share one cache and one concurrency budget instead of each paying its
+        # own sequential round trip per track (#104).
+        matcher = TrackMatcher(self._subsonic_client)
+        await self._create_playlists_from_xml(user, rekordbox_xml, playlist_names, matcher)
+        await self._set_metadata_from_xml(user, rekordbox_xml, playlist_names, progress, matcher)
+        matcher.log_stats("rekordbox import")
 
-    async def _set_metadata_from_xml(self, user, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None, progress=None):
+    async def _set_metadata_from_xml(self, user, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None, progress=None, matcher: Optional[TrackMatcher] = None):
         progress = reporter_or_null(progress)
+        if matcher is None:
+            matcher = TrackMatcher(self._subsonic_client)
         allowed_track_ids = None
         if playlist_names:
             rekordbox_xml_playlists = self._rekordbox_xml_orchestrator.get_all_xml_playlists(rekordbox_xml)
@@ -701,7 +711,7 @@ class RekordboxXMLController:
             all_xml_tracks = [t for t in all_xml_tracks if t.track_id in allowed_track_ids]
             logger.info(f"Filtered to {len(all_xml_tracks)} track(s) with metadata from XML based on playlist filter.")
         rated_tracks = list(filter(lambda t: (t.rating or 0) > 0, all_xml_tracks))
-        await self._subsonic_orchestrator.update_tracks_with_subid(user, tracks=rated_tracks)
+        await self._subsonic_orchestrator.update_tracks_with_subid(user, tracks=rated_tracks, matcher=matcher)
         #  and set the rating of the track in navidrome from the rating taken from xml
         await self._subsonic_orchestrator.set_ratings(user, rated_tracks)
         #encoder = V2Mp3Encoder()
@@ -711,18 +721,28 @@ class RekordboxXMLController:
         ]
         progress.start_phase(ImportPhase.APPLYING_METADATA, len(xml_tracks))
         # bpm writes are collected here and applied in one batched exec after the
-        # loop, instead of a `beet modify` per track (#51). The per-track cost that
-        # remains is the Subsonic match lookup below, which is a local HTTP call.
-        bpms_by_subbox_id: List[tuple] = []
-        for track in xml_tracks:
+        # loop, instead of a `beet modify` per track (#51). What remained per track
+        # was the Subsonic match lookup, awaited one at a time; it is now resolved
+        # for every track up front through the shared matcher, which overlaps the
+        # round trips and reuses the matches the passes above already made (#104).
+        # Progress is advanced as those matches land -- they are the slow part of
+        # this phase -- leaving only local DB writes for the loop itself.
+        async def resolve_match(track) -> MatchResult:
+            # the path on the server could be quite different to the path on the user side xml
+            match = await matcher.match(user, track.Name, track.Artist, track.Album or None)
             progress.advance()
+            return match
+
+        # gather preserves input order, so matches line up 1:1 with xml_tracks.
+        track_matches = await asyncio.gather(*(resolve_match(t) for t in xml_tracks))
+
+        bpms_by_subbox_id: List[tuple] = []
+        for track, track_match in zip(xml_tracks, track_matches):
             marks = track.marks
             cues = list(filter(lambda m: m.Type == 'cue', marks))
             loops = list(filter(lambda m: m.Type == 'loop', marks))
             # todo extract colors of cues
             album = track.Album if track.Album else None
-            # the path on the server could be quite different to the path on the user side xml
-            track_match = await self._subsonic_client.get_track_match(user, track.Name, track.Artist, album)
             if track_match is None:
                 logger.warning(f"Could not find a match in Navidrome for track {track.Name} by {track.Artist} with album {album}, skipping cue and loop import for this track.")
                 continue
@@ -770,7 +790,7 @@ class RekordboxXMLController:
         await anyio.to_thread.run_sync(self._modify_bpms, user['username'], bpms_by_subbox_id)
 
 
-    async def _create_playlists_from_xml(self, user: dict, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None):
+    async def _create_playlists_from_xml(self, user: dict, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None, matcher: Optional[TrackMatcher] = None):
         # 4. create internal subbox playlist and tracks as below
         rekordbox_xml_playlists = self._rekordbox_xml_orchestrator.get_all_xml_playlists(rekordbox_xml)
         subbox_playlists: List[SubBoxPlaylist] = []
@@ -802,7 +822,7 @@ class RekordboxXMLController:
         # 6. get the tracks from navidrome by using the 'query' api for each track.
         # this sets the subsonic id found from querying navidrome. This can then be used to create the playlist and place
         # the track in the playlist
-        res = await self._subsonic_orchestrator.update_tracks_with_subid(user, subbox_playlists=subbox_playlists)
+        res = await self._subsonic_orchestrator.update_tracks_with_subid(user, subbox_playlists=subbox_playlists, matcher=matcher)
         # 8. create the playlists
         await self._subsonic_orchestrator.create_playlists(user, subbox_playlists)
 

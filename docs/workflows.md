@@ -52,6 +52,13 @@ composes one percentage from both — reporting the beets count alone pinned the
 `docker exec` each (`utils/beets_batch.py`); they used to shell in once per track,
 which cost ~13 min on a 100-track import.
 
+Step 5's three passes all resolve the same XML tracks against Navidrome, so they
+share one `TrackMatcher` (`services/track_matcher.py`) for the job: it resolves each
+distinct `(title, artist, album)` once and runs the remaining lookups
+`IMPORT_MATCH_CONCURRENCY` (16) at a time. Before that, a track in two playlists was
+looked up once per playlist *and* again in each tail pass — ~4 sequential Subsonic
+round trips per track, which is invisible locally and 12-32 s on a prod RTT (#104).
+
 ## 3. Rekordbox export (`POST /rekordbox/export`)
 `create_rekordbox_xml_from_subsonic_playlists`:
 1. Fetch Navidrome playlists + their tracks.
