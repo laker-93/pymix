@@ -11,6 +11,7 @@ from typing import Optional
 import anyio
 from aiohttp import ClientConnectorError
 from python_on_whales import DockerClient, docker
+from python_on_whales.exceptions import NoSuchContainer
 from jinja2 import Environment, FileSystemLoader
 
 from pymix.clients.beets_exec import BeetsExec
@@ -253,6 +254,7 @@ class ServicesOrchestrator:
                 user['beets_port'],
                 container_name,
             )
+            foreign_project = self._clear_foreign_compose_container(container_name)
             docker_client = DockerClient(
                 compose_files=[self._config['containers']['beets']['docker_compose_file']],
                 compose_env_file=self._config['containers']['beets']['env_file'],
@@ -275,7 +277,46 @@ class ServicesOrchestrator:
             'after': after,
             'stats_match': before['stats'] == after['stats'],
             'sample_match': before['sample'] == after['sample'],
+            'removed_foreign_project': foreign_project,
         }
+
+    def _clear_foreign_compose_container(self, container_name: str) -> Optional[str]:
+        """
+        Remove an existing beets container that `compose --project-name <container_name>`
+        would refuse to recreate, returning the project it belonged to (None if there
+        was nothing in the way).
+
+        Compose matches containers to services by the `com.docker.compose.project` /
+        `service` labels, not by name. A container provisioned some other way -- e.g. a
+        host-side `docker compose up -d` run from docker-compose/beets/ without `-p`,
+        which lands in project `beets` with service `beets{user}` -- carries the mirror
+        image of the labels this migration uses. Compose then treats the service as
+        absent, tries to *create* rather than recreate, and the daemon rejects it:
+
+            Conflict. The container name "/beets{user}" is already in use
+
+        which aborted the migration after the config had been re-rendered (four of six
+        prod containers hit this on 2026-08-08). Removing it first is safe: every piece
+        of beets state lives outside the container, on the /config bind mount and the
+        private-music / private-staged volumes, and this runs after `before` has been
+        captured and musiclibrary.blb backed up.
+        """
+        try:
+            existing = docker.container.inspect(container_name)
+        except NoSuchContainer:
+            return None
+
+        project = (existing.config.labels or {}).get('com.docker.compose.project')
+        if project == container_name:
+            # compose owns it; force_recreate does the right thing on its own.
+            return None
+
+        logger.warning(
+            f'{container_name} belongs to compose project {project!r}, not '
+            f'{container_name!r}; removing it so compose can recreate it cleanly'
+        )
+        docker.container.remove(container_name, force=True)
+        return project
 
     def beets_status(self, username: str) -> dict:
         """
