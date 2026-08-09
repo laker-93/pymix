@@ -1,0 +1,89 @@
+Subbox pymix — Proprietary Software License
+
+Copyright (C) 2024-2026 Luke Purnell. All rights reserved.
+
+
+1. OWNERSHIP
+
+This software and its source code (the "Software") are the proprietary and
+confidential property of Luke Purnell ("the Licensor"). The Software is
+published in a publicly readable repository for transparency and convenience.
+Public visibility of the source does NOT place the Software in the public
+domain and does NOT grant any licence to it. All rights not expressly granted
+below are reserved.
+
+
+2. GRANT
+
+No licence is granted to any person to use, copy, modify, merge, publish,
+distribute, sublicense, sell, or create derivative works of the Software,
+except:
+
+  (a) You may view and read the source code.
+
+  (b) You may use the Software as a hosted service where the Licensor, or a
+      party authorised by the Licensor, operates it and offers access to it.
+
+  (c) You may exercise any additional rights granted to you under a separate
+      written agreement signed by the Licensor.
+
+Any other use requires the Licensor's prior written permission.
+
+
+3. INTERFACE WITH THE SUBBOX CLIENT
+
+The Subbox client application (https://github.com/laker-93/subbox-app) is a
+separate program, licensed under the GNU General Public License v3.0. It
+communicates with this Software only over a network HTTP API, at arm's length,
+as two independent programs exchanging data.
+
+That HTTP interface is a boundary, not a linkage. This Software is not a
+derivative work of the Subbox client, and the GPL-3.0 that governs the client
+does not extend to this Software.
+
+The definitions of the HTTP API itself — endpoint paths, request and response
+schemas — are interface specifications and may be freely implemented by anyone.
+
+
+4. THIRD-PARTY COMPONENTS AND DISTRIBUTION RESTRICTION
+
+This Software incorporates third-party open-source libraries, each governed by
+its own licence. Nothing in this licence limits any right you hold under those
+licences with respect to those components. See THIRD-PARTY-NOTICES.md.
+
+IMPORTANT — this Software imports mutagen, which is licensed under the GNU
+General Public License v2.0 or later. Distributing a copy of this Software that
+bundles mutagen (for example, a container image) constitutes conveying a work
+based on mutagen, and would require that combined work to be offered under
+GPL-compatible terms together with its complete corresponding source.
+
+Accordingly, binary or container distributions of this Software MUST NOT be
+published or otherwise conveyed to third parties while it is licensed under
+these proprietary terms. This Software is licensed to be OPERATED as a hosted
+service, not distributed. Merely running the Software to provide a network
+service is not distribution and triggers no obligation under the GPL, because
+mutagen is licensed under the GPL and not the Affero GPL.
+
+
+5. NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+
+6. LIMITATION OF LIABILITY
+
+IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM,
+OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+7. TRADEMARKS
+
+"Subbox" and the Subbox logo are trademarks of Luke Purnell. This licence
+grants no rights to use them.
+
+
+Enquiries about commercial licensing: luke.a.purnell@gmail.com

@@ -144,3 +144,18 @@ Traceback (most recent call last):
            ^^^^^^^^^^^^^^^^^^^^^^
 AssertionError: object 8 not in DB
 ```
+## License
+
+pymix is **proprietary software** — Copyright (C) 2024-2026 Luke Purnell, all rights
+reserved. The source is publicly readable, but that grants no licence to use, copy,
+modify, or distribute it. See [LICENSE](LICENSE).
+
+pymix is licensed to be **operated as a hosted service, not distributed**. It imports
+mutagen (GPL-2.0-or-later), so publishing a container image that bundles it would
+convey a GPL work and require the whole thing to be released under GPL-compatible
+terms. Running it as a network service triggers no such obligation. See
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+The Subbox client ([subbox-app](https://github.com/laker-93/subbox-app)) is a separate
+GPL-3.0 program that talks to pymix over HTTP. That HTTP seam is a boundary, not a
+linkage — the client's GPL does not reach pymix.
