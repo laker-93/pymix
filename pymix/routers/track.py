@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
-from pymix.routers.auth import require_username
+from pymix.routers.auth import require_username, require_uploader
 
 
 class TrackPresenceRequest(BaseModel):
@@ -192,10 +192,15 @@ class DeleteTrackRequest(BaseModel):
 @inject
 async def delete_track(
         req: DeleteTrackRequest = Body(...),
-        username: str = Depends(require_username),
+        user: dict = Depends(require_uploader),
         db_controller: DbController = Depends(Provide[Container.db_controller]),
         rekordbox_xml_controller: RekordboxXMLController = Depends(Provide[Container.rekordbox_xml_controller]),
 ) -> Dict[str, Any]:
+    # Deletion is a library write, not just an upload/import one, but it's gated by
+    # the same require_uploader dependency: `demo` may browse demoadmin's shared
+    # library (via require_reader) but must never be able to remove tracks from it.
+    # Only demoadmin (or a real account deleting its own tracks) reaches this point.
+    username = user["username"]
     # Batched, reorder-safe delete. The dangerous state (laker-93/pymix#30) was
     # committing the DB rows *before* the file/beets removal, so a failed beets
     # removal orphaned the track — file + Navidrome entry left behind with no pymix
