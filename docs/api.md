@@ -116,7 +116,19 @@ deliberately the minimal gate, not a general auth scheme.
 | Method/Path | Purpose |
 |---|---|
 | GET `/admin/beets/{username}/status` | Read-only audit of that user's beets container: beet version, plugins, stats, one-track `subbox_id` spot check. No lock, no mutation. |
-| POST `/admin/beets/{username}/migrate` | Recreate that user's beets container on the current template/version (#76). |
+| POST `/admin/beets/{username}/migrate` | Recreate that user's beets container on the current template/version (#76). Backs up `musiclibrary.blb` first and returns before/after status with `stats_match`/`sample_match`. If the existing container belongs to a different compose project it is removed first, and the project it came from is reported as `removed_foreign_project` — see below. |
+
+### Migrating a container compose doesn't own
+
+Compose matches containers to services by the `com.docker.compose.project`/`service`
+labels, not by name, so a beets container created any way other than by pymix — e.g. a
+host-side `docker compose up -d` run from `docker-compose/beets/` without `-p`, which
+lands in project `beets` with service `beets{user}` — is invisible to
+`compose --project-name beets{user} up`. It tries to *create* rather than recreate and
+the daemon rejects the duplicate name. `migrate` now detects that and removes the old
+container before bringing the service up; this is safe because all beets state lives on
+the `/config` bind mount and the `private-music`/`private-staged` volumes, and it happens
+only after the "before" status has been read and the library backed up.
 
 ## Vestigial — `routers/create.py`
 

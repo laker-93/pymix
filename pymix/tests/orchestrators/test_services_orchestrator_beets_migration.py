@@ -12,8 +12,28 @@ from unittest import mock
 
 import pytest
 
+from python_on_whales.exceptions import NoSuchContainer
+
 from pymix.clients.beets_exec import BeetsExec
 from pymix.orchestrators.services_orchestrator import ServicesOrchestrator
+
+
+@pytest.fixture(autouse=True)
+def no_real_docker():
+    """
+    Keep the module-level `docker` handle away from a real daemon.
+
+    `_clear_foreign_compose_container` inspects the existing container, and
+    python_on_whales shells out to the docker CLI to do it -- if the binary isn't on
+    PATH it silently *downloads* one and retries, so an unpatched test would depend on
+    both a docker daemon and network access. Default to "nothing there", which is the
+    no-op path; tests that care about the container patch this themselves.
+    """
+    with mock.patch("pymix.orchestrators.services_orchestrator.docker") as mock_docker:
+        mock_docker.container.inspect.side_effect = NoSuchContainer(
+            ["docker", "container", "inspect"], 1
+        )
+        yield mock_docker
 
 
 def _make_config(tmp_path):
@@ -230,6 +250,150 @@ async def test_migrate_holds_write_lock_for_the_whole_job(tmp_path):
         waiter.join(timeout=5)
 
     assert events == ["migration-done", "waiter-acquired"]
+
+
+def _labelled_container(project):
+    """A python_on_whales Container stub carrying only the compose labels we read."""
+    container = mock.Mock()
+    container.config.labels = (
+        {} if project is None else {"com.docker.compose.project": project}
+    )
+    return container
+
+
+@pytest.mark.anyio
+async def test_migrate_removes_container_owned_by_a_different_compose_project(tmp_path):
+    """
+    A container brought up by a host-side `docker compose up -d` without `-p` lands in
+    project `beets` with service `beets{user}` -- the mirror of what this migration
+    uses. Compose won't adopt it across projects, so `up` tries to *create* and the
+    daemon rejects the duplicate name. It must be removed first (four of six prod
+    containers were in this state on 2026-08-08).
+    """
+    config = _make_config(tmp_path)
+    username = "todo"
+    _provision(config, username)
+    db_user = {"username": username, "password": "pw", "beets_port": 1234}
+    orchestrator, _ = _make_orchestrator(config, BeetsExec(), db_user)
+
+    with mock.patch("pymix.clients.beets_exec.docker") as mock_exec_docker, \
+         mock.patch("pymix.orchestrators.services_orchestrator.docker") as mock_docker, \
+         mock.patch("pymix.orchestrators.services_orchestrator.DockerClient") as mock_docker_client_cls:
+        mock_exec_docker.execute.return_value = "Tracks: 0"
+        mock_docker.container.inspect.return_value = _labelled_container("beets")
+        mock_compose_instance = mock.Mock()
+        mock_docker_client_cls.return_value = mock_compose_instance
+
+        report = await orchestrator.migrate_beets_container(username)
+
+    mock_docker.container.remove.assert_called_once_with(f"beets{username}", force=True)
+    assert report["removed_foreign_project"] == "beets"
+    mock_compose_instance.compose.up.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_migrate_leaves_a_container_this_project_already_owns_alone(tmp_path):
+    """force_recreate handles the normal case; removing it would be needless downtime."""
+    config = _make_config(tmp_path)
+    username = "demoadmin"
+    _provision(config, username)
+    db_user = {"username": username, "password": "pw", "beets_port": 1234}
+    orchestrator, _ = _make_orchestrator(config, BeetsExec(), db_user)
+
+    with mock.patch("pymix.clients.beets_exec.docker") as mock_exec_docker, \
+         mock.patch("pymix.orchestrators.services_orchestrator.docker") as mock_docker, \
+         mock.patch("pymix.orchestrators.services_orchestrator.DockerClient") as mock_docker_client_cls:
+        mock_exec_docker.execute.return_value = "Tracks: 0"
+        mock_docker.container.inspect.return_value = _labelled_container(f"beets{username}")
+        mock_docker_client_cls.return_value = mock.Mock()
+
+        report = await orchestrator.migrate_beets_container(username)
+
+    mock_docker.container.remove.assert_not_called()
+    assert report["removed_foreign_project"] is None
+
+
+@pytest.mark.anyio
+async def test_migrate_removes_an_unlabelled_container(tmp_path):
+    """A plain `docker run` leaves no compose labels at all -- still in the way."""
+    config = _make_config(tmp_path)
+    username = "demoadmin"
+    _provision(config, username)
+    db_user = {"username": username, "password": "pw", "beets_port": 1234}
+    orchestrator, _ = _make_orchestrator(config, BeetsExec(), db_user)
+
+    with mock.patch("pymix.clients.beets_exec.docker") as mock_exec_docker, \
+         mock.patch("pymix.orchestrators.services_orchestrator.docker") as mock_docker, \
+         mock.patch("pymix.orchestrators.services_orchestrator.DockerClient") as mock_docker_client_cls:
+        mock_exec_docker.execute.return_value = "Tracks: 0"
+        mock_docker.container.inspect.return_value = _labelled_container(None)
+        mock_docker_client_cls.return_value = mock.Mock()
+
+        report = await orchestrator.migrate_beets_container(username)
+
+    mock_docker.container.remove.assert_called_once_with(f"beets{username}", force=True)
+    assert report["removed_foreign_project"] is None
+
+
+@pytest.mark.anyio
+async def test_migrate_proceeds_when_no_container_exists_to_clear(tmp_path):
+    config = _make_config(tmp_path)
+    username = "demoadmin"
+    _provision(config, username)
+    db_user = {"username": username, "password": "pw", "beets_port": 1234}
+    orchestrator, _ = _make_orchestrator(config, BeetsExec(), db_user)
+
+    with mock.patch("pymix.clients.beets_exec.docker") as mock_exec_docker, \
+         mock.patch("pymix.orchestrators.services_orchestrator.docker") as mock_docker, \
+         mock.patch("pymix.orchestrators.services_orchestrator.DockerClient") as mock_docker_client_cls:
+        mock_exec_docker.execute.return_value = "Tracks: 0"
+        mock_docker.container.inspect.side_effect = NoSuchContainer(
+            ["docker", "container", "inspect", f"beets{username}"], 1
+        )
+        mock_compose_instance = mock.Mock()
+        mock_docker_client_cls.return_value = mock_compose_instance
+
+        report = await orchestrator.migrate_beets_container(username)
+
+    mock_docker.container.remove.assert_not_called()
+    assert report["removed_foreign_project"] is None
+    mock_compose_instance.compose.up.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_migrate_clears_the_container_only_after_backing_up(tmp_path):
+    """
+    Ordering matters: `before` execs into the live container and the .blb backup runs
+    inside it, so both must happen before anything removes it.
+    """
+    config = _make_config(tmp_path)
+    username = "todo"
+    _provision(config, username)
+    db_user = {"username": username, "password": "pw", "beets_port": 1234}
+    orchestrator, _ = _make_orchestrator(config, BeetsExec(), db_user)
+
+    calls = []
+
+    with mock.patch("pymix.clients.beets_exec.docker") as mock_exec_docker, \
+         mock.patch("pymix.orchestrators.services_orchestrator.docker") as mock_docker, \
+         mock.patch("pymix.orchestrators.services_orchestrator.DockerClient") as mock_docker_client_cls:
+
+        def record_execute(container_name, command, stream=False):
+            calls.append(("execute", command if isinstance(command, list) else command.split()))
+            return "Tracks: 0"
+
+        mock_exec_docker.execute.side_effect = record_execute
+        mock_docker.container.inspect.return_value = _labelled_container("beets")
+        mock_docker.container.remove.side_effect = lambda *a, **k: calls.append(("remove", a))
+        mock_docker_client_cls.return_value = mock.Mock()
+
+        await orchestrator.migrate_beets_container(username)
+
+    kinds = [c[0] for c in calls]
+    backup_index = next(i for i, c in enumerate(calls) if c[0] == "execute" and "cp" in c[1])
+    assert backup_index < kinds.index("remove"), (
+        "musiclibrary.blb must be backed up while the old container is still running"
+    )
 
 
 @pytest.mark.anyio
