@@ -92,6 +92,13 @@ escalating fallbacks: title+artist → title → per-token → bracket-stripped,
 with a lower similarity threshold. `subbox_id` presence is the fast path
 (`/tracks/presence`) before falling back to fuzzy matching.
 
+`/sync/playlists` always prepares exactly **one** file, named in the response's
+`downloadFilename`: the tracks zip, the same zip with `subbox_rb_export.xml` added
+at its root (`includeRekordboxXml`), or the XML alone (`includeTracks: false` — a
+metadata-only export, which skips all of the matching above, since none of it feeds
+the XML). It's one file because a browser drops a second programmatic download
+silently (it allows one per user gesture), so the client was losing the XML.
+
 A *hit* costs one Subsonic query; a *miss* walks every tier — 2 + one query per
 title token — so the widen is what the fan-out endpoints pay for. The token tier's
 queries run together rather than in series, and `/sync/match_tracks` (the client's

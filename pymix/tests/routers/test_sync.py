@@ -5,7 +5,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
-from pymix.routers.sync import sync_download
+from pymix.routers.sync import SyncPlaylistsRequest, sync_download, sync_playlists
 
 
 @pytest.mark.anyio
@@ -105,3 +105,151 @@ async def test_sync_download_reads_whatever_dir_the_resolved_username_maps_to(tm
     )
 
     assert Path(response.path) == downloads_dir / "subbox_rb_export.xml"
+
+
+# ── /sync/playlists: what ends up in the one file the client downloads ─────────
+#
+# The client gets a single download because a browser only reliably saves one file
+# per user gesture — a second one is dropped with no error at all. These
+# cover the three shapes of that file, and that a failed XML fails the whole sync
+# rather than handing back a zip that's silently missing it.
+
+
+def _request(**overrides) -> SyncPlaylistsRequest:
+    body = {
+        "direction": "download",
+        "localTracks": [],
+        "playlists": [{"id": "pl-1", "source": "subbox"}],
+    }
+    body.update(overrides)
+    return SyncPlaylistsRequest(**body)
+
+
+def _fb_handler(tmp_path, zip_name="music"):
+    """A handler whose sync() records its call and returns a zip path like the real
+    one does — the downloads dir path *without* the .zip suffix."""
+    downloads_dir = tmp_path / "demoadmin" / "downloads"
+    downloads_dir.mkdir(parents=True, exist_ok=True)
+
+    fb_file_handler = mock.Mock()
+    fb_file_handler.get_xml_output_path = mock.Mock(
+        return_value=downloads_dir / "subbox_rb_export.xml"
+    )
+    fb_file_handler.sync = mock.Mock(return_value=(3, downloads_dir / zip_name))
+    return fb_file_handler
+
+
+@pytest.mark.anyio
+async def test_sync_playlists_puts_the_xml_in_the_zip(tmp_path):
+    fb_file_handler = _fb_handler(tmp_path)
+    xml_controller = mock.AsyncMock()
+
+    result = await sync_playlists(
+        request=_request(includeRekordboxXml=True, user_root="/Users/dj/Music"),
+        user={"username": "demoadmin"},
+        fb_file_handler=fb_file_handler,
+        subsonic_client=mock.AsyncMock(),
+        rekordbox_xml_controller=xml_controller,
+    )
+
+    assert result["success"] is True
+    assert result["xmlIncluded"] is True
+    # One download, and the client is told its name rather than assembling it.
+    assert result["downloadFilename"] == "music.zip"
+
+    xml_path = fb_file_handler.get_xml_output_path.return_value
+    assert fb_file_handler.sync.call_args.kwargs["extra_files"] == [
+        (xml_path, "subbox_rb_export.xml")
+    ]
+    # Built for the caller's chosen extraction dir, scoped to the requested playlists.
+    assert xml_controller.create_rekordbox_xml_from_subsonic_playlists.await_args.kwargs == {
+        "user_root": "/Users/dj/Music",
+        "user": {"username": "demoadmin"},
+        "xml_path": None,
+        "xml_output_path": xml_path,
+        "playlist_ids": ["pl-1"],
+    }
+
+
+@pytest.mark.anyio
+async def test_sync_playlists_without_xml_zips_tracks_only(tmp_path):
+    """The default, and what a client from before this change sends."""
+    fb_file_handler = _fb_handler(tmp_path)
+    xml_controller = mock.AsyncMock()
+
+    result = await sync_playlists(
+        request=_request(),
+        user={"username": "demoadmin"},
+        fb_file_handler=fb_file_handler,
+        subsonic_client=mock.AsyncMock(),
+        rekordbox_xml_controller=xml_controller,
+    )
+
+    assert result["success"] is True
+    assert result["xmlIncluded"] is False
+    assert result["downloadFilename"] == "music.zip"
+    assert fb_file_handler.sync.call_args.kwargs["extra_files"] is None
+    xml_controller.create_rekordbox_xml_from_subsonic_playlists.assert_not_awaited()
+    fb_file_handler.get_xml_output_path.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_sync_playlists_metadata_only_serves_the_xml_and_builds_no_zip(tmp_path):
+    fb_file_handler = _fb_handler(tmp_path)
+    subsonic_client = mock.AsyncMock()
+
+    result = await sync_playlists(
+        request=_request(includeTracks=False, includeRekordboxXml=True),
+        user={"username": "demoadmin"},
+        fb_file_handler=fb_file_handler,
+        subsonic_client=subsonic_client,
+        rekordbox_xml_controller=mock.AsyncMock(),
+    )
+
+    assert result["success"] is True
+    assert result["downloadFilename"] == "subbox_rb_export.xml"
+    assert result["zipPath"] is None
+    assert result["nTracksExported"] == 0
+    fb_file_handler.sync.assert_not_called()
+    # None of the local-track matching is needed for an XML, so it's skipped
+    # entirely rather than paying for every playlist's tracks.
+    subsonic_client.get_playlist_tracks.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_sync_playlists_rejects_a_download_with_nothing_in_it(tmp_path):
+    with pytest.raises(HTTPException) as exc_info:
+        await sync_playlists(
+            request=_request(includeTracks=False, includeRekordboxXml=False),
+            user={"username": "demoadmin"},
+            fb_file_handler=_fb_handler(tmp_path),
+            subsonic_client=mock.AsyncMock(),
+            rekordbox_xml_controller=mock.AsyncMock(),
+        )
+
+    assert exc_info.value.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_sync_playlists_fails_the_sync_when_the_xml_cannot_be_built(tmp_path):
+    """A zip of tracks with no XML in it is indistinguishable from a successful
+    tracks-only export, so the whole sync reports failure instead."""
+    fb_file_handler = _fb_handler(tmp_path)
+    xml_controller = mock.AsyncMock()
+    xml_controller.create_rekordbox_xml_from_subsonic_playlists.side_effect = RuntimeError(
+        "boom"
+    )
+
+    result = await sync_playlists(
+        request=_request(includeRekordboxXml=True),
+        user={"username": "demoadmin"},
+        fb_file_handler=fb_file_handler,
+        subsonic_client=mock.AsyncMock(),
+        rekordbox_xml_controller=xml_controller,
+    )
+
+    assert result["success"] is False
+    assert "boom" in result["reason"]
+    assert result["downloadFilename"] is None
+    assert result["xmlIncluded"] is False
+    fb_file_handler.sync.assert_not_called()

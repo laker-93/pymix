@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from pathlib import Path
 from typing import Dict, Annotated, List, Tuple, Optional
 
 from dependency_injector.wiring import Provide, inject
@@ -74,6 +75,28 @@ class SyncPlanRequest(BaseModel):
     playlists: Optional[List[Dict[str, str]]] = None
     localTracks: List[Track]
     options: Optional[Dict[str, bool]] = None
+
+
+class SyncPlaylistsRequest(SyncPlanRequest):
+    """What /sync/playlists should put in the single file the client downloads.
+
+    The defaults reproduce the endpoint's original behaviour exactly — tracks
+    only, no XML — so a desktop client from before this existed still gets the
+    same zip and goes on fetching its XML from /rekordbox/export separately.
+    """
+
+    # The audio files. Off for a metadata-only export: the caller wants the
+    # Rekordbox XML for playlists whose tracks it already has on disk.
+    includeTracks: bool = True
+    # Write subbox_rb_export.xml into the zip (or serve it on its own when
+    # includeTracks is false), instead of making the caller take a second
+    # download. A browser only reliably gets one file per user gesture, so a
+    # second download was being dropped silently: Chrome allows one
+    # download per user gesture and needs a site permission for any more.
+    includeRekordboxXml: bool = False
+    # Where the caller will put the tracks, used for the XML's track Locations.
+    # Named to match /rekordbox/export's body, which clients already send.
+    user_root: str = ""
 
 
 class SyncRequest(BaseModel):
@@ -612,16 +635,18 @@ async def sync_tracks(
     }
 
 
-@router.post("/sync/playlists", tags=["sync"])
-@inject
-async def sync_playlists(
+async def _collect_playlist_tracks_to_export(
         request: SyncPlanRequest,
-        user: dict = Depends(require_reader),
-        fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
-        subsonic_client: SubsonicClient = Depends(Provide[Container.subsonic_client])
-) -> dict:
-    reason = ""
-    zip_path = None
+        user: dict,
+        subsonic_client: SubsonicClient,
+) -> List:
+    """The server tracks of every requested playlist that the caller doesn't already
+    have locally — i.e. exactly what belongs in the download zip.
+
+    Split out of sync_playlists so a metadata-only export (Rekordbox XML, no audio)
+    can skip all of it: none of this matching feeds the XML, which is built from the
+    playlists themselves.
+    """
     all_tracks = []
     username = user["username"]
 
@@ -761,17 +786,102 @@ async def sync_playlists(
             len(subbox_id_tagged_missing),
         )
 
+    return all_tracks
+
+
+@router.post("/sync/playlists", tags=["sync"])
+@inject
+async def sync_playlists(
+        request: SyncPlaylistsRequest,
+        user: dict = Depends(require_reader),
+        fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
+        subsonic_client: SubsonicClient = Depends(Provide[Container.subsonic_client]),
+        rekordbox_xml_controller: RekordboxXMLController = Depends(Provide[Container.rekordbox_xml_controller]),
+) -> dict:
+    """Prepare one file for the caller to download: the tracks, the Rekordbox XML,
+    or both in a single zip.
+
+    `downloadFilename` in the response is what to pass to /sync/download — the
+    caller should never assemble that name itself. `zipPath` is kept for older
+    clients that do.
+    """
+    username = user["username"]
+
+    if not request.includeTracks and not request.includeRekordboxXml:
+        raise HTTPException(
+            status_code=400,
+            detail="nothing to download: includeTracks and includeRekordboxXml are both false",
+        )
+
+    playlist_ids = [
+        playlist["id"] for playlist in (request.playlists or []) if playlist.get("id")
+    ]
+
+    xml_output_path = None
+    if request.includeRekordboxXml:
+        # Built before the zip, so it can go inside it. get_xml_output_path also
+        # clears any XML left by a previous export, so a failure below can't leave
+        # a stale one to be picked up and served as if it were this export's.
+        xml_output_path = fb_file_handler.get_xml_output_path(username)
+        try:
+            await rekordbox_xml_controller.create_rekordbox_xml_from_subsonic_playlists(
+                user_root=request.user_root,
+                user=user,
+                xml_path=None,
+                xml_output_path=xml_output_path,
+                playlist_ids=playlist_ids or None,
+            )
+        except Exception as ex:
+            # Reported as a failed sync rather than a zip that's quietly missing the
+            # XML the caller asked for: the tracks alone are indistinguishable from
+            # a successful tracks-only export.
+            msg = f'error occurred creating rekordbox xml for user {username} {repr(ex)}'
+            logger.error(msg, exc_info=True)
+            return {
+                "success": False,
+                "nTracksExported": 0,
+                "zipPath": None,
+                "downloadFilename": None,
+                "xmlIncluded": False,
+                "reason": msg,
+            }
+        logger.info(
+            "sync_playlists xml_ready: user=%s playlists=%s path=%s",
+            username,
+            len(playlist_ids),
+            xml_output_path,
+        )
+
+    if not request.includeTracks:
+        # Metadata only — the XML is the download, no zip is built at all.
+        logger.info("sync_playlists metadata_only: user=%s", username)
+        return {
+            "success": True,
+            "nTracksExported": 0,
+            "zipPath": None,
+            "downloadFilename": xml_output_path.name,
+            "xmlIncluded": True,
+            "reason": "",
+        }
+
+    all_tracks = await _collect_playlist_tracks_to_export(request, user, subsonic_client)
+
     n_tracks_zipped, zip_path = fb_file_handler.sync(
         username=username,
-        tracks_to_zip=all_tracks
+        tracks_to_zip=all_tracks,
+        # Zip root, alongside the music/ tree, so unzipping puts the XML next to
+        # the tracks it points at.
+        extra_files=[(xml_output_path, xml_output_path.name)] if xml_output_path else None,
     )
-    success = True
 
     return {
-        "success": success,
+        "success": True,
         "nTracksExported": len(all_tracks),
         "zipPath": zip_path,
-        "reason": reason
+        # Mirrors how _write_export_zip names the file it actually wrote.
+        "downloadFilename": Path(zip_path).with_suffix(".zip").name,
+        "xmlIncluded": xml_output_path is not None,
+        "reason": "",
     }
 
 

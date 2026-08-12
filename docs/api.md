@@ -50,7 +50,7 @@ All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 | Method/Path | Purpose |
 |---|---|
 | POST `/rekordbox/import` | Ingest the user's uploaded RB XML (+ optional audio zip) → beets import → create Navidrome playlists + import cue/rating metadata. Runs as a **background job**; returns `job_id`. Body `playlistNames: list[list[str]]` filters which playlist paths to import. Enforces storage quota. |
-| POST `/rekordbox/export` | Build a Rekordbox XML from the user's Navidrome playlists. Body `user_root` (client-side music root for path rewriting) + optional `playlistIds`. Writes XML into the user's downloads dir. |
+| POST `/rekordbox/export` | Build a Rekordbox XML from the user's Navidrome playlists. Body `user_root` (client-side music root for path rewriting) + optional `playlistIds`. Writes XML into the user's downloads dir. Kept for clients that fetch the XML as its own download; current ones ask `/sync/playlists` for it instead so the whole export is a single file. |
 
 ## Serato import/export — `routers/serato_import_export.py`
 | POST `/serato/import` | Ingest uploaded Serato crates (+ optional audio) → beets import → Navidrome playlists/metadata. Background job. |
@@ -77,7 +77,7 @@ All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 | POST `/sync/map_meta` | Tag staged uploads with `subbox_id` and persist original metadata; 400s if any track can't be tagged. |
 | POST `/sync/plan` | Compute a sync plan: which requested tracks are already present vs missing on server, download size, metadata updates. Read-only. |
 | POST `/sync` and POST `/sync/tracks` | Resolve requested tracks on the server and zip them into the user's downloads dir for download. `/sync/tracks` uses a more lenient multi-stage matcher. |
-| POST `/sync/playlists` | Zip the tracks of selected server playlists, excluding ones the client already has. |
+| POST `/sync/playlists` | Prepare **one** file for the client to download from selected server playlists. Tracks (excluding ones the client already has) zipped into the user's downloads dir; with `includeRekordboxXml: true` the XML goes *inside* that zip; with `includeTracks: false` the XML is the whole download and no zip is built. `user_root` is the XML's client-side music root, as on `/rekordbox/export`. Response `downloadFilename` is what to pass to `/sync/download` — clients must not assemble it. 400s if both are false; a failed XML fails the whole call rather than returning a zip silently missing it. One file because a browser only reliably saves one download per user gesture — a second is dropped silently. |
 | GET `/sync/download/{filename}` | Stream back a file a previous call wrote to the user's downloads dir (zip or Rekordbox XML). Exists so the client fetches through its pymix session instead of filebrowser directly — which is what makes `demo` able to download at all, since its own filebrowser credential can't see demoadmin's dir (#66). |
 
 ## Tracks & metadata — `routers/track.py`

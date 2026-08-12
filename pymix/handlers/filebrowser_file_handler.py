@@ -380,7 +380,18 @@ class FileBrowserFileHandler:
         return {'n_tracks': n_files, 'size_tracks': total_size}
 
 
-    def sync(self, username: str, tracks_to_zip: list[SubBoxTrack]) -> Tuple[int, Path]:
+    def sync(
+        self,
+        username: str,
+        tracks_to_zip: list[SubBoxTrack],
+        extra_files: Optional[list[Tuple[Path, str]]] = None,
+    ) -> Tuple[int, Path]:
+        """Zip the given tracks for download, plus any (source, name-in-zip) extras.
+
+        `extra_files` exists for files that don't live under the user's music root
+        and so have no path relative to it — the Rekordbox XML, which is written to
+        the downloads dir and goes in at the zip root.
+        """
         src_dir = self._get_user_music_root(username)
         files_to_zip: list[Path] = []
         for track in tracks_to_zip:
@@ -405,6 +416,7 @@ class FileBrowserFileHandler:
             files_to_zip=files_to_zip,
             db_controller=None,
             job_id=None,
+            extra_files=extra_files,
         )
         return n_files_written, dst_dir
 
@@ -420,6 +432,7 @@ class FileBrowserFileHandler:
         files_to_zip: list[Path],
         db_controller: Optional[DbController],
         job_id: Optional[str],
+        extra_files: Optional[list[Tuple[Path, str]]] = None,
     ) -> Tuple[int, Path]:
         dst_dir = Path(self._filebrowser_data_path_downloads.format(user=username)) / self._zip_name
         output_path = str(dst_dir.with_suffix('.zip'))
@@ -437,6 +450,14 @@ class FileBrowserFileHandler:
                     datetime_now = datetime.datetime.now()
                     if (datetime_now - datetime_start).total_seconds() > self._update_job_period_s:
                         db_controller.update_export_job(job_id, n_files_written)
+            for source, name_in_zip in extra_files or []:
+                if not Path(source).is_file():
+                    logger.error(f'export zip: extra file not found {source} for user {username}')
+                    continue
+                logger.info(f'exporting {source} as {name_in_zip} for user {username}')
+                zip_file.write(source, name_in_zip)
+                # Deliberately not counted in n_files_written: callers report that
+                # as the track count (nTracksExported).
         return n_files_written, dst_dir
 
     def export_subsonic_music(self, db_config: dict, app_env: str, username: str, job_id: str) -> int:
