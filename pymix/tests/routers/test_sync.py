@@ -29,6 +29,28 @@ async def test_sync_download_streams_existing_file(tmp_path):
 
 
 @pytest.mark.anyio
+async def test_sync_download_is_never_cacheable(tmp_path):
+    """Every user's download is the same url, so a cache in front of pymix would
+    serve one user's zip to the next caller (Cloudflare caches `.zip` by extension)."""
+    downloads_dir = tmp_path / "demoadmin" / "downloads"
+    downloads_dir.mkdir(parents=True)
+    (downloads_dir / "music.zip").write_bytes(b"zip-bytes")
+
+    fb_file_handler = mock.Mock()
+    fb_file_handler.get_downloads_dir = mock.Mock(return_value=downloads_dir)
+
+    response = await sync_download(
+        filename="music.zip",
+        user={"username": "demoadmin"},
+        fb_file_handler=fb_file_handler,
+    )
+
+    cache_control = response.headers["cache-control"]
+    assert "no-store" in cache_control
+    assert "private" in cache_control
+
+
+@pytest.mark.anyio
 async def test_sync_download_missing_file_404s(tmp_path):
     downloads_dir = tmp_path / "demoadmin" / "downloads"
     downloads_dir.mkdir(parents=True)

@@ -921,4 +921,19 @@ async def sync_download(
         raise HTTPException(status_code=404, detail="file not found")
 
     logger.info("sync_download: user=%s filename=%s", username, filename)
-    return FileResponse(path=requested_path, filename=filename)
+    # Every user's download lives at the SAME url (/sync/download/music.zip), and the
+    # only thing separating them is this endpoint's session check — which a cache in
+    # front of pymix does not run. Prod sits behind Cloudflare, which caches `.zip` by
+    # extension unless the origin says otherwise: verified live, an unauthenticated GET
+    # of /sync/download/music.zip returned another session's 6.2MB zip with
+    # `cf-cache-status: HIT`, and a second download in the same 4h window kept serving
+    # the first zip even after a differently-configured export had rewritten the file.
+    # So say no-store explicitly (filebrowser's own /api/raw already does).
+    return FileResponse(
+        path=requested_path,
+        filename=filename,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, private",
+            "Pragma": "no-cache",
+        },
+    )
