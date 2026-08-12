@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 
 from pymix.containers import Container
 from pymix.orchestrators.services_orchestrator import ServicesOrchestrator
+from pymix.utils import memdiag
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -69,3 +70,59 @@ async def migrate_beets(
         raise HTTPException(status_code=404, detail=str(ex))
     except AssertionError:
         raise HTTPException(status_code=404, detail=f"no such user: {username}")
+
+
+@router.get("/memory", dependencies=[Depends(require_admin_token)])
+async def memory_snapshot(objects: bool = False, raw_xml: bool = False) -> dict:
+    """Read-only allocator-level memory diagnosis for this process.
+
+    Answers the question RSS alone cannot: of the resident memory, how much does the
+    allocator still consider handed out (a real leak) versus freed-but-retained in
+    glibc's free lists (fragmentation)? See `utils/memdiag` for why tracemalloc and gc
+    both read "flat" in either case.
+
+    `objects=true` adds a gc type histogram — it walks every tracked object, so it is
+    the one genuinely expensive option here; leave it off when sampling on a timer.
+    `raw_xml=true` returns glibc's full per-arena malloc_info dump.
+    """
+    return memdiag.snapshot(include_objects=objects, include_raw_xml=raw_xml)
+
+
+@router.post("/memory/trim", dependencies=[Depends(require_admin_token)])
+async def memory_trim() -> dict:
+    """Hand entirely-unused free-list pages back to the kernel, reporting RSS either side.
+
+    Safe on a live process — it relocates nothing and frees nothing still referenced —
+    but it is deliberately a POST, not a GET: it mutates allocator state and the
+    before/after delta is a measurement that only means anything the first time.
+
+    If this reclaims most of the growth, the cause is retention and the fix is to call
+    it periodically. If it reclaims almost nothing while RSS stays high, the memory is
+    genuinely still allocated and the next step is native call stacks, not trimming.
+    """
+    result = memdiag.trim()
+    logger.info(f"admin: malloc_trim requested, result {result}")
+    return result
+
+
+@router.post("/memory/tracemalloc/start", dependencies=[Depends(require_admin_token)])
+async def memory_tracemalloc_start(frames: int = 20) -> dict:
+    """Start recording Python-level allocation sites, with a baseline to diff against.
+
+    Safe to call on a running process — growth here is continuous, so whatever leaks
+    will be captured from now on without a restart. Carries real overhead while active
+    (roughly 2x per traced frame), so stop caring about it once you have an answer.
+    """
+    result = memdiag.tracemalloc_start(frames=frames)
+    logger.info(f"admin: tracemalloc start requested, result {result}")
+    return result
+
+
+@router.get("/memory/tracemalloc/top", dependencies=[Depends(require_admin_token)])
+async def memory_tracemalloc_top(limit: int = 20) -> dict:
+    """Python allocation sites that grew most since tracemalloc was started.
+
+    A flat result here means "the growth is not Python-level", not "there is no growth"
+    — a raw malloc inside a C extension is invisible to tracemalloc by construction.
+    """
+    return memdiag.tracemalloc_top(limit=limit)
