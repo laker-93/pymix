@@ -62,6 +62,11 @@ async def migrate_beets(
     """Re-render this user's beets config from the current template and recreate
     their beets container so it picks up the pinned image (#76). Explicit,
     per-user, safe to re-run.
+
+    Doubles as the repair for a user whose container is missing or stopped — the
+    library lives on the /config bind mount, so it is brought back up against the
+    existing library rather than rebuilt (#101). 404 still means "not provisioned",
+    i.e. no config directory at all.
     """
     logger.info(f"admin: beets migration requested for {username}")
     try:

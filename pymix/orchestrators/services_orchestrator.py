@@ -219,6 +219,10 @@ class ServicesOrchestrator:
         their beets container so it picks up the pinned image (#76). Explicit,
         per-user, re-runnable — never triggered automatically on startup, so a
         deploy can't silently recreate every user's container at once.
+
+        Also brings the container up from nothing when the user is provisioned but
+        has no running container, which is the state a half-failed earlier migration
+        leaves behind (#101).
         """
         return await anyio.to_thread.run_sync(self._migrate_beets_container, username)
 
@@ -232,10 +236,22 @@ class ServicesOrchestrator:
         # One lock for the whole job: a foreground import for this user must not
         # run concurrently with their container being reconfigured/recreated (#73).
         with self._beets_exec.write_lock(container_name):
-            before = self._beets_status(container_name, username)
+            # A user can be fully provisioned with no container to exec into: the
+            # config and musiclibrary.blb live on the /config bind mount, so they
+            # outlive the container. A migration that cleared the old container and
+            # then failed to bring the new one up leaves exactly that state -- four
+            # prod users sat in it after the pre-#114 name-conflict abort, and
+            # `migrate` could not dig them out because the snapshot below was the
+            # first thing it ran. Treat it as a plain bring-up instead: there is
+            # nothing in an absent container left to snapshot or back up.
+            container_live = self._beets_container_is_running(container_name)
 
-            backup_name = f'musiclibrary.blb.bak-{int(time.time())}'
-            self._beets_exec.execute(container_name, ['cp', '/config/musiclibrary.blb', f'/config/{backup_name}'])
+            before = self._beets_status(container_name, username) if container_live else None
+
+            backup_name = None
+            if container_live:
+                backup_name = f'musiclibrary.blb.bak-{int(time.time())}'
+                self._beets_exec.execute(container_name, ['cp', '/config/musiclibrary.blb', f'/config/{backup_name}'])
 
             content = beets_template.render()
             with open(config_dst, 'w') as f:
@@ -272,13 +288,38 @@ class ServicesOrchestrator:
 
         return {
             'username': username,
+            # True when this was a bring-up rather than a migration — the container
+            # was missing or stopped, so there was nothing to snapshot or back up.
+            'had_no_live_container': not container_live,
             'backup_file': backup_name,
             'before': before,
             'after': after,
-            'stats_match': before['stats'] == after['stats'],
-            'sample_match': before['sample'] == after['sample'],
+            # None rather than False without a `before`: there is no claim to make
+            # about the library surviving, and False would read as "it changed".
+            'stats_match': before['stats'] == after['stats'] if container_live else None,
+            'sample_match': before['sample'] == after['sample'] if container_live else None,
             'removed_foreign_project': foreign_project,
         }
+
+    def _beets_container_is_running(self, container_name: str) -> bool:
+        """
+        Whether `docker exec` into this beets container can be expected to work.
+
+        Both halves matter: an absent container raises NoSuchContainer on inspect,
+        and a container that exists but is stopped fails the exec itself with a
+        different error. Neither is a reason to refuse the migration -- `compose up`
+        is what fixes both -- so the caller skips the exec-dependent steps rather
+        than aborting.
+        """
+        try:
+            existing = docker.container.inspect(container_name)
+        except NoSuchContainer:
+            logger.info(f'{container_name} does not exist; migration will bring it up from scratch')
+            return False
+        if not existing.state.running:
+            logger.info(f'{container_name} exists but is not running; skipping the pre-migration snapshot')
+            return False
+        return True
 
     def _clear_foreign_compose_container(self, container_name: str) -> Optional[str]:
         """
