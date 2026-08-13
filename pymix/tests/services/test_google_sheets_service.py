@@ -46,8 +46,11 @@ class _FakeSpreadsheets:
 class _FakeService:
     def __init__(self, on_execute=lambda: None, result=None):
         self._spreadsheets = _FakeSpreadsheets(_FakeValues(on_execute, result or {}))
+        # Counted because constructing the real resource is what costs ~18.7 MB.
+        self.spreadsheets_calls = 0
 
     def spreadsheets(self):
+        self.spreadsheets_calls += 1
         return self._spreadsheets
 
 
@@ -100,9 +103,21 @@ async def test_read_rows_does_not_block_the_event_loop(monkeypatch):
     assert elapsed < 2, f"call did not run concurrently with the loop (took {elapsed:.2f}s)"
 
 
+class _FakeConn:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
 @pytest.mark.anyio
-async def test_transport_error_drops_the_cached_connection(monkeypatch):
-    """A BrokenPipeError poisons the pooled TLS socket; the next call must redial."""
+async def test_transport_error_drops_the_socket_but_keeps_the_client(monkeypatch):
+    """A BrokenPipeError poisons the pooled TLS socket, so the socket must go (#81).
+
+    The client must *not* go with it (#116). Rebuilding it strands ~52 MB of
+    generated docstrings per failure, which is what grew prod to ~1 GB.
+    """
     builds = []
 
     def factory():
@@ -116,11 +131,61 @@ async def test_transport_error_drops_the_cached_connection(monkeypatch):
     _patch_build(monkeypatch, factory)
     service = GoogleSheetsService("/nonexistent.json")
 
-    for _ in range(2):
+    with pytest.raises(BrokenPipeError):
+        await service.read_rows("sheet-id")
+
+    # A pooled connection only exists once a request has been made, so inject one
+    # and drive a second failure to prove the reset actually closes it.
+    conn = _FakeConn()
+    service._http.connections["https:sheets.googleapis.com"] = conn
+    with pytest.raises(BrokenPipeError):
+        await service.read_rows("sheet-id")
+
+    assert conn.closed, "poisoned socket was left open — #81 regression"
+    assert service._http.connections == {}, "connection pool was not cleared"
+    assert len(builds) == 1, "client was rebuilt after a transport error — #116 leak"
+
+
+@pytest.mark.anyio
+async def test_repeated_transport_errors_never_rebuild_the_client(monkeypatch):
+    """The leak was proportional to failure count: 10 broken pipes, ~520 MB stranded."""
+    builds = []
+
+    def factory():
+        builds.append(1)
+
+        def boom():
+            raise BrokenPipeError(32, "Broken pipe")
+
+        return _FakeService(on_execute=boom)
+
+    _patch_build(monkeypatch, factory)
+    service = GoogleSheetsService("/nonexistent.json")
+
+    for _ in range(10):
         with pytest.raises(BrokenPipeError):
             await service.read_rows("sheet-id")
 
-    assert len(builds) == 2, "cached client was reused after a transport failure"
+    assert len(builds) == 1, f"built the client {len(builds)}x for 10 failures"
+
+
+@pytest.mark.anyio
+async def test_the_nested_resource_is_constructed_once(monkeypatch):
+    """Each `spreadsheets().values()` renders ~18.7 MB of docstrings, so cache it.
+
+    Pre-fix this ran inside every request lambda, re-paying that on every poll.
+    """
+    service_obj = _FakeService()
+    _patch_build(monkeypatch, lambda: service_obj)
+    service = GoogleSheetsService("/nonexistent.json")
+
+    await service.read_rows("sheet-id")
+    await service.read_rows("sheet-id")
+    await service.write_status("sheet-id", 2, "Added", "2026-01-01")
+
+    assert service_obj.spreadsheets_calls == 1, (
+        f"constructed the resource {service_obj.spreadsheets_calls}x across 3 calls"
+    )
 
 
 @pytest.mark.anyio
