@@ -23,16 +23,20 @@ def no_real_docker():
     """
     Keep the module-level `docker` handle away from a real daemon.
 
-    `_clear_foreign_compose_container` inspects the existing container, and
-    python_on_whales shells out to the docker CLI to do it -- if the binary isn't on
-    PATH it silently *downloads* one and retries, so an unpatched test would depend on
-    both a docker daemon and network access. Default to "nothing there", which is the
-    no-op path; tests that care about the container patch this themselves.
+    `_clear_foreign_compose_container` and `_beets_container_is_running` both inspect
+    the container, and python_on_whales shells out to the docker CLI to do it -- if the
+    binary isn't on PATH it silently *downloads* one and retries, so an unpatched test
+    would depend on both a docker daemon and network access.
+
+    The default is the ordinary migration baseline: a running container that this
+    compose project already owns, so nothing is in the way and the pre-migration
+    snapshot works. It used to be "nothing there", which was equivalent back when
+    inspect only fed the foreign-project check -- but absence now also means "skip the
+    snapshot and back-up" (#101), which would quietly gut the assertions in tests that
+    are about the normal path. Tests that care about absence patch this themselves.
     """
     with mock.patch("pymix.orchestrators.services_orchestrator.docker") as mock_docker:
-        mock_docker.container.inspect.side_effect = NoSuchContainer(
-            ["docker", "container", "inspect"], 1
-        )
+        mock_docker.container.inspect.side_effect = lambda name: _labelled_container(name)
         yield mock_docker
 
 
@@ -252,12 +256,13 @@ async def test_migrate_holds_write_lock_for_the_whole_job(tmp_path):
     assert events == ["migration-done", "waiter-acquired"]
 
 
-def _labelled_container(project):
-    """A python_on_whales Container stub carrying only the compose labels we read."""
+def _labelled_container(project, running=True):
+    """A python_on_whales Container stub carrying only the fields we read off it."""
     container = mock.Mock()
     container.config.labels = (
         {} if project is None else {"com.docker.compose.project": project}
     )
+    container.state.running = running
     return container
 
 
@@ -394,6 +399,117 @@ async def test_migrate_clears_the_container_only_after_backing_up(tmp_path):
     assert backup_index < kinds.index("remove"), (
         "musiclibrary.blb must be backed up while the old container is still running"
     )
+
+
+@pytest.mark.anyio
+async def test_migrate_brings_up_a_container_that_no_longer_exists(tmp_path):
+    """
+    The state four prod users were left in after the pre-#114 abort: config and
+    musiclibrary.blb still on the /config bind mount, no container at all (#101).
+    `migrate` used to die on the very first exec of the pre-migration snapshot, so
+    the one endpoint that could recreate the container could never be used to.
+    """
+    config = _make_config(tmp_path)
+    username = "mawuli"
+    _provision(config, username)
+    db_user = {"username": username, "password": "pw", "beets_port": 1234}
+    orchestrator, _ = _make_orchestrator(config, BeetsExec(), db_user)
+
+    execs, compose_ups = [], []
+
+    with mock.patch("pymix.clients.beets_exec.docker") as mock_exec_docker, \
+         mock.patch("pymix.orchestrators.services_orchestrator.docker") as mock_docker, \
+         mock.patch("pymix.orchestrators.services_orchestrator.DockerClient") as mock_docker_client_cls:
+
+        def record_execute(container_name, command, stream=False):
+            execs.append((len(compose_ups), command if isinstance(command, list) else command.split()))
+            return "Tracks: 7"
+
+        mock_exec_docker.execute.side_effect = record_execute
+        mock_docker.container.inspect.side_effect = NoSuchContainer(
+            ["docker", "container", "inspect", f"beets{username}"], 1
+        )
+        mock_compose_instance = mock.Mock()
+        mock_compose_instance.compose.up.side_effect = lambda *a, **k: compose_ups.append(k)
+        mock_docker_client_cls.return_value = mock_compose_instance
+
+        report = await orchestrator.migrate_beets_container(username)
+
+    assert compose_ups == [{"detach": True, "force_recreate": True, "pull": "always"}]
+    mock_docker.container.remove.assert_not_called()
+
+    # Nothing may be exec'd before `compose up` -- there is no container to exec into.
+    assert not [cmd for ups_before, cmd in execs if ups_before == 0], (
+        f"expected no exec before the container was brought up, got: {execs}"
+    )
+    assert not [cmd for _, cmd in execs if "cp" in cmd], "there is no live library to back up"
+
+    assert report["had_no_live_container"] is True
+    assert report["backup_file"] is None
+    assert report["before"] is None
+    assert report["after"]["stats"] == "Tracks: 7"
+    # None, not False: a bring-up makes no before/after claim about the library.
+    assert report["stats_match"] is None
+    assert report["sample_match"] is None
+
+
+@pytest.mark.anyio
+async def test_migrate_brings_up_a_stopped_container(tmp_path):
+    """
+    A container that exists but is stopped fails `docker exec` too, with a different
+    error than absence. `compose up` is the fix for both, so neither should abort.
+    """
+    config = _make_config(tmp_path)
+    username = "james"
+    _provision(config, username)
+    db_user = {"username": username, "password": "pw", "beets_port": 1234}
+    orchestrator, _ = _make_orchestrator(config, BeetsExec(), db_user)
+
+    execs = []
+
+    with mock.patch("pymix.clients.beets_exec.docker") as mock_exec_docker, \
+         mock.patch("pymix.orchestrators.services_orchestrator.docker") as mock_docker, \
+         mock.patch("pymix.orchestrators.services_orchestrator.DockerClient") as mock_docker_client_cls:
+        mock_exec_docker.execute.side_effect = lambda cn, cmd, stream=False: (
+            execs.append(cmd if isinstance(cmd, list) else cmd.split()) or "Tracks: 4"
+        )
+        mock_docker.container.inspect.return_value = _labelled_container(
+            f"beets{username}", running=False
+        )
+        mock_compose_instance = mock.Mock()
+        mock_docker_client_cls.return_value = mock_compose_instance
+
+        report = await orchestrator.migrate_beets_container(username)
+
+    mock_compose_instance.compose.up.assert_called_once_with(
+        detach=True, force_recreate=True, pull="always"
+    )
+    # Owned by the right project, so it is restarted in place rather than removed.
+    mock_docker.container.remove.assert_not_called()
+    assert not [cmd for cmd in execs if "cp" in cmd], "a stopped container cannot be exec'd"
+    assert report["had_no_live_container"] is True
+    assert report["backup_file"] is None
+    assert report["before"] is None
+    assert report["after"]["stats"] == "Tracks: 4"
+
+
+@pytest.mark.anyio
+async def test_migrate_still_refuses_a_user_with_no_config_directory(tmp_path):
+    """
+    The bring-up path must not swallow the genuine "never provisioned" case: an absent
+    container is recoverable, an absent /config directory is not (there is no library
+    to bring a container up against, and no beets_port has meaning yet).
+    """
+    config = _make_config(tmp_path)
+    orchestrator, _ = _make_orchestrator(
+        config, BeetsExec(), {"username": "ghost", "password": "pw", "beets_port": 1234}
+    )
+
+    with mock.patch("pymix.orchestrators.services_orchestrator.DockerClient") as mock_docker_client_cls:
+        with pytest.raises(ValueError, match="not.*provisioned|missing"):
+            await orchestrator.migrate_beets_container("ghost")
+
+    mock_docker_client_cls.assert_not_called()
 
 
 @pytest.mark.anyio
