@@ -157,6 +157,9 @@ def _fb_handler(tmp_path, zip_name="music"):
     fb_file_handler.get_xml_output_path = mock.Mock(
         return_value=downloads_dir / "subbox_rb_export.xml"
     )
+    fb_file_handler.get_name_in_export_zip = mock.Mock(
+        side_effect=lambda path: f"music/{path.name}"
+    )
     fb_file_handler.sync = mock.Mock(return_value=(3, downloads_dir / zip_name))
     return fb_file_handler
 
@@ -180,8 +183,10 @@ async def test_sync_playlists_puts_the_xml_in_the_zip(tmp_path):
     assert result["downloadFilename"] == "music.zip"
 
     xml_path = fb_file_handler.get_xml_output_path.return_value
+    # Under music/, not beside it — the zip must have a single top-level entry or
+    # macOS wraps it in a folder the XML's Locations don't account for.
     assert fb_file_handler.sync.call_args.kwargs["extra_files"] == [
-        (xml_path, "subbox_rb_export.xml")
+        (xml_path, "music/subbox_rb_export.xml")
     ]
     # Built for the caller's chosen extraction dir, scoped to the requested playlists.
     assert xml_controller.create_rekordbox_xml_from_subsonic_playlists.await_args.kwargs == {

@@ -869,9 +869,14 @@ async def sync_playlists(
     n_tracks_zipped, zip_path = fb_file_handler.sync(
         username=username,
         tracks_to_zip=all_tracks,
-        # Zip root, alongside the music/ tree, so unzipping puts the XML next to
-        # the tracks it points at.
-        extra_files=[(xml_output_path, xml_output_path.name)] if xml_output_path else None,
+        # Inside the music/ tree, not beside it: a single top-level entry is what
+        # stops macOS' Archive Utility adding a wrapper folder that shifts every
+        # track one level below where the XML says it is.
+        extra_files=(
+            [(xml_output_path, fb_file_handler.get_name_in_export_zip(xml_output_path))]
+            if xml_output_path
+            else None
+        ),
     )
 
     return {

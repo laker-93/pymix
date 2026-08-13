@@ -184,6 +184,18 @@ class FileBrowserFileHandler:
         xml_path.unlink(missing_ok=True)
         return xml_path
 
+    def get_name_in_export_zip(self, path: Path) -> str:
+        """Where a non-track file (the Rekordbox XML) goes inside the export zip.
+
+        Under the same music/ prefix every track gets, so the zip has exactly ONE
+        top-level entry. macOS' Archive Utility wraps an archive in an extra folder
+        named after it only when there's more than one top-level entry, and that
+        wrapper silently invalidated every Location in the XML: the tracks landed at
+        <extract>/music/music/<artist>/... while the XML pointed at <extract>/...
+        """
+        stem = self._local_user_music_stem
+        return str(Path(stem) / path.name) if stem else path.name
+
     def get_downloads_dir(self, username: str) -> Path:
         """The directory sync/rekordbox exports are written to for this user.
 
@@ -390,7 +402,8 @@ class FileBrowserFileHandler:
 
         `extra_files` exists for files that don't live under the user's music root
         and so have no path relative to it — the Rekordbox XML, which is written to
-        the downloads dir and goes in at the zip root.
+        the downloads dir. Callers should name it via get_name_in_export_zip so it
+        lands under the same music/ prefix as the tracks.
         """
         src_dir = self._get_user_music_root(username)
         files_to_zip: list[Path] = []
