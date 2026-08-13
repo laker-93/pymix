@@ -94,10 +94,22 @@ with a lower similarity threshold. `subbox_id` presence is the fast path
 
 `/sync/playlists` always prepares exactly **one** file, named in the response's
 `downloadFilename`: the tracks zip, the same zip with `subbox_rb_export.xml` added
-at its root (`includeRekordboxXml`), or the XML alone (`includeTracks: false` — a
-metadata-only export, which skips all of the matching above, since none of it feeds
-the XML). It's one file because a browser drops a second programmatic download
-silently (it allows one per user gesture), so the client was losing the XML.
+(`includeRekordboxXml`), or the XML alone (`includeTracks: false` — a metadata-only
+export, which skips all of the matching above, since none of it feeds the XML).
+It's one file because a browser drops a second programmatic download silently (it
+allows one per user gesture), so the client was losing the XML.
+
+The zip has exactly **one top-level entry**, `music/`, and the XML goes *inside*
+it — not beside it. macOS' Archive Utility wraps a multi-entry archive in a folder
+named after it, so with the XML at the root the tracks extracted to
+`<dir>/music/music/<artist>/…` while the XML's Locations said `<dir>/<artist>/…`
+and Rekordbox resolved nothing. Callers name the extra via
+`FileBrowserFileHandler.get_name_in_export_zip`; don't add a second root entry.
+
+The XML's Locations are `user_root / <path relative to the user's music root>`, so
+**`user_root` must be the folder containing the artist folders** — i.e. the
+extraction dir *plus* `music`. Desktop sends `appPath/music` and unzips into
+`appPath`; the web client appends the segment itself.
 
 A *hit* costs one Subsonic query; a *miss* walks every tier — 2 + one query per
 title token — so the widen is what the fan-out endpoints pay for. The token tier's

@@ -37,10 +37,12 @@ def _track(tmp_path, username, relative_path) -> SubBoxTrack:
     )
 
 
-def test_sync_writes_extra_files_at_the_zip_root(tmp_path):
-    """The Rekordbox XML rides along in the tracks' zip, at the root next to the
-    music/ tree, so the client takes one download instead of two — a browser drops
-    the second one silently."""
+def test_sync_writes_extra_files_under_the_single_zip_root(tmp_path):
+    """The Rekordbox XML rides along in the tracks' zip so the client takes one
+    download instead of two — a browser drops the second one silently — and it goes
+    *inside* music/ so the zip has exactly one top-level entry. Two entries make
+    macOS' Archive Utility add a wrapper folder, which pushes every track one level
+    deeper than the Location the XML records for it."""
     handler = _handler(tmp_path)
     track = _track(tmp_path, 'demoadmin', 'Zeropage/Ambient Pills/07 - Ambient Flight.mp3')
 
@@ -50,14 +52,17 @@ def test_sync_writes_extra_files_at_the_zip_root(tmp_path):
     n_files_written, zip_path = handler.sync(
         username='demoadmin',
         tracks_to_zip=[track],
-        extra_files=[(xml_path, xml_path.name)],
+        extra_files=[(xml_path, handler.get_name_in_export_zip(xml_path))],
     )
 
     with zipfile.ZipFile(zip_path.with_suffix('.zip')) as zip_file:
         names = zip_file.namelist()
-        assert 'subbox_rb_export.xml' in names
+        assert 'music/subbox_rb_export.xml' in names
         assert 'music/Zeropage/Ambient Pills/07 - Ambient Flight.mp3' in names
-        assert zip_file.read('subbox_rb_export.xml') == b'<DJ_PLAYLISTS/>'
+        assert zip_file.read('music/subbox_rb_export.xml') == b'<DJ_PLAYLISTS/>'
+        # The property that actually matters: one top-level entry, so no extractor
+        # invents a wrapper folder around it.
+        assert {name.split('/')[0] for name in names} == {'music'}
 
     # The extra isn't a track, so it stays out of the count the API reports as
     # nTracksExported.
