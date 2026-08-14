@@ -102,14 +102,93 @@ def _proc_status_kb(key: str) -> float:
 
 def process_memory() -> dict:
     """Kernel's view: what is actually resident, and how much is anonymous (heap-ish)
-    rather than file-backed. Current values, not the ``ru_maxrss`` high-water mark —
-    a peak counter cannot show a sawtooth and will happily read flat through a leak."""
+    rather than file-backed.
+
+    ``rss_mb`` and friends are current values. A peak counter cannot show a sawtooth and
+    will happily read flat through a leak, so they are what a leak hunt reads.
+    ``rss_peak_mb`` (``VmHWM``) is the opposite question and is here for the opposite
+    reason: sizing a container ``mem_limit`` needs the transient high-water mark, not the
+    steady state, because the Rekordbox import path allocates in bursts and a limit set
+    from steady-state RSS would OOM-kill the process mid-import (laker-93/pymix#125).
+    It only ever rises, so it is useless for spotting growth — read it once, size against
+    it, ignore it thereafter."""
     return {
         "rss_mb": round(_proc_status_kb("VmRSS:") / 1024.0, 2),
+        "rss_peak_mb": round(_proc_status_kb("VmHWM:") / 1024.0, 2),
         "rss_anon_mb": round(_proc_status_kb("RssAnon:") / 1024.0, 2),
         "rss_file_mb": round(_proc_status_kb("RssFile:") / 1024.0, 2),
         "vm_data_mb": round(_proc_status_kb("VmData:") / 1024.0, 2),
         "threads": int(_proc_status_kb("Threads:")) if _proc_status_kb("Threads:") > 0 else None,
+    }
+
+
+# cgroup v2 (Ubuntu 24, the prod droplet) exposes the limit as a plain byte count, or the
+# literal "max" when unlimited. v1 uses a different path and signals "unlimited" with a
+# sentinel close to 2**63 rather than a word, so both need handling: dev machines and CI
+# containers are not guaranteed to be on the same major version as prod.
+_CGROUP_V2_LIMIT = "/sys/fs/cgroup/memory.max"
+_CGROUP_V2_CURRENT = "/sys/fs/cgroup/memory.current"
+_CGROUP_V1_LIMIT = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
+_CGROUP_V1_CURRENT = "/sys/fs/cgroup/memory/memory.usage_in_bytes"
+# v1's "no limit" is PAGE_COUNTER_MAX scaled to bytes; anything at or above this is a
+# limit nobody set. Comparing against a round number rather than the exact constant keeps
+# it correct across page sizes.
+_CGROUP_V1_UNLIMITED = 2**62
+
+
+def _read_int_file(path: str):
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except OSError:
+        return None
+
+
+def cgroup_memory() -> dict:
+    """The container's own memory ceiling and current charge, as the kernel sees it.
+
+    This is what ``mem_limit`` in the compose file becomes, and it is the number an OOM
+    kill is measured against — not the host's total RAM, and not this process's RSS
+    (the cgroup also charges page cache and every other process in the container).
+
+    ``limit_mb`` is ``None`` when nothing is capping this container, which is the state
+    laker-93/pymix#125 exists to end. Everything degrades to ``available: false`` off
+    Linux rather than raising, so this is safe to call from a dev Mac.
+    """
+    raw_limit = _read_int_file(_CGROUP_V2_LIMIT)
+    raw_current = _read_int_file(_CGROUP_V2_CURRENT)
+    version = 2
+    if raw_limit is None:
+        raw_limit = _read_int_file(_CGROUP_V1_LIMIT)
+        raw_current = _read_int_file(_CGROUP_V1_CURRENT)
+        version = 1
+    if raw_limit is None:
+        return {"available": False, "reason": "no cgroup memory controller (not Linux?)"}
+
+    limit_bytes = None
+    if raw_limit != "max":
+        try:
+            parsed = int(raw_limit)
+        except ValueError:
+            parsed = None
+        if parsed is not None and parsed < _CGROUP_V1_UNLIMITED:
+            limit_bytes = parsed
+
+    try:
+        current_bytes = int(raw_current) if raw_current is not None else None
+    except ValueError:
+        current_bytes = None
+
+    return {
+        "available": True,
+        "cgroup_version": version,
+        "limit_mb": round(limit_bytes / _MB, 2) if limit_bytes is not None else None,
+        "current_mb": round(current_bytes / _MB, 2) if current_bytes is not None else None,
+        "used_fraction": (
+            round(current_bytes / limit_bytes, 4)
+            if limit_bytes and current_bytes is not None
+            else None
+        ),
     }
 
 
@@ -378,6 +457,7 @@ def snapshot(include_objects: bool = False, include_raw_xml: bool = False) -> di
     """Every view at once — the single call a diagnosis should start from."""
     snap = {
         "process": process_memory(),
+        "cgroup": cgroup_memory(),
         "allocator": allocator_stats(),
         "arena_heaps": arena_heaps(),
         "malloc_info": malloc_info_xml(include_raw=include_raw_xml),

@@ -29,7 +29,20 @@ containers:
     docker_compose_file: /subbox/docker-compose/beets/docker-compose.yml
     env_file: /subbox/docker-compose/beets/env
     config_file_dst: /subbox/users/{user}/beets/config/config.yaml
-logs_directory: logs
+# Durable log copy, on the /subbox host bind mount rather than inside the container, so
+# it survives the `docker compose up -d` that a deploy or a mem_limit change performs —
+# Docker's own json-file log does not (laker-93/pymix#125). Rotates at midnight, 10 days
+# kept, INFO and above.
+logs_directory: /subbox/logs
+disable_file_handler: false
+memory_watch:
+  # How often to log an RSS/allocator/cgroup sample. The kernel SIGKILLs at the cgroup
+  # limit with no warning and no traceback, so the only diagnosis that survives an OOM
+  # kill is one already written to the log before it. 60s is cheap (three small procfs
+  # reads and a libc struct copy) and fine-grained enough to show a ramp.
+  interval_s: 60
+  # Fraction of the container's memory limit at which samples escalate to WARNING.
+  warn_fraction: 0.8
 user_root: /subbox/{user}
 db:
   host: pymix-postgres

@@ -117,6 +117,14 @@ deliberately the minimal gate, not a general auth scheme.
 |---|---|
 | GET `/admin/beets/{username}/status` | Read-only audit of that user's beets container: beet version, plugins, stats, one-track `subbox_id` spot check. No lock, no mutation. |
 | POST `/admin/beets/{username}/migrate` | Recreate that user's beets container on the current template/version (#76). Backs up `musiclibrary.blb` first and returns before/after status with `stats_match`/`sample_match`. If the existing container belongs to a different compose project it is removed first, and the project it came from is reported as `removed_foreign_project` — see below. |
+| GET `/admin/memory` | Full allocator-level snapshot of the pymix process: kernel RSS (incl. `rss_peak_mb` = `VmHWM`), the container's `cgroup` limit and charge, glibc `mallinfo2`, arena heaps, and a verdict separating a native leak from free-list retention. `?objects=true` adds a gc type histogram (expensive — it walks every tracked object; leave it off when sampling). |
+| POST `/admin/memory/trim` | `malloc_trim(0)` — hand entirely-unused free-list pages back to the kernel, reporting RSS either side. A POST because the before/after delta only means anything the first time. |
+| POST `/admin/memory/tracemalloc/start` | Start recording Python-level allocation sites, with a baseline. Real overhead while active. |
+| GET `/admin/memory/tracemalloc/top` | Allocation sites that grew most since `start`. Flat here means "not Python-level", not "no growth" — a raw `malloc` in a C extension is invisible to tracemalloc. |
+
+`/admin/memory` is pull-based: it answers only while someone is asking. The `mem_watch_loop`
+background task (see `architecture.md`) is the push half — it logs a sample every
+`memory_watch.interval_s`, so an OOM kill leaves a trajectory in the log instead of a gap.
 
 ### Migrating a container compose doesn't own
 
