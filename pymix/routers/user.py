@@ -10,7 +10,7 @@ from starlette.responses import JSONResponse
 
 from pymix.containers import Container
 from pymix.orchestrators.services_orchestrator import ServicesOrchestrator
-from pymix.controllers.db_controller import DbController
+from pymix.controllers.db_controller import DbController, InvalidCredentialsError
 from pymix.routers.auth import require_username
 
 router = APIRouter()
@@ -70,15 +70,24 @@ async def user_login(
     logger.info(f'logging in user {username}')
     reason = ""
     success = True
+    status_code = HTTPStatus.OK
     print(f'got session id {session_id}')
     if session_id is None or session_id == 'none':
         try:
             session_id = db_controller.create_session(username, password)
+        except InvalidCredentialsError as ex:
+            # A client error, not a server one. Log without a stack trace and answer
+            # 401 with the generic message, never the underlying detail.
+            logger.warning(f'failed login attempt for user {username}: invalid credentials')
+            reason = str(ex)
+            success = False
+            status_code = HTTPStatus.UNAUTHORIZED
         except Exception as ex:
             logger.error(f'error occured logging in user', exc_info=True)
             reason = repr(ex)
             success = False
-    response = JSONResponse(content=reason, status_code=HTTPStatus.OK if success else HTTPStatus.INTERNAL_SERVER_ERROR)
+            status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+    response = JSONResponse(content=reason, status_code=status_code)
     if success:
         logger.info(f'setting cookie to {session_id}')
         response.set_cookie(key='session_id', value=session_id, httponly=True, secure=True, samesite="none")

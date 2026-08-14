@@ -20,6 +20,12 @@ from pymix.services.import_progress import ImportPhase
 from pymix.utils.get_available_port import get_available_port
 
 
+class InvalidCredentialsError(Exception):
+    """Raised by ``create_session`` for a bad username/password, as opposed to an
+    unexpected internal error. Lets the login router tell the two apart and answer a
+    client error with 401 instead of reporting it as a 500."""
+
+
 def _has_source_url(youtube_url, bandcamp_url, soundcloud_url) -> bool:
     """Whether an item carries a source URL, and so is identified by that link rather than
     by its artist/title free text. The two ``_derive_*`` helpers below must agree on this,
@@ -568,8 +574,14 @@ class DbController:
         return self.create_session(username, password)
 
     def create_session(self, username: str, password: str) -> str:
-        user = self.get_user(username)
-        assert user['password'] == password
+        try:
+            user = self.get_user(username)
+        except AssertionError:
+            # No such username. Deliberately the same error (and message) as a wrong
+            # password, so the response can't be used to enumerate usernames.
+            raise InvalidCredentialsError('invalid username or password')
+        if user['password'] != password:
+            raise InvalidCredentialsError('invalid username or password')
         user_id = user['user_id']
 
         with self._session_factory() as session:
