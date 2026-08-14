@@ -134,43 +134,120 @@ def allocator_stats() -> dict:
     }
 
 
-def arena_heaps() -> dict:
-    """Count glibc arena heaps by their mapping signature in ``/proc/self/maps``.
+_HEAP_MAX_SIZE = 64 * 1024 * 1024
 
-    ``new_heap()`` mmaps HEAP_MAX_SIZE (64 MB) as PROT_NONE at a 64 MB-aligned address
-    and then mprotects an ``rw-p`` prefix, so each heap appears as an ``rw-p`` + ``---p``
-    pair summing to exactly 65536 KB inside one aligned span. Counting these separates
-    glibc arenas from CPython's own 1 MB pymalloc arenas.
+
+def _parse_arena_heaps(maps: str) -> dict:
+    """Identify glibc arena heaps in ``/proc/self/maps`` text and total what they commit.
+
+    A heap is matched exactly: an anonymous ``rw-p`` mapping starting at a
+    HEAP_MAX_SIZE-aligned address, followed by a contiguous run of anonymous
+    ``rw-p``/``---p`` mappings that ends precisely at ``base + HEAP_MAX_SIZE``.
+    ``committed_mb`` is the ``rw-p`` part of exactly those runs.
+
+    Split out from :func:`arena_heaps` so it can be tested against a captured maps file
+    on a platform that has no ``/proc``.
     """
-    spans: dict[int, int] = {}
-    committed_kb = 0
-    try:
-        with open("/proc/self/maps") as fh:
-            for line in fh:
-                parts = line.split()
-                if len(parts) > 5:  # has a pathname -> file-backed, not an arena heap
-                    continue
-                lo, hi = parts[0].split("-")
-                start, end = int(lo, 16), int(hi, 16)
-                kb = (end - start) // 1024
-                if kb < 512:
-                    continue
-                base = start - (start % (64 * 1024 * 1024))
-                spans[base] = spans.get(base, 0) + kb
-                if parts[1].startswith("rw"):
-                    committed_kb += kb
-    except OSError as exc:
-        return {"available": False, "reason": str(exc)}
+    anon: dict[int, tuple[int, str]] = {}
+    for line in maps.splitlines():
+        parts = line.split()
+        if len(parts) != 5:  # a 6th field is a pathname -> file-backed, not an arena heap
+            continue
+        lo, hi = parts[0].split("-")
+        anon[int(lo, 16)] = (int(hi, 16), parts[1])
+
+    heaps = 0
+    committed = 0
+    for start, (_end, perms) in anon.items():
+        if start % _HEAP_MAX_SIZE or not perms.startswith("rw"):
+            continue
+        limit = start + _HEAP_MAX_SIZE
+        cursor, rw_bytes = start, 0
+        while cursor < limit:
+            region = anon.get(cursor)
+            # Anything that is not a plain rw-p/---p run reaching the 64 MB boundary is
+            # some other 64 MB-aligned allocation, not an arena heap.
+            if region is None or region[0] > limit or not (
+                    region[1].startswith("rw") or region[1].startswith("---")):
+                break
+            if region[1].startswith("rw"):
+                rw_bytes += region[0] - cursor
+            cursor = region[0]
+        if cursor == limit:
+            heaps += 1
+            committed += rw_bytes
     return {
         "available": True,
-        "heaps": sum(1 for kb in spans.values() if 65000 <= kb <= 66000),
-        "committed_mb": round(committed_kb / 1024.0, 2),
+        "heaps": heaps,
+        "committed_mb": round(committed / _MB, 2),
     }
 
 
+def arena_heaps() -> dict:
+    """Count glibc arena heaps by their mapping signature in ``/proc/self/maps``, and
+    total how much of them is actually committed.
+
+    ``new_heap()`` mmaps HEAP_MAX_SIZE (64 MB) as PROT_NONE at a 64 MB-aligned address
+    and then mprotects an ``rw-p`` prefix, so each heap appears as an ``rw-p`` + ``---p``
+    pair covering exactly one aligned 64 MB span. Matching that shape separates glibc
+    arenas from CPython's own 1 MB pymalloc arenas.
+
+    ``committed_mb`` is the ``rw-p`` total *of those spans only*. It used to be the
+    ``rw-p`` total of every anonymous mapping >=512 KB in the process, which silently
+    swept in CPython's 1 MB pymalloc arenas and the thread stacks — on prod that read
+    258 MB against a real glibc footprint of 140 MB, i.e. it looked like glibc had
+    committed more than glibc had ever asked the kernel for.
+
+    Only non-main arenas appear here: the main arena grows by ``brk``, so it is the
+    ``[heap]`` mapping, which is named and therefore skipped. ``heaps`` counts *subheaps*,
+    not arenas — a busy arena allocates more than one — so cross-check it against the
+    ``<aspace type="subheaps">`` totals in ``malloc_info``'s raw XML, and expect
+    ``committed_mb`` to land close to that call's ``system_total_mb`` minus the main arena.
+
+    Both numbers are a lower bound, by one specific mechanism: the kernel merges
+    adjacent anonymous mappings that share flags, so a fully-committed heap whose
+    ``rw-p`` prefix abuts an unrelated ``rw-p`` mapping is reported as one oversized
+    region that no longer starts on the 64 MB boundary, and is skipped. Under-reporting
+    is the right failure here — the alternative, treating any span that merely covers an
+    aligned boundary as a heap, credits glibc with memory it never asked for, which is
+    the bug this whole function had before.
+    """
+    try:
+        with open("/proc/self/maps") as fh:
+            maps = fh.read()
+    except OSError as exc:
+        return {"available": False, "reason": str(exc)}
+    return _parse_arena_heaps(maps)
+
+
 _HEAP_NR_RE = re.compile(rb'<heap nr="(\d+)"')
-_SYSTEM_CUR_RE = re.compile(rb'<system type="current" size="(\d+)"/>')
-_TOTAL_REST_RE = re.compile(rb'<total type="rest" size="(\d+)"/>')
+# Match on the type attribute alone and then find size anywhere in the same tag.
+# glibc emits <total type="rest" count="N" size="M"/> but <system type="current"
+# size="M"/> — the intervening count made an exact-shape pattern for <total> never
+# match, so free_total_mb read 0.0 on every call regardless of what glibc reported.
+_SYSTEM_CUR_RE = re.compile(rb'<system type="current"[^>]*\bsize="(\d+)"')
+_TOTAL_REST_RE = re.compile(rb'<total type="rest"[^>]*\bsize="(\d+)"')
+
+
+def _parse_malloc_info(tmp: bytes, include_raw: bool = False) -> dict:
+    """Pull the process-level totals out of a ``malloc_info()`` dump.
+
+    Split out from :func:`malloc_info_xml` so the parsing can be tested against a
+    captured dump on any platform — the bug this replaced was in the patterns, not in
+    the ctypes plumbing, and there is no glibc to produce a dump on a dev Mac.
+    """
+    system_cur = [int(v) for v in _SYSTEM_CUR_RE.findall(tmp)]
+    rest = [int(v) for v in _TOTAL_REST_RE.findall(tmp)]
+    out = {
+        "available": True,
+        "arenas": len(set(_HEAP_NR_RE.findall(tmp))),
+        # The final <system>/<total> pair sits outside every <heap> block: process totals.
+        "system_total_mb": round((system_cur[-1] if system_cur else 0) / _MB, 2),
+        "free_total_mb": round((rest[-1] if rest else 0) / _MB, 2),
+    }
+    if include_raw:
+        out["raw_xml"] = tmp.decode("utf-8", "replace")
+    return out
 
 
 def malloc_info_xml(include_raw: bool = False) -> dict:
@@ -198,18 +275,7 @@ def malloc_info_xml(include_raw: bool = False) -> dict:
     except OSError as exc:
         return {"available": False, "reason": str(exc)}
 
-    system_cur = [int(v) for v in _SYSTEM_CUR_RE.findall(tmp)]
-    rest = [int(v) for v in _TOTAL_REST_RE.findall(tmp)]
-    out = {
-        "available": True,
-        "arenas": len(set(_HEAP_NR_RE.findall(tmp))),
-        # The final <system>/<total> pair sits outside every <heap> block: process totals.
-        "system_total_mb": round((system_cur[-1] if system_cur else 0) / _MB, 2),
-        "free_total_mb": round((rest[-1] if rest else 0) / _MB, 2),
-    }
-    if include_raw:
-        out["raw_xml"] = tmp.decode("utf-8", "replace")
-    return out
+    return _parse_malloc_info(tmp, include_raw=include_raw)
 
 
 def python_objects(top: int = 15) -> dict:
