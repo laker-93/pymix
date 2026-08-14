@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pymix import constants
 from pymix.containers import Container
 from pymix.handlers.filebrowser_file_handler import poll_watchdir, trigger_processing
+from pymix.handlers.mem_watch_handler import mem_watch_loop
 from pymix.handlers.sheet_sync_handler import sheet_sync_loop
 from pymix.handlers.wishlist_reconcile_handler import wishlist_reconcile_loop
 from pymix.handlers.wishlist_resolve_handler import wishlist_resolve_loop
@@ -64,19 +65,33 @@ def initialise_logger(app_name, level="DEBUG", **kwargs):
         interval = kwargs.get("rolling_interval", 1)
         backup_count = kwargs.get("rolling_backupcount", 10)
 
-        Path(logs_directory).mkdir(exist_ok=True)
-
-        logger.info(f"Started Writing Logs To {os.path.abspath(logs_directory)}")
-
-        logHandler = handlers.TimedRotatingFileHandler(
-            f"{logs_directory}/{app_name}.log",
-            when=when,
-            interval=interval,
-            backupCount=backup_count,
-        )
-        logHandler.setLevel(logging.INFO)
-        logHandler.setFormatter(formatter)
-        logger.addHandler(logHandler)
+        # Point this at a host bind mount in prod. Docker's json-file log survives a
+        # restart (the container id is unchanged, so the file is appended to) but not a
+        # `docker compose up -d`, which recreates the container and takes its log with
+        # it — i.e. the deploy investigating an incident destroys the incident's logs.
+        # A file under /subbox outlives the container, the image and the deploy.
+        try:
+            Path(logs_directory).mkdir(parents=True, exist_ok=True)
+            logHandler = handlers.TimedRotatingFileHandler(
+                f"{logs_directory}/{app_name}.log",
+                when=when,
+                interval=interval,
+                backupCount=backup_count,
+            )
+        except OSError as ex:
+            # An unwritable log directory must degrade to stdout-only, never take the
+            # app down at startup: pymix runs as uid 1000 against a host-owned bind
+            # mount, so this is a permissions mistake waiting to happen and a crash
+            # loop is a far worse outcome than losing the durable copy.
+            logger.error(
+                f"could not open log file in {os.path.abspath(logs_directory)} ({ex}); "
+                f"continuing with console logging only"
+            )
+        else:
+            logHandler.setLevel(logging.INFO)
+            logHandler.setFormatter(formatter)
+            logger.addHandler(logHandler)
+            logger.info(f"Started Writing Logs To {os.path.abspath(logs_directory)}")
 
     # Suppress noisy watchfiles internal logging (e.g. "N changes detected")
     logging.getLogger("watchfiles").setLevel(logging.WARNING)
@@ -108,6 +123,8 @@ async def lifespan(app: FastAPI, container):
     wishlist_resolve_service = container.wishlist_resolve_service()
     resolve_interval_s = container.config()['wishlist']['resolve_interval_s']
 
+    mem_watch_config = container.config().get('memory_watch') or {}
+
     async with anyio.create_task_group() as tg:
         tg.start_soon(poll_watchdir, user_root, watch_subdir, send_stream, db_controller)
         tg.start_soon(trigger_processing, receive_stream, rb_xml_controller, db_controller)
@@ -118,6 +135,12 @@ async def lifespan(app: FastAPI, container):
         tg.start_soon(
             wishlist_resolve_loop, wishlist_resolve_service, db_controller, resolve_interval_s
         )
+        if mem_watch_config.get('enabled', True):
+            tg.start_soon(
+                mem_watch_loop,
+                mem_watch_config.get('interval_s', 60),
+                mem_watch_config.get('warn_fraction', 0.8),
+            )
         yield
 
 def create_app(container):
@@ -158,7 +181,12 @@ def create_container(environment="dev"):
     initialise_logger(
         app_config["application_settings"]["app_name"],
         level=app_config["application_settings"]["logging_level"],
-        disable_file_handler=True
+        # Was hardcoded True, which made `logs_directory` in every config file dead.
+        # Prod turns it on so logs outlive a container recreate (laker-93/pymix#125);
+        # dev leaves it off, where `docker logs` is right there and a rotating file in
+        # the repo is just litter.
+        disable_file_handler=app_config.get("disable_file_handler", True),
+        logs_directory=app_config.get("logs_directory", "logs"),
     )
 
     container = Container()

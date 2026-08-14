@@ -21,6 +21,75 @@ def test_process_memory_reports_current_rss():
     assert proc["rss_anon_mb"] > 0
 
 
+def test_process_memory_peak_is_never_below_current():
+    """VmHWM is the number a container mem_limit gets sized against (#125), so the one
+    property that must hold is that it bounds the current value from above."""
+    proc = memdiag.process_memory()
+
+    if proc["rss_peak_mb"] < 0:
+        pytest.skip("no /proc/self/status (not Linux)")
+    assert proc["rss_peak_mb"] >= proc["rss_mb"]
+
+
+def test_cgroup_memory_degrades_off_linux_rather_than_raising():
+    cgroup = memdiag.cgroup_memory()
+
+    if not cgroup["available"]:
+        assert "reason" in cgroup
+        return
+    assert cgroup["cgroup_version"] in (1, 2)
+    # limit_mb is None exactly when nothing caps the container — today's prod state,
+    # and the one #125 exists to end.
+    assert cgroup["limit_mb"] is None or cgroup["limit_mb"] > 0
+
+
+def test_cgroup_memory_reads_a_v2_limit(tmp_path, monkeypatch):
+    limit, current = tmp_path / "memory.max", tmp_path / "memory.current"
+    limit.write_text("536870912\n")
+    current.write_text("288358400\n")
+    monkeypatch.setattr(memdiag, "_CGROUP_V2_LIMIT", str(limit))
+    monkeypatch.setattr(memdiag, "_CGROUP_V2_CURRENT", str(current))
+
+    cgroup = memdiag.cgroup_memory()
+
+    assert cgroup["cgroup_version"] == 2
+    assert cgroup["limit_mb"] == 512.0
+    assert cgroup["used_fraction"] == pytest.approx(0.5372, abs=1e-4)
+
+
+def test_cgroup_memory_treats_v2_max_as_no_limit(tmp_path, monkeypatch):
+    """An uncapped container reads the literal string "max", not a number — parsing it
+    as one would report a limit of 0 and make every sample look like a 100% emergency."""
+    limit, current = tmp_path / "memory.max", tmp_path / "memory.current"
+    limit.write_text("max\n")
+    current.write_text("288358400\n")
+    monkeypatch.setattr(memdiag, "_CGROUP_V2_LIMIT", str(limit))
+    monkeypatch.setattr(memdiag, "_CGROUP_V2_CURRENT", str(current))
+
+    cgroup = memdiag.cgroup_memory()
+
+    assert cgroup["available"] is True
+    assert cgroup["limit_mb"] is None
+    assert cgroup["used_fraction"] is None
+    assert cgroup["current_mb"] == pytest.approx(275.0, abs=0.5)
+
+
+def test_cgroup_memory_treats_v1_sentinel_as_no_limit(tmp_path, monkeypatch):
+    """cgroup v1 signals "unlimited" with a number near 2**63 rather than a word. Taken
+    at face value it yields a ~8 exabyte limit and a used_fraction of 0.0 forever."""
+    monkeypatch.setattr(memdiag, "_CGROUP_V2_LIMIT", str(tmp_path / "absent"))
+    limit, current = tmp_path / "limit_in_bytes", tmp_path / "usage_in_bytes"
+    limit.write_text("9223372036854771712\n")
+    current.write_text("288358400\n")
+    monkeypatch.setattr(memdiag, "_CGROUP_V1_LIMIT", str(limit))
+    monkeypatch.setattr(memdiag, "_CGROUP_V1_CURRENT", str(current))
+
+    cgroup = memdiag.cgroup_memory()
+
+    assert cgroup["cgroup_version"] == 1
+    assert cgroup["limit_mb"] is None
+
+
 def test_allocator_stats_available_on_glibc():
     stats = memdiag.allocator_stats()
 

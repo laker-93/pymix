@@ -27,7 +27,15 @@ containers:
     docker_compose_file: /subbox/docker-compose/beets/docker-compose.yml
     env_file: /subbox/docker-compose/beets/env
     config_file_dst: /subbox/private/{user}/beets/config/config.yaml
+# Dev keeps console-only logging: `docker logs pymix` is right there, and a rotating file
+# inside the container is litter nobody reads. See config.prod.yaml for why prod differs.
 logs_directory: logs
+disable_file_handler: true
+memory_watch:
+  # Sampled in dev too — the local stack is where a burst-allocating change gets written,
+  # so it's the cheapest place to notice one. Slower than prod; nothing here is at risk.
+  interval_s: 300
+  warn_fraction: 0.8
 user_root: /subbox/{user}
 db:
   host: pymix-postgres

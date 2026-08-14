@@ -43,7 +43,7 @@ list AND add its module to the `wire(...)` list in `create_container`.
 
 ## Lifespan / background loops
 
-`registration.lifespan` starts **five** long-lived anyio tasks in one task group. The
+`registration.lifespan` starts **six** long-lived anyio tasks in one task group. The
 first two are connected by a memory object stream and form the watch-dir import path:
 
 - `poll_watchdir` (in `handlers/filebrowser_file_handler.py`) — watches
@@ -54,8 +54,8 @@ first two are connected by a memory object stream and form the watch-dir import 
   wrapped in a job row.
 
 That is the "drop files in a folder and they auto-import" path, distinct from the
-explicit `/rekordbox/import` endpoint. The other three poll on their own intervals
-(all configured under `google_sheets` / `wishlist` in `config.*.yaml`):
+explicit `/rekordbox/import` endpoint. The other four poll on their own intervals
+(configured under `google_sheets` / `wishlist` / `memory_watch` in `config.*.yaml`):
 
 - `sheet_sync_loop` (`services/sheet_sync_service.py`) — pulls wishlist rows from each
   user's attached Google Sheet.
@@ -63,9 +63,28 @@ explicit `/rekordbox/import` endpoint. The other three poll on their own interva
   wishlist items to `available` once the track shows up in the user's library.
 - `wishlist_resolve_loop` (`services/wishlist_resolve_service.py`) — resolves pending
   free-text items to a canonical MusicBrainz match before anything searches for them.
+- `mem_watch_loop` (`handlers/mem_watch_handler.py`) — logs one RSS/allocator/cgroup
+  sample per interval, escalating to WARNING past `warn_fraction` of the container's
+  memory limit. It exists because the kernel SIGKILLs at that limit with no warning and
+  no traceback, so the only diagnosis that survives an OOM kill is one already written
+  to the log before it (laker-93/pymix#125). `utils/memdiag`'s `/admin/*` endpoints
+  answer far more, but only while something is alive to ask them.
 
 **None of these has an HTTP caller**, so a failure inside one is invisible to the user
 (they just see "nothing happened"). Keep them defensive, and log loudly.
+
+## Logging
+
+Console (stdout) always; `initialise_logger` in `registration.py` adds a rotating file
+handler when `disable_file_handler: false` in that env's config. Prod turns it on and
+points `logs_directory` at `/subbox/logs` — a **host bind mount**, deliberately. Docker's
+own json-file log survives a container *restart* (the container id is unchanged, so the
+file is appended to) but not a `docker compose up -d`, which recreates the container and
+discards its log — i.e. the deploy you make to investigate an incident destroys that
+incident's logs. Dev stays console-only; `docker logs pymix` is right there.
+
+An unwritable `logs_directory` degrades to console-only with an ERROR, never a crash
+loop: pymix runs as uid 1000 against a host-owned mount.
 
 ## Container topology (per user)
 

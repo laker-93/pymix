@@ -86,6 +86,12 @@ async def memory_snapshot(objects: bool = False, raw_xml: bool = False) -> dict:
     glibc's free lists (fragmentation)? See `utils/memdiag` for why tracemalloc and gc
     both read "flat" in either case.
 
+    `cgroup` reports the ceiling this container is actually measured against — an OOM
+    kill is charged against that, not against the host's RAM or this process's RSS —
+    and `process.rss_peak_mb` is the transient high-water mark a `mem_limit` has to
+    clear (laker-93/pymix#125). Both are read once when sizing a limit; neither is
+    useful for spotting growth.
+
     `objects=true` adds a gc type histogram — it walks every tracked object, so it is
     the one genuinely expensive option here; leave it off when sampling on a timer.
     `raw_xml=true` returns glibc's full per-arena malloc_info dump.
