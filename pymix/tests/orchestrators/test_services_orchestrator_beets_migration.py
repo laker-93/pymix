@@ -521,6 +521,46 @@ async def test_beets_status_does_not_take_write_lock(tmp_path):
     mock_beets_exec.execute.return_value = "Tracks: 0"
     orchestrator, _ = _make_orchestrator(config, mock_beets_exec, db_user)
 
-    orchestrator.beets_status(username)
+    report = orchestrator.beets_status(username)
 
     mock_beets_exec.write_lock.assert_not_called()
+    assert report["container_running"] is True
+
+
+@pytest.mark.anyio
+async def test_beets_status_on_a_missing_container_reports_not_running_instead_of_raising(tmp_path):
+    """
+    Live-reproduced (pymix#<TBD>): a container that no longer exists is one of the
+    two states `migrate_beets_container` treats as a normal, recoverable bring-up
+    case (#101/#122) -- this read-only auditing check needs the same guard, or
+    `beet version`'s `docker exec` raises `NoSuchContainer` straight through the
+    router as an unhandled 500 instead of a clean answer.
+    """
+    config = _make_config(tmp_path)
+    username = "ghost"
+    mock_beets_exec = mock.Mock(spec=BeetsExec)
+    orchestrator, _ = _make_orchestrator(config, mock_beets_exec, {"username": username, "password": "pw", "beets_port": 1234})
+
+    with mock.patch("pymix.orchestrators.services_orchestrator.docker") as mock_docker:
+        mock_docker.container.inspect.side_effect = NoSuchContainer(
+            ["docker", "container", "inspect", f"beets{username}"], 1
+        )
+        report = orchestrator.beets_status(username)
+
+    assert report == {"container_running": False, "version": None, "stats": None, "sample": None}
+    mock_beets_exec.execute.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_beets_status_on_a_stopped_container_reports_not_running_instead_of_raising(tmp_path):
+    config = _make_config(tmp_path)
+    username = "james"
+    mock_beets_exec = mock.Mock(spec=BeetsExec)
+    orchestrator, _ = _make_orchestrator(config, mock_beets_exec, {"username": username, "password": "pw", "beets_port": 1234})
+
+    with mock.patch("pymix.orchestrators.services_orchestrator.docker") as mock_docker:
+        mock_docker.container.inspect.return_value = _labelled_container(f"beets{username}", running=False)
+        report = orchestrator.beets_status(username)
+
+    assert report == {"container_running": False, "version": None, "stats": None, "sample": None}
+    mock_beets_exec.execute.assert_not_called()
