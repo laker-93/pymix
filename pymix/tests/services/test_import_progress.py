@@ -9,6 +9,7 @@ for the two post-import passes that follow -- ~13 minutes of "100%" on a
 from unittest import mock
 
 from pymix.services.import_progress import (
+    failure_reason,
     ImportPhase,
     ImportProgressReporter,
     NullImportProgressReporter,
@@ -122,3 +123,28 @@ def test_an_explicit_reporter_is_passed_through():
     reporter = ImportProgressReporter(db_controller, "job-1")
 
     assert reporter_or_null(reporter) is reporter
+
+
+def test_a_failure_reason_names_the_exception_and_its_message():
+    reason = failure_reason(KeyError("Rating"))
+
+    assert "KeyError" in reason
+    assert "Rating" in reason
+
+
+def test_a_failure_reason_is_one_line():
+    # It lands in a modal, so a multi-line repr must not arrive as one.
+    reason = failure_reason(RuntimeError("beet import failed\n  on Artist/Album/01.mp3"))
+
+    assert "\n" not in reason
+    assert "beet import failed on Artist/Album/01.mp3" in reason
+
+
+def test_a_failure_reason_is_truncated_rather_than_dumped_whole():
+    reason = failure_reason(RuntimeError("x" * 5000))
+
+    assert len(reason) <= 300
+
+
+def test_a_messageless_exception_still_names_itself():
+    assert failure_reason(TimeoutError()) == "TimeoutError"

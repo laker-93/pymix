@@ -89,6 +89,37 @@ def overall_percentage(
     return round(min(total * 100, 99.0), 2)
 
 
+#: Longest failure reason we persist and hand back to the client. A traceback's
+#: worth of text is no more useful in a modal than none at all, and the full
+#: detail is in the container logs either way.
+_MAX_REASON_LEN = 300
+
+
+def failure_reason(ex: BaseException) -> str:
+    """
+    A short, single-line description of why an import job failed, for the user.
+
+    An import job that genuinely ran and blew up used to report ``reason: ""``,
+    so the client had nothing to show but its own generic fallback and the cause
+    lived only in the pymix logs (subbox-app#48). This is deliberately the
+    exception's own text rather than a curated mapping: an unanticipated failure
+    is exactly the case where a wrong-but-tidy message is worse than the raw one.
+    """
+    detail = " ".join(str(ex).split())
+    reason = f"{type(ex).__name__}: {detail}" if detail else type(ex).__name__
+    if len(reason) > _MAX_REASON_LEN:
+        reason = reason[: _MAX_REASON_LEN - 1].rstrip() + "…"
+    return reason
+
+
+#: What the client is told when a job is marked failed with nothing recorded --
+#: a job that predates migration 017, or one killed before it could write a row.
+UNRECORDED_FAILURE_REASON = (
+    "The import failed and the server did not record a reason. "
+    "Check your library, and contact support if tracks are missing."
+)
+
+
 class ImportProgressReporter:
     """
     Records phase transitions and within-phase progress against an import job.

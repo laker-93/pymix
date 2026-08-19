@@ -16,6 +16,7 @@ from watchfiles import awatch, Change
 from pymix.controllers.db_controller import DbController
 from pymix.model.original_track_meta import OriginalTracks, OriginalTrackMeta
 from pymix.model.subboxtrack import SubBoxTrack
+from pymix.services.import_progress import failure_reason
 from pymix.utils.tag_subbox_id import tag_subbox_id
 from pymix.utils.utility import AUDIO_EXTENSIONS, detect_audio_type, detect_audio_type_with_reason
 
@@ -58,15 +59,17 @@ async def trigger_processing(recv_stream, rekordbox_xml_controller, db_controlle
             logger.info(f'watch import: processing for user {user}...')
             job_id = None
             success = True
+            reason = ""
             try:
                 job_id = db_controller.create_import_job(user, number_of_tracks_to_import=0, total_n_imported_tracks=0)
                 await rekordbox_xml_controller.consume_from_filebrowser(user, public=False, watch=True)
-            except Exception:
+            except Exception as ex:
                 success = False
+                reason = failure_reason(ex)
                 logger.exception(f'watch import: failed for user {user}')
             finally:
                 if job_id:
-                    db_controller.job_completed(job_id, success)
+                    db_controller.job_completed(job_id, success, reason)
                 logger.info(f'watch import: finished for user {user} (success={success})')
 
 

@@ -86,6 +86,10 @@ class JobRow(Base):
     phase = Column(String, nullable=True)
     phase_n_processed = Column(Integer, nullable=True)
     phase_n_total = Column(Integer, nullable=True)
+    # Why a failed job failed, short enough to put in front of a user. Null while
+    # the job runs, on a job that succeeded, and on any row written before
+    # migration 017 (subbox-app#48).
+    reason = Column(String, nullable=True)
 
 
 class OriginalTrackMetaRow(Base):
