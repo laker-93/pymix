@@ -364,9 +364,19 @@ class ServicesOrchestrator:
         Read-only status check (beet version/plugins, stats, one subbox_id spot
         check) — no lock, no mutation. Supports auditing a user's actual current
         beets version/config before deciding whether to migrate them (#76).
+
+        A missing or stopped container is one of the states this endpoint exists to
+        surface pre-migrate — `migrate_beets_container` treats it as a normal,
+        recoverable "bring it up from nothing" case (#101/#122) rather than an
+        error, and this read-only check needs the same guard: without it, `beet
+        version`'s `docker exec` raises `NoSuchContainer` straight through the
+        router as an unhandled 500 instead of reporting the container simply isn't
+        running.
         """
         container_name = f'beets{username}'
-        return self._beets_status(container_name, username)
+        if not self._beets_container_is_running(container_name):
+            return {'container_running': False, 'version': None, 'stats': None, 'sample': None}
+        return {'container_running': True, **self._beets_status(container_name, username)}
 
     def _beets_status(self, container_name: str, username: str, attempts: int = 1) -> dict:
         last_exc: Optional[Exception] = None
