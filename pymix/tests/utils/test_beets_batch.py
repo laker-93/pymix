@@ -12,6 +12,7 @@ from pymix.utils.beets_batch import (
     chunked,
     parse_applied,
     parse_import_reads,
+    strip_duplicates_count,
 )
 
 
@@ -163,3 +164,40 @@ def test_parse_import_reads_rejects_anything_it_cannot_trust(output):
     # mapping for a whole import, so this must raise and make the caller fall back.
     with pytest.raises(ValueError):
         parse_import_reads(output)
+
+
+# --- duplicates output shape (laker-93/pymix#65) -----------------------------------
+#
+# `beetsplug/duplicates.py` appends `: <count>` to every record unconditionally on
+# 2.10.0, and only under `--count` from 2.13.1. pymix never passes `-c`, so which
+# shape it gets depends on the container's frozen beets version.
+
+
+@pytest.mark.parametrize("record, expected", [
+    # 2.10.0: the count is appended after the extension.
+    ("/music/A/Album/01 - Artist - Track.1.flac: 1", "/music/A/Album/01 - Artist - Track.1.flac"),
+    ("/music/A/Album/02 - Artist - Track.4.flac: 5", "/music/A/Album/02 - Artist - Track.4.flac"),
+    # Multi-digit counts, and non-ASCII paths (the en dash was the other suspect
+    # in #65 and is not one -- it must survive untouched).
+    ("/music/A/Album/track.mp3: 137", "/music/A/Album/track.mp3"),
+    ("/music/Aphex Twin/Selected Ambient Works 85–92/Xtal.flac: 2",
+     "/music/Aphex Twin/Selected Ambient Works 85–92/Xtal.flac"),
+    # 2.13.1: already clean, must pass through byte-identical.
+    ("/music/A/Album/01 - Artist - Track.1.flac", "/music/A/Album/01 - Artist - Track.1.flac"),
+])
+def test_strip_duplicates_count_normalises_both_beets_output_shapes(record, expected):
+    assert strip_duplicates_count(record) == expected
+
+
+@pytest.mark.parametrize("record", [
+    # A colon in the middle is part of the path.
+    "/music/A/Album 2: The Sequel/track.mp3",
+    # The plugin's separator is ": " -- no space means it is not one.
+    "/music/A/Album/track.mp3:1",
+    # Only an integer is a count.
+    "/music/A/Album/track.mp3: one",
+    "/music/A/Album/Disc: A",
+    "",
+])
+def test_strip_duplicates_count_leaves_everything_else_alone(record):
+    assert strip_duplicates_count(record) == record

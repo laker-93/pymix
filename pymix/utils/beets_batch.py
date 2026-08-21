@@ -26,6 +26,7 @@ version at provisioning time (see the container-drift note in docs/dev.md), and 
 correct-but-slow import beats a fast broken one.
 """
 import logging
+import re
 from typing import List, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
@@ -117,6 +118,36 @@ def chunked(pairs: Sequence[Tuple[object, object]], size: int = DEFAULT_CHUNK_SI
     """Yield ``pairs`` in argv-sized chunks."""
     for start in range(0, len(pairs), size):
         yield pairs[start:start + size]
+
+
+# `duplicates` records are `<path>: <count>` on beets < 2.13, bare `<path>` from
+# 2.13.1 on -- see strip_duplicates_count.
+_DUPLICATES_COUNT_SUFFIX = re.compile(r": \d+$")
+
+
+def strip_duplicates_count(record: str) -> str:
+    """
+    Drop the trailing ``: <count>`` that beets' `duplicates` plugin appends to every
+    record on versions before 2.13, returning the bare path.
+
+    The plugin's output shape is version-dependent and pymix cannot detect which it
+    is getting (laker-93/pymix#65). `beetsplug/duplicates.py` formats each record as
+    `f"{fmt_tmpl}: {obj_count}"` -- unconditionally on 2.10.0, gated on the `--count`
+    flag from 2.13.1. pymix never passes `-c`, so 2.13.1 emits a clean path and
+    2.10.0 emits `…/01 - Aphex Twin - Xtal.1.flac: 1`, which is not a path that
+    exists and so silently tagged nothing at all.
+
+    Note this cannot be fixed by asking for an explicit format instead: `-p` and
+    `-f` both just set the same `format` config that becomes `fmt_tmpl`, so
+    `duplicates -f '$path'` on 2.10.0 returns byte-identical output *including* the
+    suffix. Stripping is the only version-agnostic option.
+
+    This is deliberately a pure string transform with no filesystem access: callers
+    that can check existence should prefer the raw record and fall back to this, so
+    a real file whose name genuinely ends in `: 12` still wins (see
+    RekordboxXMLController._resolve_duplicate_path).
+    """
+    return _DUPLICATES_COUNT_SUFFIX.sub("", record)
 
 
 # Markers, not a bare blank-line split: a beets path can contain anything, so the
