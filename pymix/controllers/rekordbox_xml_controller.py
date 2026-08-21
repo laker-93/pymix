@@ -36,6 +36,7 @@ from pymix.utils.beets_batch import (
     chunked,
     parse_applied,
     parse_import_reads,
+    strip_duplicates_count,
 )
 from pymix.utils.beets_query import or_query
 from pymix.utils.make_readable import make_readable
@@ -110,7 +111,9 @@ class RekordboxXMLController:
         with self._beets_exec.write_lock(container_name):
             result = self._beets_exec.execute(container_name, beets_command)
         logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
-        return result.split('\n')
+        # Same version-dependent `: <count>` suffix as the read path; harmless to the
+        # delete itself (beets already did it), but these paths go back to the caller.
+        return [strip_duplicates_count(line) for line in result.split('\n')]
 
     # todo this controller is overloaded; the beets method has nothing to do with rekordbox xml and should live elsewhere.
     async def get_duplicates(self, username: str, public: bool) -> List[str]:
@@ -180,6 +183,11 @@ class RekordboxXMLController:
         """
         The `beet duplicates -p` read on its own, so the merged post-import read can
         supply the same paths without this exec (see :meth:`_post_import_reads`).
+
+        Returns records verbatim: `-p` is as good as it gets here, since `-f '$path'`
+        sets the same `format` config and still carries the version-dependent
+        `: <count>` suffix on beets < 2.13. Normalising is the consumer's job --
+        :meth:`_resolve_duplicate_path`.
         """
         container_name = "beets" if public else f"beets{username}"
         beets_command = "beet duplicates -p"
@@ -188,6 +196,33 @@ class RekordboxXMLController:
         if not result:
             return []
         return [line for line in result.split('\n') if line.strip()]
+
+    def _resolve_duplicate_path(self, username: str, duplicate: str) -> Optional[Path]:
+        """
+        Turn one `duplicates` record into the path of the file it names, under the
+        `/private-music/<user>` mount pymix sees rather than the `/music` the beets
+        container sees.
+
+        Tries the record as-is first, then with the version-dependent `: <count>`
+        suffix stripped (see strip_duplicates_count), each via a plain existence
+        check before the special-chars fallback. Preferring the raw record keeps a
+        real file whose name genuinely ends in `: 12` resolving to itself, so the
+        strip can only ever rescue a record that was already unresolvable.
+        """
+        candidates = [duplicate]
+        stripped = strip_duplicates_count(duplicate)
+        if stripped != duplicate:
+            candidates.append(stripped)
+
+        for candidate in candidates:
+            path_in_pymix = Path(f'/private-music/{username}/{candidate.removeprefix("/music")}')
+            if path_in_pymix.exists():
+                return path_in_pymix
+            resolved = self._resolve_path_with_special_chars(path_in_pymix)
+            if resolved is not None:
+                logger.info(f"Resolved duplicate path with special chars: {resolved}")
+                return resolved
+        return None
 
     def _tag_duplicate_paths(self, username: str, duplicates_paths: List[str]) -> Optional[List[str]]:
         """
@@ -199,15 +234,10 @@ class RekordboxXMLController:
 
         FooPlugin()
         for duplicate in duplicates_paths:
-            path_in_pymix = duplicate.removeprefix('/music')
-            path_in_pymix = Path(f'/private-music/{username}/{path_in_pymix}')
-            if not path_in_pymix.exists():
-                resolved = self._resolve_path_with_special_chars(path_in_pymix)
-                if resolved is None:
-                    logger.warning(f"Could not resolve duplicate path {path_in_pymix}, skipping.")
-                    continue
-                logger.info(f"Resolved duplicate path with special chars: {resolved}")
-                path_in_pymix = resolved
+            path_in_pymix = self._resolve_duplicate_path(username, duplicate)
+            if path_in_pymix is None:
+                logger.warning(f"Could not resolve duplicate path {duplicate}, skipping.")
+                continue
             try:
                 item = Item.from_path(path_in_pymix)
             except Exception:
@@ -215,7 +245,7 @@ class RekordboxXMLController:
                 raise
             item['dup'] = '1'
             item.write()
-        return duplicates_paths
+        return [strip_duplicates_count(duplicate) for duplicate in duplicates_paths]
 
     def retag_duplicates(self, username: str, public: bool = False) -> Optional[List[str]]:
         """
