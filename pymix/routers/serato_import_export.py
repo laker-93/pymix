@@ -11,6 +11,7 @@ from pymix.controllers.serato_controller import SeratoController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.routers.auth import require_reader, require_uploader
 from pymix.routers.rb_import_export import RBExportRequest
+from pymix.services.import_progress import failure_reason
 
 router = APIRouter()
 
@@ -74,6 +75,7 @@ async def serato_import(
 async def run_import_task(serato_controller, username, job_id, db_controller, fb_file_handler,
                           total_n_tracks_for_import, user):
     success = True
+    reason = ""
     beets_output = ""
     try:
         logger.info(f'starting serato import track staging for user {username}')
@@ -87,6 +89,7 @@ async def run_import_task(serato_controller, username, job_id, db_controller, fb
         logger.info(f'finished serato import for user {username}')
     except Exception as ex:
         success = False
+        reason = failure_reason(ex)
         msg = f'error occurred importing the following path in to beets for user {username} {repr(ex)}'
         logger.error(msg, exc_info=True)
     else:
@@ -94,7 +97,7 @@ async def run_import_task(serato_controller, username, job_id, db_controller, fb
     finally:
         logger.info(f"beets output {beets_output}")
         logger.info(f'marking serato import job for user {username} as {success}')
-        db_controller.job_completed(job_id, success)
+        db_controller.job_completed(job_id, success, reason)
 
 
 

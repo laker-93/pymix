@@ -491,12 +491,24 @@ class DbController:
             job.n_exported_tracks = n_exported_tracks
             session.commit()
 
-    def job_completed(self, job_id: str, result: bool):
+    def job_completed(self, job_id: str, result: bool, reason: Optional[str] = None):
+        """
+        Mark a job finished. ``reason`` is why it failed, and is only meaningful
+        when ``result`` is False — it is what /beets/import/progress hands the
+        client instead of a bare "Import failed" (subbox-app#48).
+
+        A failed job keeps the phase it died in rather than being moved to
+        COMPLETE: which pass broke is the difference between "your tracks are in
+        the library but some metadata didn't apply" and "the import didn't
+        happen", and that is the distinction the user acts on.
+        """
         with self._session_factory() as session:
             job = session.query(JobRow).filter(JobRow.job_id == job_id).one()
             job.in_progress = False
             job.result = result
-            job.phase = ImportPhase.COMPLETE.value
+            job.reason = reason or None
+            if result:
+                job.phase = ImportPhase.COMPLETE.value
             session.commit()
 
     def update_job_phase(self, job_id: str, phase: Optional[str], n_processed: int, n_total: int):

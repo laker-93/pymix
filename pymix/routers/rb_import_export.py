@@ -13,7 +13,7 @@ from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.routers.auth import require_reader, require_uploader
 from pymix.routers.beets_import import BeetsImportRequest
-from pymix.services.import_progress import ImportProgressReporter
+from pymix.services.import_progress import failure_reason, ImportProgressReporter
 
 router = APIRouter()
 
@@ -86,6 +86,7 @@ async def rekordbox_import(
 async def run_import_task(rekordbox_xml_controller, username, job_id, db_controller, fb_file_handler,
                           total_n_tracks_for_import, user, playlist_names: Optional[list[list[str]]]):
     success = True
+    reason = ""
     beets_output = ""
     try:
         xml_path, zip_path, audio_path = fb_file_handler.get_xml_data_path(username)
@@ -104,6 +105,7 @@ async def run_import_task(rekordbox_xml_controller, username, job_id, db_control
         logger.info(f'finished RB import for user {username}')
     except Exception as ex:
         success = False
+        reason = failure_reason(ex)
         msg = f'error occurred importing the following path in to beets for user {username} {repr(ex)}'
         logger.error(msg, exc_info=True)
     else:
@@ -112,7 +114,9 @@ async def run_import_task(rekordbox_xml_controller, username, job_id, db_control
     finally:
         logger.info(f"beets output {beets_output}")
         logger.info(f'marking RB import job for user {username} as {success}')
-        db_controller.job_completed(job_id, success)
+        # The reason goes on the job row, not just in this log line — it is the only
+        # thing the user's "Import Failed" screen has to show (subbox-app#48).
+        db_controller.job_completed(job_id, success, reason)
 
 
 class RBExportRequest(BaseModel):

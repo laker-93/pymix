@@ -12,7 +12,12 @@ from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.routers.auth import require_uploader, require_username
 from pymix.services.automatch_service import AutomatchService
-from pymix.services.import_progress import ImportProgressReporter, overall_percentage
+from pymix.services.import_progress import (
+    failure_reason,
+    ImportProgressReporter,
+    overall_percentage,
+    UNRECORDED_FAILURE_REASON,
+)
 
 router = APIRouter()
 
@@ -124,6 +129,7 @@ async def beets_import(
 
 async def run_import_task(rekordbox_xml_controller, username, public, job_id, db_controller):
     success = True
+    reason = ""
     try:
         logger.info(f'starting import for user {username}')
         await rekordbox_xml_controller.consume_from_filebrowser(
@@ -131,11 +137,12 @@ async def run_import_task(rekordbox_xml_controller, username, public, job_id, db
         )
     except Exception as ex:
         success = False
+        reason = failure_reason(ex)
         msg = f'error occurred importing the following path in to beets for user {username} {repr(ex)}'
         logger.error(msg, exc_info=True)
     finally:
         logger.info(f'marking import job for user {username} as {success}')
-        db_controller.job_completed(job_id, success)
+        db_controller.job_completed(job_id, success, reason)
 
 
 @router.post("/beets/reimport", tags=["import"])
@@ -176,7 +183,10 @@ async def beets_reimport(
 
 @router.get("/beets/import/progress", tags=["import"])
 @inject
-async def tracks_imported(
+# Named `import_progress`, not `tracks_imported`: /beets/import/tracks_imported below
+# defines a second function of that name, and the later definition shadows this one at
+# module scope — so the route worked but nothing could import or test it by name.
+async def import_progress(
         job_id: str,
         public: bool = False,
         user: dict = Depends(require_uploader),
@@ -192,6 +202,13 @@ async def tracks_imported(
     (laker-93/pymix#51), so the response also carries the phase the job is in and
     that phase's own n/total, and `percentage_complete` composes the two. Only a
     finished job ever reads 100.
+
+    A job with no audio to import is a real job, not an absent one: a metadata-only
+    Rekordbox re-import (every track already uploaded) still runs the two tail
+    passes, and the client now polls it to the end rather than declaring success
+    the moment the upload returns (subbox-app#55). Its progress therefore comes
+    from the phase columns alone — the audio pass has nothing to do and counts as
+    already done.
     """
     reason = ""
     percentage_complete = 0
@@ -206,24 +223,31 @@ async def tracks_imported(
     phase = job.get('phase')
     phase_n_processed = job.get('phase_n_processed') or 0
     phase_n_total = job.get('phase_n_total') or 0
+    phase_fraction = (phase_n_processed / phase_n_total) if phase_n_total else 0.0
     if original_n_tracks_to_import:
         # Reads the landed-file count off the host filesystem rather than shelling
         # `beet stats` into the container on every poll (laker-93/pymix#106).
         total_n_imported_tracks = await beets_client.count_tracks_on_disk(user, public)
         n_tracks_imported = total_n_imported_tracks - original_total_n_imported_tracks
         audio_fraction = n_tracks_imported / original_n_tracks_to_import
-        phase_fraction = (phase_n_processed / phase_n_total) if phase_n_total else 0.0
-        percentage_complete = overall_percentage(phase, phase_fraction, audio_fraction)
-        if job['in_progress'] is False and job['result'] is True:
-            # it's possible due to duplicate tracks that the maths won't quite work out at 100%.
-            # however, if the import job has been marked as complete, then we know we are done.
-            percentage_complete = 100
         logger.debug(f'Started with a total of {original_total_n_imported_tracks} already imported tracks.')
         logger.debug(f'A total of {total_n_imported_tracks} have been imported so far.')
-        logger.debug(f'in phase {phase} ({phase_n_processed}/{phase_n_total})')
-        logger.debug(f'have complete {percentage_complete}% out of {original_n_tracks_to_import}')
     else:
-        reason = f"no in-progress jobs found for user {username}"
+        # Nothing to land, so the audio pass is vacuously complete — otherwise a
+        # metadata-only job would sit at 0% for its whole run.
+        audio_fraction = 1.0
+    percentage_complete = overall_percentage(phase, phase_fraction, audio_fraction)
+    if in_progress is False and result is True:
+        # it's possible due to duplicate tracks that the maths won't quite work out at 100%.
+        # however, if the import job has been marked as complete, then we know we are done.
+        percentage_complete = 100
+    if in_progress is False and result is False:
+        # The one thing the user's failure screen has to go on. A failed job also
+        # keeps the phase it died in, so the client can tell "the audio never
+        # imported" from "the tracks are in, the metadata pass broke".
+        reason = job.get('reason') or UNRECORDED_FAILURE_REASON
+    logger.debug(f'in phase {phase} ({phase_n_processed}/{phase_n_total})')
+    logger.debug(f'have complete {percentage_complete}% out of {original_n_tracks_to_import}')
     return {
         'in_progress': in_progress,
         'reason': reason,
