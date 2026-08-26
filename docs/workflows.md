@@ -74,6 +74,14 @@ Mirrors the Rekordbox flows but reads/writes Serato `.crate` files via `pyserato
 (`SeratoController` + `SeratoCrateOrchestrator`). Crate folder hierarchy ↔
 `path_components` the same way.
 
+Where it does **not** mirror Rekordbox is track identity. An RB XML carries each
+track's metadata; a `.crate` carries only an absolute path on the user's machine,
+which pymix never sees and which changes whenever the user moves a file. So the
+client resolves each crate entry to a `subbox_id` from the local file's tag and
+sends `track_identities`; the `user_location` row from `/sync/map_meta` is the
+fallback, and an entry neither knows is skipped with a reason rather than failing
+the import. Details and the resolution order are in `docs/api.md`.
+
 ## 5. Watch-dir auto-import (no endpoint)
 Started in `lifespan`. `poll_watchdir` watches `/user-updownloads/<user>/watch/`:
 - Debounces 15s after the last add/modify, and confirms file mtimes are stable

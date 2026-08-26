@@ -81,3 +81,26 @@ def test_a_successful_job_completes_with_no_reason(db_controller, job_id):
     assert job["result"] is True
     assert job["phase"] == ImportPhase.COMPLETE.value
     assert job["reason"] is None
+
+
+def test_a_successful_job_can_still_carry_a_warning(db_controller, job_id):
+    """
+    A Serato import whose crates named tracks the user never uploaded succeeded —
+    but not on all of it. `reason` never reaches the client on a successful job,
+    so reporting that through `reason` would be the same as saying nothing, and
+    reporting nothing is how a job comes back result=true with work missing.
+    """
+    db_controller.job_completed(
+        job_id, True, warnings="2 of 10 tracks in your crates could not be matched."
+    )
+
+    job = _job(db_controller, job_id)
+    assert job["result"] is True
+    assert job["reason"] is None
+    assert job["warnings"] == "2 of 10 tracks in your crates could not be matched."
+
+
+def test_a_clean_job_has_no_warnings(db_controller, job_id):
+    db_controller.job_completed(job_id, True)
+
+    assert _job(db_controller, job_id)["warnings"] is None

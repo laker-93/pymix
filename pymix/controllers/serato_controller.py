@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import anyio
 from pyserato.model.hot_cue_type import HotCueType
@@ -11,6 +11,7 @@ from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.handlers.rb_backup_file_handler import RBBackupFileHandler
 from pymix.handlers.serato_backup_file_handler import SeratoBackupFileHandler
+from pymix.model.serato_import import CrateImportReport
 from pymix.model.subboxplaylist import SubBoxPlaylist
 from pymix.orchestrators.serato_crate_orchestrator import SeratoCrateOrchestrator
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
@@ -143,7 +144,14 @@ class SeratoController:
                 self._rb_xml_controller._get_duplicates(username, False)
                 self._rb_xml_controller._map_subbox_id_beet_id(username, False)
 
-    async def create_subsonic_playlists_from_crates(self, user: dict, serato_crate_path: Path, zip_path: Optional[Path], audio_path: Optional[Path]):
+    async def create_subsonic_playlists_from_crates(
+        self,
+        user: dict,
+        serato_crate_path: Path,
+        zip_path: Optional[Path],
+        audio_path: Optional[Path],
+        identities: Optional[Dict[str, str]] = None,
+    ) -> CrateImportReport:
         username = user['username']
 
         if zip_path or audio_path:
@@ -152,7 +160,7 @@ class SeratoController:
         # next step
         await self._subsonic_orchestrator.scan(user)
         await anyio.sleep(2)
-        await self._set_data_from_crates(user, serato_crate_path)
+        report = await self._set_data_from_crates(user, serato_crate_path, identities)
         # Resolve any open wishlist items whose track is now in the user's Navidrome.
         try:
             await self._wishlist_reconcile_service.reconcile_user(user)
@@ -162,15 +170,29 @@ class SeratoController:
         # import_to_beets stage. Also we only want to remove data in fb once import is successful to avoid
         # unnecessarily having to reupload data from the client after a beets import failure
         self._file_browser_file_handler.remove_fb_data_path(username)
+        return report
 
-    async def _set_data_from_crates(self, user: dict, serato_crate_path: Path):
-        subbox_playlists = await self._create_subsonic_playlists(user, serato_crate_path)
+    async def _set_data_from_crates(
+        self,
+        user: dict,
+        serato_crate_path: Path,
+        identities: Optional[Dict[str, str]] = None,
+    ) -> CrateImportReport:
+        subbox_playlists, report = await self._create_subsonic_playlists(user, serato_crate_path, identities)
         await self._set_metadata(user, subbox_playlists)
+        return report
 
-    async def _create_subsonic_playlists(self, user: dict, serato_crate_path: Path) -> List[SubBoxPlaylist]:
+    async def _create_subsonic_playlists(
+        self,
+        user: dict,
+        serato_crate_path: Path,
+        identities: Optional[Dict[str, str]] = None,
+    ) -> tuple[List[SubBoxPlaylist], CrateImportReport]:
 
         # 4. create internal subbox playlist and tracks as below
-        subbox_playlists = self._serato_crate_orchestrator.get_subbox_playlists_from_crates(user, serato_crate_path)
+        subbox_playlists, report = self._serato_crate_orchestrator.get_subbox_playlists_from_crates(
+            user, serato_crate_path, identities
+        )
         # 5. given the subbox info, create the playlists in navidrome using subsonic api
         # 6. get the tracks from navidrome by using the 'query' api for each track.
         # this sets the subsonic id found from querying navidrome. This can then be used to create the playlist and place
@@ -178,7 +200,7 @@ class SeratoController:
         await self._subsonic_orchestrator.update_tracks_with_subid(user, subbox_playlists)
         # 8. create the playlists
         await self._subsonic_orchestrator.create_playlists(user, subbox_playlists)
-        return subbox_playlists
+        return subbox_playlists, report
 
     async def _set_metadata(self, user, subbox_playlists: List[SubBoxPlaylist]):
         tracks = []
