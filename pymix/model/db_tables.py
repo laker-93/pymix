@@ -90,6 +90,11 @@ class JobRow(Base):
     # the job runs, on a job that succeeded, and on any row written before
     # migration 017 (subbox-app#48).
     reason = Column(String, nullable=True)
+    # What a job that *succeeded* still wants to tell the user — e.g. a Serato
+    # import whose crates referenced tracks the user has never uploaded, so some
+    # were left out of the playlists. Kept separate from `reason` so the client
+    # can render an error and a notice differently. Null before migration 018.
+    warnings = Column(String, nullable=True)
 
 
 class OriginalTrackMetaRow(Base):

@@ -491,11 +491,23 @@ class DbController:
             job.n_exported_tracks = n_exported_tracks
             session.commit()
 
-    def job_completed(self, job_id: str, result: bool, reason: Optional[str] = None):
+    def job_completed(
+        self,
+        job_id: str,
+        result: bool,
+        reason: Optional[str] = None,
+        warnings: Optional[str] = None,
+    ):
         """
         Mark a job finished. ``reason`` is why it failed, and is only meaningful
         when ``result`` is False — it is what /beets/import/progress hands the
         client instead of a bare "Import failed" (subbox-app#48).
+
+        ``warnings`` is the other half: what a job that *succeeded* still needs to
+        tell the user, such as a Serato import that left tracks out of the
+        playlists because they are not in the library. Reporting that as an
+        unqualified success is how a job comes back result=true with half the work
+        silently missing.
 
         A failed job keeps the phase it died in rather than being moved to
         COMPLETE: which pass broke is the difference between "your tracks are in
@@ -507,6 +519,7 @@ class DbController:
             job.in_progress = False
             job.result = result
             job.reason = reason or None
+            job.warnings = warnings or None
             if result:
                 job.phase = ImportPhase.COMPLETE.value
             session.commit()

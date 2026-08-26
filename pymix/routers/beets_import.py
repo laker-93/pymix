@@ -246,6 +246,11 @@ async def import_progress(
         # keeps the phase it died in, so the client can tell "the audio never
         # imported" from "the tracks are in, the metadata pass broke".
         reason = job.get('reason') or UNRECORDED_FAILURE_REASON
+    # A job that succeeded can still have left work undone — a Serato import whose
+    # crates named tracks the user has never uploaded, say. That belongs in front
+    # of the user, but as a notice rather than a failure, so it travels separately
+    # from `reason` (migration 018).
+    warnings = job.get('warnings') if in_progress is False else None
     logger.debug(f'in phase {phase} ({phase_n_processed}/{phase_n_total})')
     logger.debug(f'have complete {percentage_complete}% out of {original_n_tracks_to_import}')
     return {
@@ -257,7 +262,8 @@ async def import_progress(
         'phase': phase,
         'phase_n_processed': phase_n_processed,
         'phase_n_total': phase_n_total,
-        'result': result
+        'result': result,
+        'warnings': warnings
     }
 
 @router.get("/beets/import/tracks_imported", tags=["import"])

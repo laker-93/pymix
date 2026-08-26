@@ -9,6 +9,7 @@ from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
 from pymix.controllers.serato_controller import SeratoController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
+from pymix.model.serato_import import SeratoImportRequest
 from pymix.routers.auth import require_reader, require_uploader
 from pymix.routers.rb_import_export import RBExportRequest
 from pymix.services.import_progress import failure_reason
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 @inject
 async def serato_import(
     background_tasks: BackgroundTasks,
+    request: SeratoImportRequest = SeratoImportRequest(),
     user: dict = Depends(require_uploader),
     beets_client: BeetsClient = Depends(Provide[Container.beets_client]),
     fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
@@ -60,9 +62,16 @@ async def serato_import(
 
     total_n_imported_tracks = await beets_client.count_tracks_on_disk(user)
     job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
-    logger.info(f'Serato importing {total_n_tracks_for_import} tracks for user {username}')
+    # crate path -> subbox_id, as resolved by the client from the local files. The
+    # server never sees those files, so this is the only identity it gets that
+    # survives the user moving a track. See pymix.model.serato_import.
+    identities = {t.crate_path: t.subbox_id for t in request.track_identities}
+    logger.info(
+        f'Serato importing {total_n_tracks_for_import} tracks for user {username} '
+        f'with {len(identities)} client-resolved track identities'
+    )
     background_tasks.add_task(run_import_task, serato_controller, username, job_id, db_controller,
-                              fb_file_handler, total_n_tracks_for_import, user)
+                              fb_file_handler, total_n_tracks_for_import, user, identities)
     return {
         'success': True,
         'job_id': job_id,
@@ -73,18 +82,20 @@ async def serato_import(
 
 
 async def run_import_task(serato_controller, username, job_id, db_controller, fb_file_handler,
-                          total_n_tracks_for_import, user):
+                          total_n_tracks_for_import, user, identities=None):
     success = True
     reason = ""
-    beets_output = ""
+    warnings = None
+    report = None
     try:
         logger.info(f'starting serato import track staging for user {username}')
         subcrate_path, zip_path, audio_path = fb_file_handler.get_subcrate_audio_path(username)
-        beets_output = await serato_controller.create_subsonic_playlists_from_crates(
+        report = await serato_controller.create_subsonic_playlists_from_crates(
             user=user,
             serato_crate_path=subcrate_path,
             zip_path=zip_path,
-            audio_path=audio_path
+            audio_path=audio_path,
+            identities=identities,
         )
         logger.info(f'finished serato import for user {username}')
     except Exception as ex:
@@ -93,11 +104,20 @@ async def run_import_task(serato_controller, username, job_id, db_controller, fb
         msg = f'error occurred importing the following path in to beets for user {username} {repr(ex)}'
         logger.error(msg, exc_info=True)
     else:
-        logger.info(f'successfully serato imported {total_n_tracks_for_import} for user {username}')
+        logger.info(
+            f'successfully serato imported {total_n_tracks_for_import} for user {username}: '
+            f'{report.crates_parsed} crates -> {report.playlists_built} playlists, '
+            f'{report.matched} tracks matched, {len(report.skipped)} skipped'
+        )
+        # A crate track we could not place is not a failure, but it is also not
+        # nothing: the user asked for a playlist and got a shorter one. Carry it
+        # back so the import screen can say so rather than reporting a clean win.
+        warnings = report.warning()
+        for skipped in report.skipped:
+            logger.info(f'skipped crate entry for {username}: {skipped.crate_path} ({skipped.reason})')
     finally:
-        logger.info(f"beets output {beets_output}")
         logger.info(f'marking serato import job for user {username} as {success}')
-        db_controller.job_completed(job_id, success, reason)
+        db_controller.job_completed(job_id, success, reason, warnings)
 
 
 

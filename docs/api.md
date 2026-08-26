@@ -53,14 +53,43 @@ All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 | POST `/rekordbox/export` | Build a Rekordbox XML from the user's Navidrome playlists. Body `user_root` (client-side music root for path rewriting) + optional `playlistIds`. Writes XML into the user's downloads dir. Kept for clients that fetch the XML as its own download; current ones ask `/sync/playlists` for it instead so the whole export is a single file. |
 
 ## Serato import/export — `routers/serato_import_export.py`
-| POST `/serato/import` | Ingest uploaded Serato crates (+ optional audio) → beets import → Navidrome playlists/metadata. Background job. |
-| POST `/serato/export` | Build Serato crates from the user's Navidrome playlists into downloads dir. |
+| Method/Path | Purpose |
+|---|---|
+| POST `/serato/import` | Ingest uploaded Serato crates (+ optional audio) → beets import → Navidrome playlists/metadata. Background job; returns `job_id`. Reads the crates from a file named exactly **`all-crates.zip`** in the user's uploads dir, with the `.crate` files at the **root of the zip** — `parse_crates_from_root_path` uses `iterdir()`, not `rglob()`, so a Finder "Compress" of the SubCrates folder parses to zero crates. Optional body `track_identities: [{crate_path, subbox_id}]` — see below. |
+| POST `/serato/export` | Build Serato crates from the user's Navidrome playlists into downloads dir. Body `user_root` — the client-side music root the crate paths are written against. |
+
+### Who does a crate entry refer to? (`track_identities`)
+A `.crate` file stores an absolute path on the **user's** machine and nothing
+else. pymix never sees that file, so it cannot read its `SUBBOX_ID` tag, and the
+path alone is not an identity — moving and renaming files is most of the point of
+using crates.
+
+So the client resolves each crate entry to a `subbox_id` locally (the tag is on
+the file, because subbox put it there on the way out) and posts the result as
+`track_identities`. Server-side resolution order, per entry:
+
+1. `track_identities[crate_path]` — survives the user moving the file.
+2. `get_meta_by_user_location(crate_path)` — the row `/sync/map_meta` wrote during
+   an upload. Covers the Rekordbox-first user and anything uploaded in this same
+   import.
+3. Neither: the track is **skipped**, with a reason, and the import carries on.
+
+A DJ's crates are full of records that were never uploaded to subbox, so an entry
+that resolves to nothing is the normal case, not an error. It used to be an
+`assert` inside a background task, which took the whole import down and surfaced
+as a stack trace. Skips are counted into the job's `warnings` (see
+`/beets/import/progress`) so the user is told the playlist came back short rather
+than being shown a clean success. A crate whose every entry was skipped produces
+*no* playlist rather than an empty one.
+
+Two things are still hard failures, because neither is recoverable by carrying on:
+a zip that parses to zero crates, and a zip where nothing at all matched.
 
 ## beets — `routers/beets_import.py`
 | Method/Path | Purpose |
 |---|---|
 | POST `/beets/import` | Lower-level: import staged files from filebrowser into beets (`consume_from_filebrowser`). |
-| GET `/beets/import/progress` | Poll an import job's progress. Returns `phase` (`importing_audio`/`mapping_ids`/`applying_metadata`/`complete`) plus `phase_n_processed`/`phase_n_total`; `percentage_complete` composes them and only reads 100 once the job is finished (#51). |
+| GET `/beets/import/progress` | Poll an import job's progress. Returns `phase` (`importing_audio`/`mapping_ids`/`applying_metadata`/`complete`) plus `phase_n_processed`/`phase_n_total`; `percentage_complete` composes them and only reads 100 once the job is finished (#51). `reason` is why a **failed** job failed; `warnings` is what a **succeeded** job still needs to say (e.g. a Serato import that left unmatched tracks out of the playlists) — they are separate so the client can render an error and a notice differently. |
 | GET `/beets/import/tracks_imported` | Count of tracks currently in beets (`BeetsClient.get_number_of_tracks`). |
 | GET `/beets/import/tracks_to_be_imported` | Count of staged tracks awaiting import. |
 | GET `/beets/duplicates` | List duplicate tracks (`beet duplicates`). |
