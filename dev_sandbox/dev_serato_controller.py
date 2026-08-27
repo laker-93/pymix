@@ -11,7 +11,12 @@ actually gets exercised.
 
 `manifest.json` is what the client will POST as `track_identities`:
 
-    [{"crate_path": "/Users/dj/Music/a.mp3", "subbox_id": "..."}, ...]
+    [{"crate_path": "/Users/dj/Music/a.mp3", "subbox_id": "...",
+      "cues": [{"type": "cue", "index": 0, "name": "in", "start_ms": 12000}]}, ...]
+
+`cues` is optional. Where it is given it is the client's reading of the user's own
+file and wins over pyserato's reading of the server's copy, which is the whole
+point: the server's copy has the cues the track had when it was uploaded.
 
 Without it, resolution falls back to the `user_location` rows that /sync/map_meta
 wrote, which only exist for tracks uploaded through subbox. A crate entry that
@@ -27,15 +32,16 @@ from pathlib import Path
 from typing import Optional
 
 from pymix.controllers.serato_controller import SeratoController
+from pymix.model.serato_import import SeratoTrackIdentity
 from pymix.orchestrators.serato_crate_orchestrator import SeratoCrateOrchestrator
 from pymix.registration import create_container
 
 
-def load_identities(path: Optional[str]) -> dict[str, str]:
+def load_identities(path: Optional[str]) -> list[SeratoTrackIdentity]:
     if not path:
-        return {}
+        return []
     entries = json.loads(Path(path).read_text())
-    return {e['crate_path']: e['subbox_id'] for e in entries}
+    return [SeratoTrackIdentity(**entry) for entry in entries]
 
 
 def report_lines(report) -> list[str]:
@@ -55,7 +61,7 @@ def parse_only(
     orchestrator: SeratoCrateOrchestrator,
     user: dict,
     zip_path: Path,
-    identities: dict[str, str],
+    identities: list[SeratoTrackIdentity],
 ):
     """Resolve the crates to playlists and print what matched. Writes nothing."""
     playlists, report = orchestrator.get_subbox_playlists_from_crates(user, zip_path, identities)
@@ -64,7 +70,7 @@ def parse_only(
     for playlist in playlists:
         print(f"\n{playlist.name}")
         for track in playlist.tracks:
-            cues = len(track.serato_hot_cues or [])
+            cues = len(track.client_cues if track.client_cues is not None else (track.serato_hot_cues or []))
             print(f"  {track.artist} - {track.name}  [{track.subbox_id}] {cues} cues")
 
 
@@ -72,7 +78,7 @@ async def run_import(
     controller: SeratoController,
     user: dict,
     zip_path: Path,
-    identities: dict[str, str],
+    identities: list[SeratoTrackIdentity],
 ):
     report = await controller.create_subsonic_playlists_from_crates(
         user=user,

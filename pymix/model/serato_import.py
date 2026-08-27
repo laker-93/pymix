@@ -18,16 +18,28 @@ import dataclasses
 
 from pydantic import BaseModel
 
+from pymix.model.serato_cue import SeratoCue
+
 
 class SeratoTrackIdentity(BaseModel):
     """One crate entry, resolved to a subbox track identity by the client.
 
     ``crate_path`` must be byte-for-byte the path stored in the ``.crate`` file,
     because that is the only key the server can match it on.
+
+    ``cues`` is what the client read off that local file. It matters most for the
+    track subbox *already has*: the server's copy is whatever was uploaded, so its
+    cues are frozen at upload time and every cue the user has set in Serato since
+    is invisible to it. None means "the client didn't read them" and the server
+    falls back to its own copy; an empty list means it read them and there were
+    none, which is left alone rather than used to clear what's stored — subbox has
+    no way to tell "the user removed their cues" from "this client can't read
+    cues from this format" (only MP3 has an encoder on either side).
     """
 
     crate_path: str
     subbox_id: str
+    cues: Optional[List[SeratoCue]] = None
 
 
 class SeratoImportRequest(BaseModel):

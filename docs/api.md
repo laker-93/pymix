@@ -55,8 +55,19 @@ All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 ## Serato import/export — `routers/serato_import_export.py`
 | Method/Path | Purpose |
 |---|---|
-| POST `/serato/import` | Ingest uploaded Serato crates (+ optional audio) → beets import → Navidrome playlists/metadata. Background job; returns `job_id`. Reads the crates from a file named exactly **`all-crates.zip`** in the user's uploads dir, with the `.crate` files at the **root of the zip** — `parse_crates_from_root_path` uses `iterdir()`, not `rglob()`, so a Finder "Compress" of the SubCrates folder parses to zero crates. Optional body `track_identities: [{crate_path, subbox_id}]` — see below. |
-| POST `/serato/export` | Build Serato crates from the user's Navidrome playlists into downloads dir. Body `user_root` — the client-side music root the crate paths are written against. |
+| POST `/serato/import` | Ingest uploaded Serato crates (+ optional audio) → beets import → Navidrome playlists/metadata. Background job; returns `job_id`. Reads the crates from a file named exactly **`all-crates.zip`** in the user's uploads dir, with the `.crate` files at the **root of the zip** — `parse_crates_from_root_path` uses `iterdir()`, not `rglob()`, so a Finder "Compress" of the SubCrates folder parses to zero crates. Optional body `track_identities: [{crate_path, subbox_id, cues?}]` — see below. |
+| POST `/serato/export` | Return the user's playlists as the crates the **client** will write: `{crates: [{path_components, display_name, tracks: [{relative_path, title, artist, album, rating, subbox_id, cues}]}]}`. Optional body `playlistIds` (empty = all). Writes nothing — see below. |
+
+### Why export returns data and not files
+It used to write the `.crate` files itself, against a `user_root` the client sent.
+A crate stores an absolute path per track and nothing else, so those files were a
+prediction about a filesystem the server has never seen — and a wrong prediction
+produces crates that parse perfectly and resolve nothing. The client has just
+downloaded the tracks, so it knows where they landed; `relative_path` is the
+track's path inside the download zip minus the `music/` prefix, taken from the
+same music root the zip's own entry names are built from so the two cannot drift.
+Writing crates client-side is also the only way cues can be written into the
+user's real audio files.
 
 ### Who does a crate entry refer to? (`track_identities`)
 A `.crate` file stores an absolute path on the **user's** machine and nothing

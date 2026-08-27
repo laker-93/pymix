@@ -11,8 +11,15 @@ from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.handlers.rb_backup_file_handler import RBBackupFileHandler
 from pymix.handlers.serato_backup_file_handler import SeratoBackupFileHandler
+from pymix.model.serato_cue import SeratoCue, from_cuedata, to_cuedata
+from pymix.model.serato_export import (
+    SeratoExportCrate,
+    SeratoExportResponse,
+    SeratoExportTrack,
+)
 from pymix.model.serato_import import CrateImportReport
 from pymix.model.subboxplaylist import SubBoxPlaylist
+from pymix.model.subboxtrack import SubBoxTrack
 from pymix.orchestrators.serato_crate_orchestrator import SeratoCrateOrchestrator
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
 from pymix.services.wishlist_reconcile_service import WishlistReconcileService
@@ -47,55 +54,104 @@ class SeratoController:
         self._beets_exec = beets_exec
 
 
-    def _create_serato_crates(self, user_root: str, username: str, subsonic_playlist: SubBoxPlaylist, output_path: Path):
-        """
-        From the playlist given, create the rekordbox folders and playlists.
-        Add the tracks to the playlist.
-        :param subsonic_playlist:
-        :return:
-        """
-        crate = self._serato_crate_orchestrator.create_crate(subsonic_playlist)
-        for track in subsonic_playlist.tracks:
-            self._serato_crate_orchestrator.add_track_to_crate(user_root, username, track, crate)
-        self._serato_crate_orchestrator.save(crate, output_path)
+    def _relative_path_in_export(self, username: str, track: SubBoxTrack) -> Optional[str]:
+        """Where this track will sit inside the download zip, minus the music/ prefix.
 
-    async def create_crates_from_subsonic_playlists(self, user_root: str, user: dict, output_path: Path):
-        subsonic_playlists = await self._subsonic_orchestrator.get_subsonic_playlists(user)
+        The one value the client needs to find the file it just downloaded, so it
+        is taken from the same music root the zip's own entry names are built
+        from rather than re-derived from the Navidrome path. A track that isn't
+        under that root can't be in the zip either, so there is nothing useful to
+        return for it.
+        """
+        if not track.pymix_path:
+            return None
+        root = self._file_browser_file_handler.get_user_music_root(username)
+        try:
+            return str(Path(track.pymix_path).relative_to(root))
+        except ValueError:
+            logger.warning(
+                'export: track path %s is not under the music root %s for user %s',
+                track.pymix_path, root, username,
+            )
+            return None
+
+    async def get_export_structure(
+        self, user: dict, playlist_ids: Optional[List[str]] = None
+    ) -> SeratoExportResponse:
+        """The user's playlists as crates-to-be, for the client to write.
+
+        Everything here is something only the server knows: which playlists
+        exist, what is in them, and the cues subbox is holding. Where the files
+        will land, what the crate files should be called and what goes in them
+        is the client's half, because the client is the side with the filesystem.
+        """
+        username = user['username']
+        id_set = set(playlist_ids) if playlist_ids else None
+        subsonic_playlists = await self._subsonic_orchestrator.get_subsonic_playlists(user, id_set)
         if not subsonic_playlists:
-            logger.info(f'no subsonic playlists found for user')
-        else:
-            # sort the playlists by name so duplicate folders of the same name are not created
-            subsonic_playlists.sort(key=lambda playlist: playlist.name)
-            # Enrich subsonic playlists with stored path_components for lossless folder reconstruction
-            path_rows = self._db_controller.get_playlist_paths(user['username'])
-            path_map = {row['display_name']: row['path_components'] for row in path_rows}
-            for subsonic_playlist in subsonic_playlists:
-                if subsonic_playlist.name in path_map:
-                    subsonic_playlist.path_components = path_map[subsonic_playlist.name]
-            # Given the Playlist data from Subsonic create the playlist directory structure in Rekordbox.
-            for subsonic_playlist in subsonic_playlists:
-                # can do something here along the lines of keeping the root node
-                self._create_serato_crates(user_root, user['username'], subsonic_playlist, output_path)
-        # add subsonic tracks that do not belong to a playlist to a default playlist.
-        noplaylist = SubBoxPlaylist(name='NOPLAYLIST', path_components=['NOPLAYLIST'])
-        default_crate = self._serato_crate_orchestrator.create_crate(noplaylist)
-        # suppress the exception that would be raised due to attempting to add a track that is already present.
-        import asyncio
-        # todo figure this out - seem to need to pause to avoid getting disconnected from server
-        await asyncio.sleep(2)
-        async for tracks in self._subsonic_orchestrator._subsonic_client.get_all_tracks(user, 200):
-            for track in tracks:
-                self._serato_crate_orchestrator.add_track_to_crate(
-                    user_root,
-                    user['username'],
-                    track,
-                    default_crate
-                )
-                # todo - handle meta data such as cues and ratings
-            await asyncio.sleep(2)
+            logger.info(f'no subsonic playlists found for user {username}')
+            return SeratoExportResponse(success=True, reason='no playlists to export')
 
-        # todo remove any playlists that have no tracks
-        self._serato_crate_orchestrator.save(default_crate, output_path)
+        # Sorted so a parent crate is written before its children, same reason the
+        # Rekordbox export sorts: two playlists under one folder must not each
+        # create their own copy of it.
+        subsonic_playlists.sort(key=lambda playlist: playlist.name)
+
+        # The stored components are the lossless form; the display name is a
+        # ' / ' join of them and can't be split back apart safely (a playlist
+        # whose own name contains ' / ' would split into the wrong tree).
+        path_rows = self._db_controller.get_playlist_paths(username)
+        path_map = {row['display_name']: row['path_components'] for row in path_rows}
+
+        subbox_ids = [
+            track.subbox_id
+            for playlist in subsonic_playlists
+            for track in (playlist.tracks or [])
+            if track.subbox_id
+        ]
+        cuedata_by_id = self._db_controller.get_cuedata_by_subbox_id(username, subbox_ids)
+
+        crates: List[SeratoExportCrate] = []
+        n_tracks = 0
+        for playlist in subsonic_playlists:
+            components = path_map.get(playlist.name) or playlist.name.split(' / ')
+            tracks: List[SeratoExportTrack] = []
+            for track in playlist.tracks or []:
+                relative_path = self._relative_path_in_export(username, track)
+                if relative_path is None:
+                    continue
+                tracks.append(
+                    SeratoExportTrack(
+                        relative_path=relative_path,
+                        title=track.name,
+                        artist=track.artist,
+                        album=track.album,
+                        rating=track.rating or 0,
+                        subbox_id=track.subbox_id,
+                        cues=from_cuedata(cuedata_by_id.get(track.subbox_id)),
+                    )
+                )
+            if not tracks:
+                # An empty crate is worse than no crate: it looks to the user like
+                # subbox lost the tracks. Same call the import makes in the other
+                # direction (see SeratoCrateOrchestrator._build_subbox_playlists).
+                logger.info(f'export: playlist {playlist.name} has no exportable tracks, skipping')
+                continue
+            n_tracks += len(tracks)
+            crates.append(
+                SeratoExportCrate(
+                    path_components=components,
+                    display_name=playlist.name,
+                    tracks=tracks,
+                )
+            )
+
+        return SeratoExportResponse(
+            success=True,
+            crates=crates,
+            n_crates=len(crates),
+            n_tracks=n_tracks,
+        )
 
     # todo this function should be part of the beets client or beets controller class and removed from here and rekordbox_xml_controller.py
     def _import_to_beets(self, username: str, zip_path: Optional[Path], audio_path: Optional[Path]):
@@ -202,6 +258,36 @@ class SeratoController:
         await self._subsonic_orchestrator.create_playlists(user, subbox_playlists)
         return subbox_playlists, report
 
+    @staticmethod
+    def _cuedata_for(track: SubBoxTrack) -> Optional[Dict]:
+        """The cues to store for this track, or None if there is nothing to store.
+
+        The client's reading of the user's own file wins over pyserato's reading
+        of the server's copy — see SeratoTrackIdentity. An empty result is None
+        rather than an empty blob, so a track with no cues leaves whatever subbox
+        already holds alone instead of overwriting it with nothing.
+        """
+        if track.client_cues is not None:
+            cuedata = to_cuedata(track.client_cues)
+        elif track.serato_hot_cues:
+            # todo extract colors of cues
+            cuedata = to_cuedata([
+                SeratoCue(
+                    type='loop' if cue.type == HotCueType.LOOP else 'cue',
+                    index=cue.index,
+                    name=cue.name,
+                    start_ms=int(cue.start),
+                    end_ms=int(cue.end) if cue.end is not None else None,
+                )
+                for cue in track.serato_hot_cues
+                if cue.type in (HotCueType.CUE, HotCueType.LOOP)
+            ])
+        else:
+            return None
+        if not cuedata['cues'] and not cuedata['loops']:
+            return None
+        return cuedata
+
     async def _set_metadata(self, user, subbox_playlists: List[SubBoxPlaylist]):
         tracks = []
         for playlist in subbox_playlists:
@@ -211,34 +297,13 @@ class SeratoController:
         # set the rating of the track in navidrome from the rating taken from track meta
         await self._subsonic_orchestrator.set_ratings(user, rated_tracks)
         for track in tracks:
-            if track.serato_hot_cues:
-                cues = list(filter(lambda m: m.type == HotCueType.CUE, track.serato_hot_cues))
-                loops = list(filter(lambda m: m.type == HotCueType.LOOP, track.serato_hot_cues))
-                # todo extract colors of cues
+            cuedata = self._cuedata_for(track)
+            if cuedata:
                 assert track.subbox_id is not None, f"subbox id tag not present on {track}"
                 self._db_controller.update_metadata(
                     username=user['username'],
                     subbox_id=track.subbox_id,
-                    cuedata={
-                        "cues": [
-                            {
-                                "index": cue.index,
-                                "position": int(cue.start),
-                                "name": cue.name
-                                # "color": cue.color todo
-                            } for i, cue in enumerate(cues)
-                        ],
-                        "loops": [
-                            {
-                                "index": cue.index,
-                                "start": int(cue.start),
-                                "end": int(cue.end),
-                                "active": False
-                                # "color": cue.color todo
-                            } for i, cue in enumerate(loops)
-                        ],
-                    },
+                    cuedata=cuedata,
                     source_app="serato",
                     change_type="upload"
                 )
-

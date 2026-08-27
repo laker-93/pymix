@@ -6,6 +6,8 @@ import dataclasses
 
 from pyserato.model.hot_cue import HotCue
 
+from pymix.model.serato_cue import SeratoCue
+
 
 @dataclasses.dataclass
 class SubBoxTrack:
@@ -23,7 +25,11 @@ class SubBoxTrack:
     # the subsonic TrackID.
     sub_track_id: Optional[int] = None
     subbox_id: Optional[str] = None
+    # Read off the server's copy of the file by pyserato.
     serato_hot_cues: Optional[list[HotCue]] = None
+    # Read off the *user's* copy by the client and sent with the import manifest.
+    # Wins over serato_hot_cues where present -- see SeratoTrackIdentity.
+    client_cues: Optional[list[SeratoCue]] = None
     bpm: Optional[float] = None
 
     def __eq__(self, other):
