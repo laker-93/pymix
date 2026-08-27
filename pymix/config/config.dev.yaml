@@ -8,7 +8,15 @@ containers:
   subsonic:
     host: http://host.docker.internal:{port}
     version: 1.16.1
-    music_path_base_to_remove: /music/private
+    # Must track ND_MUSICFOLDER in the per-user navidrome compose template
+    # (../subbox/docker-compose/navidrome/docker-compose.yml), which is
+    # `/music/${SUBBOXUSERNAME}` -- so Navidrome reports `/music/<user>/<artist>/...`
+    # and the base to strip is `/music`. This read `/music/private`, which is not a
+    # prefix of that, so removeprefix() no-opped and every track came back with the
+    # stem prepended to an already-rooted path: `/music/music/<user>/...`. That broke
+    # `pymix_path` (nothing at that path to read a duration or subbox_id from) and put
+    # one `music` segment too many in every exported Rekordbox Location (#141).
+    music_path_base_to_remove: /music
     serving_music_path_base: /private-music
     docker_compose_file: /subbox/docker-compose/navidrome/docker-compose.yml
     env_file: /subbox/docker-compose/navidrome/env
