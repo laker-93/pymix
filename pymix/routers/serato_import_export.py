@@ -9,9 +9,9 @@ from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
 from pymix.controllers.serato_controller import SeratoController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
+from pymix.model.serato_export import SeratoExportRequest, SeratoExportResponse
 from pymix.model.serato_import import SeratoImportRequest
 from pymix.routers.auth import require_reader, require_uploader
-from pymix.routers.rb_import_export import RBExportRequest
 from pymix.services.import_progress import failure_reason
 
 router = APIRouter()
@@ -62,13 +62,17 @@ async def serato_import(
 
     total_n_imported_tracks = await beets_client.count_tracks_on_disk(user)
     job_id = db_controller.create_import_job(username, total_n_tracks_for_import, total_n_imported_tracks)
-    # crate path -> subbox_id, as resolved by the client from the local files. The
-    # server never sees those files, so this is the only identity it gets that
-    # survives the user moving a track. See pymix.model.serato_import.
-    identities = {t.crate_path: t.subbox_id for t in request.track_identities}
+    # The client's manifest, passed through as it arrived: each crate entry's
+    # stored path, the subbox_id the client read off that local file, and the cues
+    # it read with it. The server never sees those files, so this is the only
+    # identity it gets that survives the user moving a track, and the only reading
+    # of the cues that reflects what is in Serato now. See pymix.model.serato_import.
+    identities = request.track_identities
+    n_with_cues = sum(1 for t in identities if t.cues)
     logger.info(
         f'Serato importing {total_n_tracks_for_import} tracks for user {username} '
-        f'with {len(identities)} client-resolved track identities'
+        f'with {len(identities)} client-resolved track identities '
+        f'({n_with_cues} carrying cues)'
     )
     background_tasks.add_task(run_import_task, serato_controller, username, job_id, db_controller,
                               fb_file_handler, total_n_tracks_for_import, user, identities)
@@ -124,52 +128,29 @@ async def run_import_task(serato_controller, username, job_id, db_controller, fb
 @router.post("/serato/export", tags=["import"])
 @inject
 async def serato_export(
-        request: RBExportRequest,
+        request: SeratoExportRequest = SeratoExportRequest(),
         user: dict = Depends(require_reader),
-        beets_client: BeetsClient = Depends(Provide[Container.beets_client]),
-        fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
         serato_controller: SeratoController = Depends(Provide[Container.serato_controller]),
-        db_controller: DbController = Depends(Provide[Container.db_controller]),
-        config: Dict = Depends(Provide[Container.config])
-)-> dict:
-    success = True
-    reason = ""
-    beets_output = ""
-    n_beets_tracks = 0
+) -> SeratoExportResponse:
+    """The user's playlists as the crates the *client* will write.
+
+    This used to write `.crate` files on the server against a `user_root` the
+    client sent, which made every path in them a prediction about a filesystem
+    the server has never seen. Now the server returns what only it knows and the
+    client writes the files against the paths it just downloaded to — which is
+    also the only way the cues can be written into the user's real audio files.
+    See pymix.model.serato_export.
+    """
     username = user['username']
-    user_root = request.user_root
-    # todo: check number of tracks in xml export matches that in beets matches that in the export zip etc.
     try:
-        n_beets_tracks = await beets_client.count_tracks_on_disk(user)
-        #job_id = db_controller.create_export_job(username, n_beets_tracks)
-        logger.info(f'exporting {n_beets_tracks} tracks for user {username}')
-        output_path = fb_file_handler.get_crate_output_path(username)
-        await serato_controller.create_crates_from_subsonic_playlists(
-            user_root=user_root,
-            user=user,
-            output_path=output_path
+        response = await serato_controller.get_export_structure(
+            user=user, playlist_ids=request.playlistIds or None
         )
     except Exception as ex:
-        success = False
-        msg = f'error occurred creating serato crates for user {username} {repr(ex)}'
+        msg = f'error occurred building the serato export for user {username} {repr(ex)}'
         logger.error(msg, exc_info=True)
-        reason = msg
-        #else:
-        #    try:
-        #        logger.info(f'starting to prepare subbox export zip of {n_beets_tracks} tracks for user {user}')
-        #        n_tracks_zipped = await to_process.run_sync(fb_file_handler.export_subsonic_music, config["db"]["path"], config["app_env"], username, job_id)
-        #    except Exception as ex:
-        #        success = False
-        #        msg = f'error occurred exporting subsonic collection to filebrowser for user {username} {repr(ex)}'
-        #        logger.error(msg, exc_info=True)
-        #        reason = msg
-        #    finally:
-        #        logger.info(f'zipped {n_tracks_zipped} tracks. marking serato export job for user {username} as {success}')
-        #        db_controller.job_completed(job_id, success)
-    return {
-        'success': success,
-        'n_beets_tracks': n_beets_tracks,
-        'beets_output': beets_output,
-        'reason': reason
-    }
-
+        return SeratoExportResponse(success=False, reason=msg)
+    logger.info(
+        f'serato export for user {username}: {response.n_crates} crates, {response.n_tracks} tracks'
+    )
+    return response

@@ -226,19 +226,11 @@ class FileBrowserFileHandler:
     def get_downloads_dir(self, username: str) -> Path:
         """The directory sync/rekordbox exports are written to for this user.
 
-        Read-only lookup (unlike get_xml_output_path/get_crate_output_path, this
+        Read-only lookup (unlike get_xml_output_path, this
         doesn't create the directory) — used by /sync/download to resolve a
         filename to stream back, where a missing directory should just mean 404.
         """
         return Path(self._filebrowser_data_path_downloads.format(user=username))
-
-    def get_crate_output_path(self, username: str) -> Path:
-        src_path = Path(
-            self._filebrowser_data_path_downloads.format(user=username)
-        )
-        src_path.mkdir(exist_ok=True)
-        path = src_path
-        return path
 
     def get_subcrate_audio_path(self, user: str) -> tuple[Path, Optional[Path], Optional[Path]]:
         src_path = Path(
@@ -432,7 +424,7 @@ class FileBrowserFileHandler:
         the downloads dir. Callers should name it via get_name_in_export_zip so it
         lands under the same music/ prefix as the tracks.
         """
-        src_dir = self._get_user_music_root(username)
+        src_dir = self.get_user_music_root(username)
         files_to_zip: list[Path] = []
         for track in tracks_to_zip:
             file_path: Optional[Path] = None
@@ -460,7 +452,14 @@ class FileBrowserFileHandler:
         )
         return n_files_written, dst_dir
 
-    def _get_user_music_root(self, username: str) -> Path:
+    def get_user_music_root(self, username: str) -> Path:
+        """The directory the export zip's entry names are relative to.
+
+        Public because it is a contract, not an implementation detail: the Serato
+        export tells the client where each track will be *inside the zip*, and the
+        only way that answer can't drift from the zip itself is for both to be
+        this one path (see _write_export_zip).
+        """
         if '{user}' in self._serving_music_path_base:
             return Path(self._serving_music_path_base.format(user=username))
         return Path(self._serving_music_path_base) / username
@@ -507,7 +506,7 @@ class FileBrowserFileHandler:
             db_port=db_config["port"],
         )
         db_controller = DbController(session_factory, app_env, 0)
-        src_dir = self._get_user_music_root(username)
+        src_dir = self.get_user_music_root(username)
         files_to_zip = [entry for entry in src_dir.rglob('*') if entry.is_file()]
         n_files_written, _ = self._write_export_zip(
             username=username,

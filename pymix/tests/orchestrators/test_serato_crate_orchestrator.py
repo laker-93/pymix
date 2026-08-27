@@ -22,6 +22,8 @@ from pyserato.builder import Builder
 from pyserato.model.crate import Crate
 from pyserato.model.track import Track
 
+from pymix.model.serato_cue import SeratoCue
+from pymix.model.serato_import import SeratoTrackIdentity
 from pymix.orchestrators.serato_crate_orchestrator import SeratoCrateOrchestrator
 
 USER = {'username': 'dj'}
@@ -80,13 +82,19 @@ def orchestrator(tmp_path, library):
         crate_builder=Builder(),
         db_controller=db,
         rb_xml_controller=rb_xml,
-        filebrowser_data_path_uploads=str(tmp_path / 'uploads'),
         serving_music_path_base=str(tmp_path / 'serving'),
-        local_user_music_stem='Users/dj/subbox',
     )
     orch.db = db
     orch.rb_xml = rb_xml
     return orch
+
+
+def manifest(*pairs: tuple, cues=None) -> list[SeratoTrackIdentity]:
+    """The client's manifest: (crate path, subbox_id) for each crate entry."""
+    return [
+        SeratoTrackIdentity(crate_path=path, subbox_id=subbox_id, cues=cues)
+        for path, subbox_id in pairs
+    ]
 
 
 def beets_returns(orchestrator, mapping: dict[str, str]):
@@ -108,7 +116,7 @@ def test_manifest_resolves_a_track_the_server_has_never_seen_the_path_of(
     zip_path = write_crate_zip(tmp_path, crate)
 
     playlists, report = orchestrator.get_subbox_playlists_from_crates(
-        USER, zip_path, {'/Users/dj/Moved/Elsewhere/track.mp3': 'sid-1'}
+        USER, zip_path, manifest(('/Users/dj/Moved/Elsewhere/track.mp3', 'sid-1'))
     )
 
     assert report.matched == 1
@@ -145,7 +153,7 @@ def test_the_manifest_wins_over_a_stale_user_location_row(orchestrator, tmp_path
     zip_path = write_crate_zip(tmp_path, crate)
 
     playlists, _ = orchestrator.get_subbox_playlists_from_crates(
-        USER, zip_path, {'/Users/dj/Music/track.mp3': 'sid-new'}
+        USER, zip_path, manifest(('/Users/dj/Music/track.mp3', 'sid-new'))
     )
 
     assert playlists[0].tracks[0].subbox_id == 'sid-new'
@@ -167,7 +175,7 @@ def test_an_unmatched_track_is_skipped_and_the_rest_of_the_crate_still_imports(
     zip_path = write_crate_zip(tmp_path, crate)
 
     playlists, report = orchestrator.get_subbox_playlists_from_crates(
-        USER, zip_path, {'/Users/dj/Music/known.mp3': 'sid-1'}
+        USER, zip_path, manifest(('/Users/dj/Music/known.mp3', 'sid-1'))
     )
 
     assert report.matched == 1
@@ -189,7 +197,7 @@ def test_a_known_id_with_no_file_behind_it_is_skipped_not_asserted(
     zip_path = write_crate_zip(tmp_path, crate)
 
     playlists, report = orchestrator.get_subbox_playlists_from_crates(
-        USER, zip_path, {'/Users/dj/Music/known.mp3': 'sid-1', '/Users/dj/Music/vanished.mp3': 'sid-gone'}
+        USER, zip_path, manifest(('/Users/dj/Music/known.mp3', 'sid-1'), ('/Users/dj/Music/vanished.mp3', 'sid-gone'))
     )
 
     assert report.matched == 1
@@ -214,7 +222,7 @@ def test_a_crate_with_nothing_matched_does_not_become_an_empty_playlist(
     zip_path = write_crate_zip(tmp_path, root)
 
     playlists, report = orchestrator.get_subbox_playlists_from_crates(
-        USER, zip_path, {'/Users/dj/Music/known.mp3': 'sid-1'}
+        USER, zip_path, manifest(('/Users/dj/Music/known.mp3', 'sid-1'))
     )
 
     assert [p.name for p in playlists] == ['Sets / Played']
@@ -235,7 +243,7 @@ def test_nesting_survives_the_round_trip_into_path_components(orchestrator, tmp_
     zip_path = write_crate_zip(tmp_path, root)
 
     playlists, _ = orchestrator.get_subbox_playlists_from_crates(
-        USER, zip_path, {'/Users/dj/Music/deep.mp3': 'sid-1'}
+        USER, zip_path, manifest(('/Users/dj/Music/deep.mp3', 'sid-1'))
     )
 
     assert playlists[0].path_components == ['Sets', '2026', 'Warmup']
@@ -288,7 +296,7 @@ def test_the_warning_names_the_shortfall_rather_than_reporting_a_clean_win(
     zip_path = write_crate_zip(tmp_path, crate)
 
     _, report = orchestrator.get_subbox_playlists_from_crates(
-        USER, zip_path, {'/Users/dj/Music/known.mp3': 'sid-1'}
+        USER, zip_path, manifest(('/Users/dj/Music/known.mp3', 'sid-1'))
     )
 
     warning = report.warning()
@@ -305,7 +313,86 @@ def test_a_fully_matched_import_carries_no_warning(orchestrator, tmp_path, libra
     zip_path = write_crate_zip(tmp_path, crate)
 
     _, report = orchestrator.get_subbox_playlists_from_crates(
-        USER, zip_path, {'/Users/dj/Music/known.mp3': 'sid-1'}
+        USER, zip_path, manifest(('/Users/dj/Music/known.mp3', 'sid-1'))
     )
 
     assert report.warning() is None
+
+
+# --- cues -------------------------------------------------------------------
+#
+# The server's copy of a track holds the cues it had when it was uploaded. Every
+# cue the user has set in Serato since is on their own file and nowhere else, so
+# for a track subbox already has, reading the server's copy answers a question
+# nobody asked. The client reads the file the user is actually cueing and sends
+# what it found.
+
+CLIENT_CUES = [
+    SeratoCue(type='cue', index=0, name='intro', start_ms=8000),
+    SeratoCue(type='loop', index=0, name='outro', start_ms=180000, end_ms=188000),
+]
+
+
+def test_cues_from_the_client_are_used_and_the_servers_copy_is_not_read(
+    orchestrator, tmp_path, library
+):
+    add_library_track(library, 'Artist/Album/known.mp3')
+    beets_returns(orchestrator, {'sid-1': 'Artist/Album/known.mp3'})
+    orchestrator._mp3_encoder = MagicMock()
+
+    crate = Crate('House')
+    crate.add_track(Track.from_path('/Users/dj/Music/known.mp3'))
+    zip_path = write_crate_zip(tmp_path, crate)
+
+    playlists, _ = orchestrator.get_subbox_playlists_from_crates(
+        USER, zip_path, manifest(('/Users/dj/Music/known.mp3', 'sid-1'), cues=CLIENT_CUES)
+    )
+
+    track = playlists[0].tracks[0]
+    assert track.client_cues == CLIENT_CUES
+    assert track.serato_hot_cues is None
+    orchestrator._mp3_encoder.read_cues.assert_not_called()
+
+
+def test_without_client_cues_the_servers_copy_is_still_read(orchestrator, tmp_path, library):
+    """The older client, and the Rekordbox-first user resolved by user_location."""
+    add_library_track(library, 'Artist/Album/known.mp3')
+    beets_returns(orchestrator, {'sid-1': 'Artist/Album/known.mp3'})
+    orchestrator._mp3_encoder = MagicMock()
+    orchestrator._mp3_encoder.read_cues.return_value = []
+
+    crate = Crate('House')
+    crate.add_track(Track.from_path('/Users/dj/Music/known.mp3'))
+    zip_path = write_crate_zip(tmp_path, crate)
+
+    playlists, _ = orchestrator.get_subbox_playlists_from_crates(
+        USER, zip_path, manifest(('/Users/dj/Music/known.mp3', 'sid-1'))
+    )
+
+    assert playlists[0].tracks[0].client_cues is None
+    orchestrator._mp3_encoder.read_cues.assert_called_once()
+
+
+def test_an_empty_client_cue_list_is_not_the_same_as_sending_none(
+    orchestrator, tmp_path, library
+):
+    """"I read them and there were none" still stops the server reading its own copy.
+
+    What it must NOT do is clear what subbox already holds -- see
+    SeratoController._cuedata_for. Only MP3 has a cue encoder on either side, so
+    an empty list can equally mean "this client can't read cues from this file".
+    """
+    add_library_track(library, 'Artist/Album/known.mp3')
+    beets_returns(orchestrator, {'sid-1': 'Artist/Album/known.mp3'})
+    orchestrator._mp3_encoder = MagicMock()
+
+    crate = Crate('House')
+    crate.add_track(Track.from_path('/Users/dj/Music/known.mp3'))
+    zip_path = write_crate_zip(tmp_path, crate)
+
+    playlists, _ = orchestrator.get_subbox_playlists_from_crates(
+        USER, zip_path, manifest(('/Users/dj/Music/known.mp3', 'sid-1'), cues=[])
+    )
+
+    assert playlists[0].tracks[0].client_cues == []
+    orchestrator._mp3_encoder.read_cues.assert_not_called()

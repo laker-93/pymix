@@ -176,6 +176,54 @@ class DbController:
             )
             raise
 
+    # The IN list is chunked at this rather than sent whole: a Serato export of a
+    # large library asks about every track in every playlist at once, and a single
+    # statement with tens of thousands of bind parameters is the kind of thing that
+    # works locally and falls over on the deployed postgres.
+    _CUEDATA_CHUNK = 1000
+
+    def get_cuedata_by_subbox_id(self, username: str, subbox_ids: list[str]) -> dict[str, dict]:
+        """Every stored cuedata blob for these ids, keyed by subbox_id.
+
+        The bulk form of get_library_entry, and it exists because the per-track
+        form is a query per track: the Rekordbox XML export calls it once for
+        every track it writes, which is fine at ten tracks and is a thousand
+        round trips at a thousand. Ids with no row are simply absent -- a track
+        with no cues is the normal case, not a miss worth reporting.
+        """
+        if not subbox_ids:
+            return {}
+        try:
+            user = self.get_user(username)
+            user_id = user["user_id"]
+            unique_ids = list(dict.fromkeys(subbox_ids))
+            out: dict[str, dict] = {}
+            with self._session_factory() as session:
+                for start in range(0, len(unique_ids), self._CUEDATA_CHUNK):
+                    chunk = unique_ids[start:start + self._CUEDATA_CHUNK]
+                    rows = session.query(LibraryRow).filter(
+                        LibraryRow.user_id == user_id,
+                        LibraryRow.subbox_id.in_(chunk),
+                    ).all()
+                    for row in rows:
+                        cuedata = row.cuedata
+                        if isinstance(cuedata, str):
+                            try:
+                                cuedata = json.loads(cuedata)
+                            except json.JSONDecodeError:
+                                logger.error(
+                                    f"Invalid cuedata JSON for {row.subbox_id}, user={username}"
+                                )
+                                continue
+                        if cuedata:
+                            out[row.subbox_id] = cuedata
+            return out
+        except Exception as ex:
+            logger.error(
+                "Error retrieving cuedata for %s: %r", username, ex, exc_info=True
+            )
+            raise
+
     def get_subbox_beet_map(self, username: str, subbox_id: str) -> dict | None:
         try:
             user = self.get_user(username)

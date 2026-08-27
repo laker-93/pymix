@@ -70,9 +70,13 @@ round trips per track, which is invisible locally and 12-32 s on a prod RTT (#10
 6. Save XML into the user's `downloads/` for the client to import into Rekordbox.
 
 ## 4. Serato import/export (`/serato/import`, `/serato/export`)
-Mirrors the Rekordbox flows but reads/writes Serato `.crate` files via `pyserato`
+Import mirrors the Rekordbox flow but reads Serato `.crate` files via `pyserato`
 (`SeratoController` + `SeratoCrateOrchestrator`). Crate folder hierarchy ↔
 `path_components` the same way.
+
+Export does **not** mirror it: `/serato/export` returns the playlist and track
+structure and writes no files, because the client is the side that knows where
+the tracks are. See `docs/api.md`.
 
 Where it does **not** mirror Rekordbox is track identity. An RB XML carries each
 track's metadata; a `.crate` carries only an absolute path on the user's machine,
@@ -81,6 +85,12 @@ client resolves each crate entry to a `subbox_id` from the local file's tag and
 sends `track_identities`; the `user_location` row from `/sync/map_meta` is the
 fallback, and an entry neither knows is skipped with a reason rather than failing
 the import. Details and the resolution order are in `docs/api.md`.
+
+The same asymmetry applies to cues. pymix can only read them off *its* copy of a
+track, which is frozen at whatever was uploaded, so for a track the library
+already had, every cue set in Serato since is invisible to it. The client reads
+the file the user is actually cueing and sends the result in `track_identities`;
+where it does, that reading wins and the server's copy is not read at all.
 
 ## 5. Watch-dir auto-import (no endpoint)
 Started in `lifespan`. `poll_watchdir` watches `/user-updownloads/<user>/watch/`:

@@ -165,9 +165,7 @@ class Container(containers.DeclarativeContainer):
         providers.Singleton(Builder),
         db_controller,
         rekordbox_xml_controller,
-        config.containers.filebrowser.data_uploads,
         config.containers.subsonic.serving_music_path_base,
-        config.local_user_music_stem,
     )
     serato_controller = providers.Singleton(
         SeratoController,
