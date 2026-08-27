@@ -22,6 +22,30 @@ from pymix.utils.utility import AUDIO_EXTENSIONS, detect_audio_type, detect_audi
 
 logger = logging.getLogger(__name__)
 
+# The Serato crate bundle the client uploads. It lives in the same uploads
+# directory as the user's audio, so every scan of that directory that is looking
+# for an audio zip has to step over it.
+CRATE_ZIP_NAME = 'all-crates.zip'
+
+
+def is_crate_zip(f: Path) -> bool:
+    return f.name.lower() == CRATE_ZIP_NAME
+
+
+def is_audio_zip(f: Path) -> bool:
+    """
+    Is this the zip of the user's music, as opposed to the crate bundle or macOS'
+    resource-fork sidecar?
+
+    Worth having in one place: the three scans of the uploads directory each
+    answered it slightly differently, and the Rekordbox one did not exclude the
+    crate bundle at all -- so a Serato import that failed before pymix could clear
+    the directory left an all-crates.zip behind for the next Rekordbox import to
+    stage into beets as if it were music.
+    """
+    name = f.name.lower()
+    return name.endswith('.zip') and 'macosx' not in name and not is_crate_zip(f)
+
 
 def _has_audio_files(directory: Path) -> bool:
     """Check whether a directory contains at least one audio file (or zip)."""
@@ -226,9 +250,9 @@ class FileBrowserFileHandler:
         for f in src_path.rglob('*'):
             if not f.is_file():
                 continue
-            if f.name.lower() == 'all-crates.zip':
+            if is_crate_zip(f):
                 subcrate_path = f
-            elif f.name.endswith('.zip') and 'macosx' not in f.name.lower() and 'all-crates' not in f.name.lower():
+            elif is_audio_zip(f):
                 zip_path = f
             elif detect_audio_type(f) is not None:
                 audio_path = src_path
@@ -345,7 +369,7 @@ class FileBrowserFileHandler:
                 if guessed_mime in ('application/xml', 'text/xml'):
                     xml_path = f
                     counters["n_xml"] += 1
-                elif f.name.endswith('.zip') and 'macosx' not in f.name.lower():
+                elif is_audio_zip(f):
                     zip_path = f
                 elif detect_audio_type(f) is not None:
                     audio_path = src_path
@@ -365,7 +389,7 @@ class FileBrowserFileHandler:
 
         for f in src_path.iterdir():
             if f.is_file():
-                if f.name.endswith('.zip') and f.name != 'all-crates.zip':
+                if is_audio_zip(f):
                     audio_files_zip = f
                     logger.info(f'adding audio zip {f}')
                     break
