@@ -2,8 +2,6 @@
 app_env: dev
 local_user_music_stem: music
 zip_name: music
-rekordbox:
-  xml_path: /subbox/rekordbox/rekordbox_empty.xml
 containers:
   subsonic:
     host: http://host.docker.internal:{port}
@@ -27,8 +25,6 @@ containers:
     data_watch: /user-updownloads/{user}/watch
     data_uploads: /user-updownloads/{user}/uploads
     data_downloads: /user-updownloads/{user}/downloads
-    docker_compose_file: /subbox/docker-compose/filebrowser/docker-compose.yml
-    env_file: /subbox/docker-compose/filebrowser/env
   beets:
     data: /private-staged/{user}/
     data_public: /public-staged

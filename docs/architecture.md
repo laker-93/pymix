@@ -104,9 +104,14 @@ on `/user/create`:
   `host.format(user=..., port=...)` (see `config.dev.yaml` `containers.*.host`).
 - pymix runs `beet` commands by `docker.execute("beets{user}", ...)` via
   `python_on_whales` (the docker socket is mounted into the pymix container).
-- Compose files / env templates for the per-user containers live OUTSIDE this repo,
-  under the mounted `/subbox` volume (`docker_compose_file`, `env_file` config keys).
-  Templates rendered in-app (beets config, navidrome.toml) are in `pymix/templates/`.
+- Compose files / env templates for the **navidrome and beets** per-user containers
+  live OUTSIDE this repo, under the mounted `/subbox` volume (`containers.subsonic.*`
+  and `containers.beets.*`'s `docker_compose_file` / `env_file` keys). filebrowser has
+  no such keys: it is never brought up by pymix, only `docker inspect`ed and `exec`ed
+  into by `ServicesOrchestrator._create_filebrowser_account`.
+  Templates rendered in-app (beets config, navidrome.toml) are in `pymix/templates/`;
+  static code assets shipped in the image (the empty Rekordbox collection stub every
+  export starts from) are in `pymix/resources/`.
 
 ## External services & data sources
 
