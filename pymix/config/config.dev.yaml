@@ -40,7 +40,13 @@ host:
 
 containers:
   subsonic:
-    host: http://host.docker.internal:{port}
+    # Container-to-container over the shared docker network, same as prod. It used to
+    # be host.docker.internal:{port} -- the port the compose file publishes -- which
+    # cannot work for account creation: NavidromeClient.create_account hardcodes
+    # port=4533 ("we're inside the same docker network"), so this formatted to
+    # host.docker.internal:4533 and connection-refused. Another symptom of dev config
+    # never having been loaded by a running pymix; see music_backup_path below.
+    host: http://navidrome{user}:4533
     version: 1.16.1
     # Must track ND_MUSICFOLDER in the per-user navidrome compose template
     # (pymix/templates/compose/navidrome.yml.j2), which is
@@ -52,6 +58,13 @@ containers:
     # one `music` segment too many in every exported Rekordbox Location (#141).
     music_path_base_to_remove: /music
     serving_music_path_base: /private-music
+    # ServicesOrchestrator.create() mkdirs this for every new user, so a config
+    # without it cannot create one at all. Dev never had it because dev config was
+    # never actually loaded: the local stack runs APP_ENVIRONMENT=prod, and the only
+    # thing that made it a *dev* machine was the branch of the laker-93/subbox
+    # checkout it mounted. Now that the host facts live in this file, dev has to be
+    # the config this machine loads, so it has to be complete.
+    music_backup_path: /private-music/backup/{user}
     metrics_path: /metrics
   filebrowser:
     user_root: /user-updownloads
