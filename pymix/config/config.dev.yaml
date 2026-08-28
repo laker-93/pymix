@@ -2,13 +2,49 @@
 app_env: dev
 local_user_music_stem: music
 zip_name: music
+# Everything about *this host* that the per-user compose files need. pymix renders
+# those files itself (pymix/templates/compose/) instead of reading them off a
+# checkout of laker-93/subbox, which had one branch per machine.
+host:
+  # Absolute path, in the HOST's terms, of the directory mounted into pymix as
+  # `pymix_mount`. Compose runs against the host daemon, so every bind source pymix
+  # renders has to be translated from its own view into this one.
+  bind_root: /Users/lukepurnell/workspace/subbox
+  pymix_mount: /subbox
+  uid: 501
+  gid: 20
+  timezone: Etc/UTC
+  docker_network: proxy
+  traefik:
+    # navidrome{user}.<domain>
+    domain: docker.localhost
+    # unset => `tls=true`, i.e. traefik's local self-signed cert
+    cert_resolver:
+    cors_middleware: navcors
+  navidrome:
+    image: deluan/navidrome:0.60.3
+    prometheus: false
+    # Passthrough: emitted verbatim as ND_* env. Tuning knobs only -- the settings
+    # pymix itself depends on are fixed in the template. This map is deliberately
+    # NOT unified with prod: it reproduces what this host runs today, so Phase 2
+    # moves where the file lives without also changing how Navidrome behaves.
+    env:
+      ND_LOGLEVEL: debug
+      ND_SESSIONTIMEOUT: 24h
+      ND_SCANSCHEDULE: 0
+      ND_ENABLEINSIGHTSCOLLECTOR: false
+      ND_COVERARTPRIORITY: embedded
+  beets:
+    image: lscr.io/linuxserver/beets:2.13.1
+    env: {}
+
 containers:
   subsonic:
     host: http://host.docker.internal:{port}
     version: 1.16.1
     # Must track ND_MUSICFOLDER in the per-user navidrome compose template
-    # (../subbox/docker-compose/navidrome/docker-compose.yml), which is
-    # `/music/${SUBBOXUSERNAME}` -- so Navidrome reports `/music/<user>/<artist>/...`
+    # (pymix/templates/compose/navidrome.yml.j2), which is
+    # `/music/<user>` -- so Navidrome reports `/music/<user>/<artist>/...`
     # and the base to strip is `/music`. This read `/music/private`, which is not a
     # prefix of that, so removeprefix() no-opped and every track came back with the
     # stem prepended to an already-rooted path: `/music/music/<user>/...`. That broke
@@ -16,9 +52,6 @@ containers:
     # one `music` segment too many in every exported Rekordbox Location (#141).
     music_path_base_to_remove: /music
     serving_music_path_base: /private-music
-    docker_compose_file: /subbox/docker-compose/navidrome/docker-compose.yml
-    env_file: /subbox/docker-compose/navidrome/env
-    config_file_dst: /subbox/private/{user}/navidrome/data/navidrome.toml
     metrics_path: /metrics
   filebrowser:
     user_root: /user-updownloads
@@ -28,9 +61,7 @@ containers:
   beets:
     data: /private-staged/{user}/
     data_public: /public-staged
-    docker_compose_file: /subbox/docker-compose/beets/docker-compose.yml
-    env_file: /subbox/docker-compose/beets/env
-    config_file_dst: /subbox/private/{user}/beets/config/config.yaml
+    config_file_dst: /subbox/users/{user}/beets/config/config.yaml
 # Dev keeps console-only logging: `docker logs pymix` is right there, and a rotating file
 # inside the container is litter nobody reads. See config.prod.yaml for why prod differs.
 logs_directory: logs

@@ -2,6 +2,36 @@
 app_env: prod
 local_user_music_stem: music
 zip_name: music
+# See config.dev.yaml's `host:` block for what each key is for.
+host:
+  bind_root: /home/deploy/subbox
+  pymix_mount: /subbox
+  uid: 1000
+  gid: 1000
+  timezone: Etc/UTC
+  docker_network: traefik
+  traefik:
+    domain: sub-box.net
+    cert_resolver: le
+    cors_middleware: cors
+  navidrome:
+    image: deluan/navidrome:0.60.3
+    # The real on/off switch for the Grafana Cloud dashboard's scrape targets --
+    # see ../subbox-workspace/docs/monitoring.md. It used to be hardcoded in the
+    # droplet branch's compose file, which is why the pymix-side metrics_path
+    # mechanism was documented as inert; it is not inert any more.
+    prometheus: true
+    # Reproduces exactly what the droplet branch's compose file sets today, no more.
+    # Note it does NOT set ND_SCANSCHEDULE or ND_COVERARTPRIORITY, which dev does --
+    # that difference is pre-existing and deliberately preserved here rather than
+    # quietly unified as part of a move.
+    env:
+      ND_LOGLEVEL: debug
+      ND_SESSIONTIMEOUT: 24h
+  beets:
+    image: lscr.io/linuxserver/beets:2.13.1
+    env: {}
+
 containers:
   subsonic:
     #host: http://localhost:4533/navidrome
@@ -10,9 +40,6 @@ containers:
     music_path_base_to_remove: /music
     serving_music_path_base: /private-music
     music_backup_path: /private-music/backup/{user}
-    docker_compose_file: /subbox/docker-compose/navidrome/docker-compose.yml
-    env_file: /subbox/docker-compose/navidrome/env
-    config_file_dst: /subbox/users/{user}/navidrome/data/navidrome.toml
     metrics_path: /metrics
   filebrowser:
     user_root: /user-updownloads
@@ -22,8 +49,6 @@ containers:
   beets:
     data: /private-staged/{user}/
     data_public: /public-staged
-    docker_compose_file: /subbox/docker-compose/beets/docker-compose.yml
-    env_file: /subbox/docker-compose/beets/env
     config_file_dst: /subbox/users/{user}/beets/config/config.yaml
 # Durable log copy, on the /subbox host bind mount rather than inside the container, so
 # it survives the `docker compose up -d` that a deploy or a mem_limit change performs —

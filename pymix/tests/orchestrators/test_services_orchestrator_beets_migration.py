@@ -15,6 +15,7 @@ import pytest
 from python_on_whales.exceptions import NoSuchContainer
 
 from pymix.clients.beets_exec import BeetsExec
+from pymix.handlers.compose_file_handler import ComposeFileHandler
 from pymix.orchestrators.services_orchestrator import ServicesOrchestrator
 
 
@@ -43,11 +44,24 @@ def no_real_docker():
 def _make_config(tmp_path):
     return {
         "max_number_of_users": 10,
+        # pymix renders the compose file rather than reading one off the host, so the
+        # `host:` block stands in for what used to be a per-host checkout of
+        # laker-93/subbox. tmp_path doubles as both roots here: the test never crosses
+        # the pymix/host boundary, it only needs the translation to be well-defined.
+        "host": {
+            "bind_root": str(tmp_path),
+            "pymix_mount": str(tmp_path),
+            "uid": 1000,
+            "gid": 1000,
+            "timezone": "Etc/UTC",
+            "docker_network": "traefik",
+            "traefik": {"domain": "example.test", "cert_resolver": "le", "cors_middleware": "cors"},
+            "navidrome": {"image": "deluan/navidrome:0.60.3", "prometheus": False, "env": {}},
+            "beets": {"image": "lscr.io/linuxserver/beets:2.13.1", "env": {}},
+        },
         "containers": {
             "beets": {
                 "config_file_dst": str(tmp_path / "beets" / "{user}" / "config.yaml"),
-                "docker_compose_file": str(tmp_path / "docker-compose.yml"),
-                "env_file": str(tmp_path / "beets.env"),
             },
             "subsonic": {
                 "serving_music_path_base": str(tmp_path / "private-music"),
@@ -62,7 +76,7 @@ def _make_orchestrator(config, beets_exec, db_user):
     return ServicesOrchestrator(
         db_controller=db_controller,
         navidrome_client=mock.Mock(),
-        env_file_handler=mock.Mock(),
+        compose_file_handler=ComposeFileHandler(config["host"]),
         config=config,
         beets_exec=beets_exec,
     ), db_controller
@@ -145,12 +159,25 @@ async def test_migrate_recreates_with_force_recreate_and_pull_always(tmp_path):
 
         await orchestrator.migrate_beets_container(username)
 
+    # The compose file is rendered per user by pymix now, not read from a path in
+    # config, so what is asserted is where it was written and that compose was pointed
+    # at exactly that file. No compose_env_file: the values it used to carry
+    # (${NAME}/${SUBBOXUSERNAME}/${SUBBOXPORT}) are rendered inline, which also
+    # retires a single mutable file that every concurrent user creation shared.
+    expected_compose = tmp_path / "generated" / "compose" / f"beets{username}.yml"
     mock_docker_client_cls.assert_called_once_with(
-        compose_files=[config["containers"]["beets"]["docker_compose_file"]],
-        compose_env_file=config["containers"]["beets"]["env_file"],
+        compose_files=[expected_compose],
         compose_project_name=f"beets{username}",
     )
     mock_compose_instance.compose.up.assert_called_once_with(detach=True, force_recreate=True, pull="always")
+
+    rendered = expected_compose.read_text()
+    assert f'container_name: "beets{username}"' in rendered
+    assert "image: lscr.io/linuxserver/beets:2.13.1" in rendered
+    assert '- "1234:8337"' in rendered
+    # the /config bind is derived from config_file_dst, so the directory pymix renders
+    # config.yaml into and the one the container mounts cannot drift apart
+    assert f'{tmp_path / "beets" / username}:/config' in rendered
 
 
 @pytest.mark.anyio

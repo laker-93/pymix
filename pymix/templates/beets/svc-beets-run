@@ -1,0 +1,5 @@
+#!/usr/bin/with-contenv bash
+# no-op: overrides the base image's svc-beets s6 service so `beet web` never starts.
+# pymix talks to beets via `docker exec` (CLI) instead of the web plugin's HTTP API;
+# the upstream image has no config option to disable this service, only this bind-mount.
+# See https://github.com/linuxserver/docker-beets/issues/119

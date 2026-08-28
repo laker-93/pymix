@@ -104,14 +104,25 @@ on `/user/create`:
   `host.format(user=..., port=...)` (see `config.dev.yaml` `containers.*.host`).
 - pymix runs `beet` commands by `docker.execute("beets{user}", ...)` via
   `python_on_whales` (the docker socket is mounted into the pymix container).
-- Compose files / env templates for the **navidrome and beets** per-user containers
-  live OUTSIDE this repo, under the mounted `/subbox` volume (`containers.subsonic.*`
-  and `containers.beets.*`'s `docker_compose_file` / `env_file` keys). filebrowser has
-  no such keys: it is never brought up by pymix, only `docker inspect`ed and `exec`ed
-  into by `ServicesOrchestrator._create_filebrowser_account`.
-  Templates rendered in-app (beets config, navidrome.toml) are in `pymix/templates/`;
-  static code assets shipped in the image (the empty Rekordbox collection stub every
-  export starts from) are in `pymix/resources/`.
+- **pymix renders the per-user compose files itself** (`handlers/compose_file_handler.py`
+  + `pymix/templates/compose/*.j2`) and writes them to `<mount>/generated/compose/`.
+  They used to be checked into `laker-93/subbox` with one branch per host. Everything
+  that varied between those branches is now the `host:` block in
+  `config.{dev,prod}.yaml`. filebrowser is not among them: pymix never brings it up,
+  only `docker inspect`s and `exec`s into it
+  (`ServicesOrchestrator._create_filebrowser_account`).
+- **Whose filesystem a path belongs to matters.** `docker compose -f` is run by the
+  Docker CLI inside the pymix container, but bind sources are resolved by the *host*
+  daemon. So the compose file can live anywhere pymix can write, while every bind
+  source in it must be spelled in host terms — that is what `host.bind_root` /
+  `host.pymix_mount` and `ComposeFileHandler.host_path()` are for.
+- **Navidrome's data is a named volume** (`navidrome-data-{user}`), on every
+  environment. Its `navidrome.toml` is injected into that volume before first start;
+  see `_write_navidrome_config`. Existing users on the old host bind are moved over by
+  `POST /admin/navidrome/{user}/migrate`.
+- Templates rendered in-app (beets config, navidrome.toml, the compose files, the beets
+  s6 override) are in `pymix/templates/`; static code assets shipped in the image (the
+  empty Rekordbox collection stub every export starts from) are in `pymix/resources/`.
 
 ## External services & data sources
 

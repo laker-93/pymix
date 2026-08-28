@@ -1,9 +1,6 @@
 import asyncio
-import grp
-import pwd
 import shutil
 import logging
-import stat
 import time
 from pathlib import Path
 from typing import Optional
@@ -17,7 +14,7 @@ from jinja2 import Environment, FileSystemLoader
 from pymix.clients.beets_exec import BeetsExec
 from pymix.clients.navidrome_client import NavidromeClient
 from pymix.controllers.db_controller import DbController
-from pymix.handlers.env_file_handler import DockerEnvFileHandler
+from pymix.handlers.compose_file_handler import ComposeFileHandler
 from pymix.utils.tag_subbox_id import get_subbox_id
 
 logger = logging.getLogger(__name__)
@@ -37,13 +34,13 @@ class ServicesOrchestrator:
             self,
             db_controller: DbController,
             navidrome_client: NavidromeClient,
-            env_file_handler: DockerEnvFileHandler,
+            compose_file_handler: ComposeFileHandler,
             config: dict,
             beets_exec: BeetsExec,
     ):
         self._db_controller = db_controller
         self._navidrome_client = navidrome_client
-        self._env_file_handler = env_file_handler
+        self._compose = compose_file_handler
         self._config = config
         self._beets_exec = beets_exec
         self._max_number_of_users = config['max_number_of_users']
@@ -110,66 +107,65 @@ class ServicesOrchestrator:
         port = user['subsonic_port']
         username = user['username']
         project_name = f'navidrome{username}'
-        # have to create this drive first before running compose to ensure the drive is created with non root user
-        config_dst = self._config['containers']['subsonic']['config_file_dst'].format(user=username)
-        dir_path = Path(config_dst).parent
-        if dir_path.exists():
-            logger.info(f'navidrome container already exists for user. Skipping creation')
+        volume_name = self._compose.navidrome_data_volume(username)
+
+        # The named volume is the sentinel for "this user already has a navidrome".
+        # It used to be the existence of their host config directory, which no longer
+        # exists -- /data is a Docker volume now, on every environment.
+        if docker.volume.exists(volume_name):
+            logger.info('navidrome container already exists for user. Skipping creation')
             return
-        dir_path.mkdir(parents=True, exist_ok=False)
 
-        # --- Log permissions ---
-        st = dir_path.stat()
+        docker.volume.create(volume_name)
+        # Seed navidrome.toml BEFORE the first start, not after. Navidrome reads its
+        # config exactly once, at boot, so a config written afterwards would not take
+        # effect until something restarted the container -- and nothing does. Getting
+        # this wrong is silent: conf.getConfigFile() os.Stat()s ND_CONFIGFILE and
+        # falls back to defaults without logging an error, which is precisely how
+        # every dev user's container ended up running without the Tags.subboxid
+        # aliases that pymix's whole track identity depends on.
+        self._write_navidrome_config(username)
 
-        uid = st.st_uid
-        gid = st.st_gid
-        mode = stat.S_IMODE(st.st_mode)
-
-        try:
-            user = pwd.getpwuid(uid).pw_name
-        except KeyError:
-            user = f"UID {uid}"
-
-        try:
-            group = grp.getgrgid(gid).gr_name
-        except KeyError:
-            group = f"GID {gid}"
-
-        logger.info(
-            "Directory created: %s | owner=%s (%s) group=%s (%s) perms=%o",
-            dir_path,
-            user,
-            uid,
-            group,
-            gid,
-            mode
-        )
-        env_kwargs = {}
-        metrics_path = self._config['containers']['subsonic'].get('metrics_path')
-        if metrics_path:
-            env_kwargs['nd_prometheus_enabled'] = 'true'
-            env_kwargs['nd_prometheus_metricspath'] = metrics_path
-
-        self._env_file_handler.create_env_file(
-            Path(self._config['containers']['subsonic']['env_file']),
+        content = self._compose.render_navidrome(
             username,
-            port,
             project_name,
-            **env_kwargs
+            port,
+            metrics_path=self._config['containers']['subsonic'].get('metrics_path', ''),
         )
+        compose_path = self._compose.write_compose_file(project_name, content)
+        DockerClient(
+            compose_files=[compose_path],
+            compose_project_name=project_name,
+        ).compose.up(detach=True)
 
-        docker = DockerClient(
-            compose_files=[self._config['containers']['subsonic']['docker_compose_file']],
-            compose_env_file=self._config['containers']['subsonic']['env_file'],
-            compose_project_name=project_name
+    def _write_navidrome_config(self, username: str):
+        """
+        Put navidrome.toml inside this user's data volume.
+
+        pymix cannot write into a per-user volume directly -- it would have to have
+        mounted it at its own startup, and these are created on demand. So it stages
+        the rendered file and `docker cp`s it into a container that is created but
+        never started, purely as a handle on the volume. `docker cp` works on a
+        created container, so nothing is executed and no extra image is pulled: the
+        navidrome image is already on the host by definition.
+        """
+        volume_name = self._compose.navidrome_data_volume(username)
+        staged = self._compose.generated_dir() / 'navidrome' / f'{username}.toml'
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_text(navidrome_template.render())
+
+        image = self._config['host']['navidrome']['image']
+        helper = docker.container.create(
+            image,
+            volumes=[(volume_name, '/data')],
+            name=f'navidrome-config-{username}',
+            remove=False,
         )
-        docker.compose.up(detach=True)
-
-
-        content = navidrome_template.render()
-        with open(config_dst, 'w') as f:
-            f.write(content)
-
+        try:
+            docker.container.copy(staged, (helper, '/data/navidrome.toml'))
+            logger.info(f'wrote navidrome.toml into volume {volume_name}')
+        finally:
+            docker.container.remove(helper, force=True)
 
     async def _create_beets(self, user: dict):
         port = user['beets_port']
@@ -184,19 +180,11 @@ class ServicesOrchestrator:
             return
         dir_path.mkdir(parents=True, exist_ok=False)
 
-        self._env_file_handler.create_env_file(
-            Path(self._config['containers']['beets']['env_file']),
-            username,
-            port,
-            project_name
-        )
-
-        docker = DockerClient(
-            compose_files=[self._config['containers']['beets']['docker_compose_file']],
-            compose_env_file=self._config['containers']['beets']['env_file'],
-            compose_project_name=project_name
-        )
-        docker.compose.up(detach=True)
+        compose_path = self._render_beets_compose(username, project_name, port)
+        DockerClient(
+            compose_files=[compose_path],
+            compose_project_name=project_name,
+        ).compose.up(detach=True)
         # overwrite the default beets config with subbox specific beets config
         config_dst = self._config['containers']['beets']['config_file_dst'].format(user=username)
 
@@ -212,6 +200,157 @@ class ServicesOrchestrator:
         automatch_dst = Path(config_dst).parent / "automatch.yaml"
         with open(automatch_dst, 'w') as f:
             f.write(beets_automatch_template.render())
+
+    async def migrate_navidrome_container(self, username: str, legacy_data_dir: Optional[str] = None) -> dict:
+        """
+        Move this user's Navidrome onto the named `navidrome-data-{user}` volume and
+        recreate their container from the rendered compose file. Explicit, per-user,
+        re-runnable — never triggered automatically, so a deploy cannot sweep every
+        user's container at once.
+
+        Navidrome's data directory used to be a host bind (`/subbox/users/{user}/
+        navidrome/data` as pymix sees it) on the droplet and mac branches, and a named
+        volume only in local dev. That split was the last structural difference
+        between hosts, and it is what made the compose file un-templatable.
+
+        The database is the whole point of the care taken here. It holds the user's
+        Navidrome account, their playlists, stars and play counts — none of which are
+        reconstructible from the files on disk, because Navidrome keys them to its own
+        internal IDs. Starting a container against an empty volume would silently
+        produce a working-looking, empty Navidrome. So the legacy directory is copied
+        in first, and a volume that already holds a navidrome.db is never overwritten.
+        """
+        return await anyio.to_thread.run_sync(self._migrate_navidrome_container, username, legacy_data_dir)
+
+    def _migrate_navidrome_container(self, username: str, legacy_data_dir: Optional[str]) -> dict:
+        user = self._db_controller.get_user(username)
+        project_name = f'navidrome{username}'
+        volume_name = self._compose.navidrome_data_volume(username)
+
+        if legacy_data_dir is None:
+            legacy_data_dir = f'{self._compose.pymix_mount}/users/{username}/navidrome/data'
+        legacy = Path(legacy_data_dir)
+        legacy_db = legacy / 'navidrome.db'
+
+        volume_existed = docker.volume.exists(volume_name)
+        if not volume_existed:
+            docker.volume.create(volume_name)
+
+        # Stop first. Copying a live SQLite database out from under a running
+        # Navidrome gives you a torn snapshot -- the -wal and -shm files carry
+        # committed pages the .db alone does not.
+        was_running = docker.container.exists(project_name) and docker.container.inspect(project_name).state.running
+        if was_running:
+            logger.info(f'stopping {project_name} before migrating its data directory')
+            docker.container.stop(project_name)
+
+        already_migrated = self._volume_has_navidrome_db(volume_name)
+        copied = False
+        if already_migrated:
+            logger.info(f'{volume_name} already holds a navidrome.db; leaving it alone')
+        elif legacy_db.is_file():
+            logger.info(f'copying legacy navidrome data from {legacy} into {volume_name}')
+            self._copy_into_volume(volume_name, legacy, username)
+            copied = True
+        else:
+            logger.warning(
+                f'no navidrome.db at {legacy_db} and none in {volume_name}: this user will come up '
+                f'with an empty library. Expected only for a user provisioned straight onto a volume.'
+            )
+
+        # Re-render navidrome.toml every time. It predates some containers, has no
+        # per-user values to go stale, and keeping it in lockstep with the template
+        # avoids a second migration path later -- same reasoning as the beets
+        # automatch overlay.
+        self._write_navidrome_config(username)
+
+        foreign_project = self._clear_foreign_compose_container(project_name)
+        content = self._compose.render_navidrome(
+            username,
+            project_name,
+            user['subsonic_port'],
+            metrics_path=self._config['containers']['subsonic'].get('metrics_path', ''),
+        )
+        compose_path = self._compose.write_compose_file(project_name, content)
+        DockerClient(
+            compose_files=[compose_path],
+            compose_project_name=project_name,
+        ).compose.up(detach=True, force_recreate=True)
+
+        return {
+            'username': username,
+            'volume': volume_name,
+            'volume_existed': volume_existed,
+            'legacy_data_dir': str(legacy),
+            'legacy_db_present': legacy_db.is_file(),
+            'copied_legacy_data': copied,
+            'already_migrated': already_migrated,
+            'was_running': was_running,
+            'removed_foreign_project': foreign_project,
+            'compose_file': str(compose_path),
+        }
+
+    def _volume_has_navidrome_db(self, volume_name: str) -> bool:
+        """
+        Whether this volume already holds a Navidrome database.
+
+        Uses a created-but-never-started container as a handle on the volume, the same
+        trick as _write_navidrome_config: `docker cp` out of a created container works,
+        so nothing is executed and no extra image is pulled.
+        """
+        image = self._config['host']['navidrome']['image']
+        helper = docker.container.create(image, volumes=[(volume_name, '/data')])
+        probe = self._compose.generated_dir() / 'probe'
+        try:
+            if probe.exists():
+                shutil.rmtree(probe, ignore_errors=True)
+            probe.mkdir(parents=True, exist_ok=True)
+            try:
+                docker.container.copy((helper, '/data/navidrome.db'), probe / 'navidrome.db')
+            except Exception:
+                return False
+            return (probe / 'navidrome.db').exists()
+        finally:
+            shutil.rmtree(probe, ignore_errors=True)
+            docker.container.remove(helper, force=True)
+
+    def _copy_into_volume(self, volume_name: str, source_dir: Path, username: str):
+        """
+        Copy a legacy on-host Navidrome data directory into the named volume.
+
+        `docker cp` of `<dir>/.` into an existing destination copies the directory's
+        *contents*, which is what is wanted: navidrome.db plus its -wal/-shm sidecars
+        and the cache/ tree.
+        """
+        image = self._config['host']['navidrome']['image']
+        helper = docker.container.create(image, volumes=[(volume_name, '/data')], name=f'navidrome-migrate-{username}')
+        try:
+            docker.container.copy((source_dir / '.'), (helper, '/data'))
+        finally:
+            docker.container.remove(helper, force=True)
+
+    def _render_beets_compose(self, username: str, project_name: str, port: int) -> Path:
+        """
+        Render this user's beets compose file, and make sure the one host-side file it
+        bind-mounts actually exists.
+
+        That file -- the s6 `run` override that stops `beet web` starting -- was the
+        one piece of the old subbox repo that could not simply move into the image,
+        because a bind mount needs a real path on the host. It was also never in any
+        repo: it is bind-mounted into every prod beets container and existed only as
+        an untracked file on each machine, so a rebuilt host would have silently
+        started a Flask server per user. pymix writes it now.
+        """
+        override_path = self._compose.write_beets_service_override()
+        config_dir = str(Path(self._config['containers']['beets']['config_file_dst'].format(user=username)).parent)
+        content = self._compose.render_beets(
+            username,
+            project_name,
+            port,
+            config_dir=config_dir,
+            service_override_path=override_path,
+        )
+        return self._compose.write_compose_file(project_name, content)
 
     async def migrate_beets_container(self, username: str) -> dict:
         """
@@ -264,16 +403,10 @@ class ServicesOrchestrator:
             with open(automatch_dst, 'w') as f:
                 f.write(beets_automatch_template.render())
 
-            self._env_file_handler.create_env_file(
-                Path(self._config['containers']['beets']['env_file']),
-                username,
-                user['beets_port'],
-                container_name,
-            )
+            compose_path = self._render_beets_compose(username, container_name, user['beets_port'])
             foreign_project = self._clear_foreign_compose_container(container_name)
             docker_client = DockerClient(
-                compose_files=[self._config['containers']['beets']['docker_compose_file']],
-                compose_env_file=self._config['containers']['beets']['env_file'],
+                compose_files=[compose_path],
                 compose_project_name=container_name,
             )
             # force_recreate + pull=always: this is the only step that actually
