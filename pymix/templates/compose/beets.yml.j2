@@ -1,0 +1,58 @@
+# RENDERED BY PYMIX -- do not hand-edit. See the note at the top of navidrome.yml.j2;
+# the same rules apply here, and every path below is in the HOST's terms.
+services:
+  beets:
+    image: {{ image }}
+    container_name: "{{ name }}"
+    restart: unless-stopped
+    privileged: false
+    user: "{{ uid }}:{{ gid }}"
+    environment:
+      - PUID={{ uid }}
+      - PGID={{ gid }}
+      - TZ={{ timezone }}
+{%- for key, value in env.items() %}
+      - {{ key }}={{ value }}
+{%- endfor %}
+    volumes:
+      # Overrides the base image's svc-beets s6 service so `beet web` never starts:
+      # pymix drives beets over `docker exec`, and a Flask server per user is more
+      # memory than the droplet has. The upstream image exposes no config option for
+      # this, only this bind-mount. https://github.com/linuxserver/docker-beets/issues/119
+      # pymix materialises the file itself (_write_beets_service_override) so there is
+      # nothing to check out on the host.
+      - {{ service_override_path }}:/etc/s6-overlay/s6-rc.d/svc-beets/run:ro
+      # Derived from containers.beets.config_file_dst, translated into host terms, so
+      # the directory pymix renders config.yaml into and the directory the container
+      # mounts as /config cannot drift apart. They had: dev wrote to private/{user}
+      # while the compose file mounted users/{user}.
+      - {{ config_dir }}:/config
+      - type: volume
+        source: private-music
+        target: /music
+        volume:
+          nocopy: true
+          subpath: {{ username }}
+      - type: volume
+        source: private-staged
+        target: /downloads
+        volume:
+          nocopy: true
+          subpath: {{ username }}
+    ports:
+      - "{{ port }}:8337"
+    networks:
+      - proxy
+
+volumes:
+  private-staged:
+    external: true
+    name: private-staged
+  private-music:
+    external: true
+    name: private-music
+
+networks:
+  proxy:
+    external: true
+    name: {{ network }}

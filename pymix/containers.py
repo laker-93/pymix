@@ -1,4 +1,3 @@
-from pathlib import Path
 import aiohttp
 from pyserato.builder import Builder
 
@@ -13,8 +12,8 @@ from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.controllers.serato_controller import SeratoController
 from pymix.factories.aiohttp_session_resource import init_aiohttp_session
 from pymix.factories.create_db_session import create_db_session
-from pymix.factories.rekordbox_xml_factory import RekordboxXMLFactory
-from pymix.handlers.env_file_handler import DockerEnvFileHandler
+from pymix.factories.rekordbox_xml_factory import EMPTY_COLLECTION_XML, RekordboxXMLFactory
+from pymix.handlers.compose_file_handler import ComposeFileHandler
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.handlers.rb_backup_file_handler import RBBackupFileHandler
 from pymix.handlers.serato_backup_file_handler import SeratoBackupFileHandler
@@ -62,10 +61,7 @@ class Container(containers.DeclarativeContainer):
 
     rekordbox_xml_factory = providers.Factory(
         RekordboxXMLFactory,
-        providers.Factory(
-            Path,
-            config.rekordbox.xml_path
-        )
+        providers.Object(EMPTY_COLLECTION_XML)
     )
 
     db = providers.Singleton(
@@ -81,8 +77,9 @@ class Container(containers.DeclarativeContainer):
         config.max_library_size
     )
 
-    env_file_handler = providers.Singleton(
-        DockerEnvFileHandler,
+    compose_file_handler = providers.Singleton(
+        ComposeFileHandler,
+        config.host,
     )
 
     # Singleton: the per-container write-lock dict it owns must be shared by
@@ -95,7 +92,7 @@ class Container(containers.DeclarativeContainer):
         ServicesOrchestrator,
         db_controller,
         navidrome_client,
-        env_file_handler,
+        compose_file_handler,
         config,
         beets_exec,
     )

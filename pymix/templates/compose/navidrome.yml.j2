@@ -1,0 +1,93 @@
+# RENDERED BY PYMIX -- do not hand-edit.
+#
+# ServicesOrchestrator renders this per user from
+# pymix/templates/compose/navidrome.yml.j2 and hands the result to `docker compose`.
+# Editing the rendered file has no lasting effect: the next create or migrate
+# overwrites it. Change the template or the `host:` block in
+# pymix/config/config.{dev,prod}.yaml instead.
+#
+# Every path below is written in the HOST's terms, not pymix's. Compose runs against
+# the host daemon over the mounted socket, so bind sources are resolved by the host.
+services:
+  navidrome:
+    image: {{ image }}
+    container_name: "{{ name }}"
+    restart: unless-stopped
+    # Deliberately no `user:`. It used to be pinned (1000:1000 on the droplet,
+    # 501:20 on the macs) only because /data was a bind mount into the host's
+    # subbox checkout, so the files had to be owned by the host account. /data is a
+    # named volume now, which Docker creates root-owned -- pinning a non-root uid
+    # here would leave Navidrome unable to write its own database, with nothing on
+    # the host to chown. The image's own default is root, and that is what the dev
+    # stack has always run.
+    ports:
+      - "{{ port }}:4533"
+    environment:
+      # Load-bearing, so they live in the template rather than the passthrough env
+      # map below -- a deployment cannot accidentally drop them.
+      #
+      # ND_MUSICFOLDER must stay in lockstep with containers.subsonic.
+      # music_path_base_to_remove: Navidrome reports `/music/<user>/<artist>/...`
+      # and pymix strips `/music` back off. They disagreed once and every exported
+      # Rekordbox Location gained a duplicated path segment (#141).
+      ND_MUSICFOLDER: "/music/{{ username }}"
+      # pymix maps a Subsonic track back to its file by the path Navidrome reports.
+      ND_SUBSONIC_DEFAULTREPORTREALPATH: "true"
+{%- if prometheus %}
+      ND_PROMETHEUS_ENABLED: "true"
+      ND_PROMETHEUS_METRICSPATH: "{{ metrics_path }}"
+{%- endif %}
+{%- if base_url %}
+      ND_BASEURL: "{{ base_url }}"
+{%- endif %}
+{%- for key, value in env.items() %}
+      {{ key }}: "{{ value }}"
+{%- endfor %}
+    volumes:
+      # NOTE: no ND_DATAFOLDER / ND_CONFIGFILE above, and no host bind here. The
+      # official image already ships ND_DATAFOLDER=/data and
+      # ND_CONFIGFILE=/data/navidrome.toml, so a named volume mounted at /data gets
+      # both the DB and the config pymix injects (_write_navidrome_config).
+      #
+      # Setting ND_CONFIGFILE to a path that does not exist is NOT an error in
+      # Navidrome -- conf.getConfigFile() os.Stat()s it and silently falls back to
+      # searching the working directory, so a wrong path means Navidrome boots with
+      # default config and no complaint. That silently drops the Tags.subboxid
+      # aliases the whole platform's track identity depends on. Leave these alone.
+      - "navidrome-data:/data"
+      - "private-music:/music:ro"
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network={{ network }}"
+{%- if base_url %}
+      - "traefik.http.routers.{{ name }}.rule=Host(`{{ domain }}`) || PathPrefix(`{{ base_url }}`)"
+{%- else %}
+      - "traefik.http.routers.{{ name }}.rule=Host(`{{ name }}.{{ domain }}`)"
+{%- endif %}
+      - "traefik.http.services.{{ name }}.loadbalancer.server.port=4533"
+{%- if cert_resolver %}
+      - "traefik.http.routers.{{ name }}.entrypoints=websecure"
+      - "traefik.http.routers.{{ name }}.tls.certresolver={{ cert_resolver }}"
+{%- else %}
+      - "traefik.http.routers.{{ name }}.tls=true"
+{%- endif %}
+      - "traefik.http.routers.{{ name }}.middlewares={{ cors_middleware }}"
+      - "traefik.http.middlewares.{{ cors_middleware }}.headers.accesscontrolallowmethods=*"
+      - "traefik.http.middlewares.{{ cors_middleware }}.headers.accesscontrolalloworiginlist=*"
+      - "traefik.http.middlewares.{{ cors_middleware }}.headers.accesscontrolallowheaders=*"
+      - "traefik.http.middlewares.{{ cors_middleware }}.headers.accesscontrolmaxage=100"
+      - "traefik.http.middlewares.{{ cors_middleware }}.headers.addvaryheader=true"
+
+volumes:
+  navidrome-data:
+    name: "{{ data_volume }}"
+  private-music:
+    external: true
+    name: private-music
+
+networks:
+  proxy:
+    external: true
+    name: {{ network }}

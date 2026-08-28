@@ -77,6 +77,34 @@ async def migrate_beets(
         raise HTTPException(status_code=404, detail=f"no such user: {username}")
 
 
+@router.post("/navidrome/{username}/migrate", dependencies=[Depends(require_admin_token)])
+@inject
+async def migrate_navidrome(
+        username: str,
+        legacy_data_dir: str = None,
+        services_orchestrator: ServicesOrchestrator = Depends(Provide[Container.services_orchestrator]),
+) -> dict:
+    """Move this user's Navidrome onto the `navidrome-data-{username}` volume and
+    recreate their container from pymix's rendered compose file. Explicit, per-user,
+    safe to re-run — a volume that already holds a navidrome.db is never overwritten.
+
+    This is the one-way step out of the old per-host bind mount. The database carries
+    the user's Navidrome account, playlists, stars and play counts, none of which can
+    be rebuilt from the files on disk, so run it for one user and check them before
+    running it for the rest.
+
+    `legacy_data_dir` overrides where the old data is read from (as pymix sees it, i.e.
+    under its own mount); it defaults to `<mount>/users/<username>/navidrome/data`.
+    """
+    logger.info(f"admin: navidrome migration requested for {username}")
+    try:
+        return await services_orchestrator.migrate_navidrome_container(username, legacy_data_dir)
+    except ValueError as ex:
+        raise HTTPException(status_code=404, detail=str(ex))
+    except AssertionError:
+        raise HTTPException(status_code=404, detail=f"no such user: {username}")
+
+
 @router.get("/memory", dependencies=[Depends(require_admin_token)])
 async def memory_snapshot(objects: bool = False, raw_xml: bool = False) -> dict:
     """Read-only allocator-level memory diagnosis for this process.
