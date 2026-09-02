@@ -37,15 +37,22 @@ def library(tmp_path):
     return root
 
 
-def add_library_track(library: Path, relative: str) -> Path:
-    """Put a real, taggable mp3 where the orchestrator will look for it."""
+def add_library_track(library: Path, relative: str, source: Path | None = None) -> Path:
+    """Put a real, taggable file where the orchestrator will look for it.
+
+    The container follows the name unless `source` overrides it, which is how the
+    "extension lies about the bytes" case is built.
+    """
     dest = library / relative
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(FIXTURE_MP3, dest)
+    shutil.copy(source or FIXTURES[dest.suffix.lower()], dest)
     return dest
 
 
-FIXTURE_MP3 = Path(__file__).parent.parent / 'fixtures' / 'audio' / 'tagged.mp3'
+FIXTURE_DIR = Path(__file__).parent.parent / 'fixtures' / 'audio'
+FIXTURE_MP3 = FIXTURE_DIR / 'tagged.mp3'
+FIXTURE_FLAC = FIXTURE_DIR / 'tagged.flac'
+FIXTURES = {'.mp3': FIXTURE_MP3, '.flac': FIXTURE_FLAC}
 
 
 def write_crate_zip(tmp_path: Path, root: Crate) -> Path:
@@ -396,3 +403,106 @@ def test_an_empty_client_cue_list_is_not_the_same_as_sending_none(
 
     assert playlists[0].tracks[0].client_cues == []
     orchestrator._mp3_encoder.read_cues.assert_not_called()
+
+
+def test_a_non_mp3_track_imports_without_cues_rather_than_failing_the_import(
+    orchestrator, tmp_path, library
+):
+    """
+    laker-93/pymix#145, and the reason this file exists at all.
+
+    Serato keeps its cues in a FLAC's Vorbis comments and a WAV's ID3 chunk, but
+    pyserato only ships an MP3 encoder, so reading the server's copy of a FLAC as
+    an MP3 raised `HeaderNotFoundError: can't sync to MPEG frame` -- uncaught,
+    out of a background task, killing the whole job.
+
+    It landed at the worst possible moment: *after* every track had uploaded and
+    imported into beets, and *before* one playlist was built. The user was left
+    with their whole library in place, no playlists at all, and an "Import Failed"
+    screen advising them to upload it all again.
+
+    The real encoder is deliberately not mocked here -- a mock is exactly what
+    would have let this through.
+    """
+    add_library_track(library, 'Artist/Album/known.mp3')
+    add_library_track(library, 'Artist/Album/lossless.flac')
+    beets_returns(orchestrator, {
+        'sid-1': 'Artist/Album/known.mp3',
+        'sid-2': 'Artist/Album/lossless.flac',
+    })
+
+    crate = Crate('House')
+    crate.add_track(Track.from_path('/Users/dj/Music/known.mp3'))
+    crate.add_track(Track.from_path('/Users/dj/Music/lossless.flac'))
+    zip_path = write_crate_zip(tmp_path, crate)
+
+    playlists, report = orchestrator.get_subbox_playlists_from_crates(
+        USER, zip_path, manifest(
+            ('/Users/dj/Music/known.mp3', 'sid-1'),
+            ('/Users/dj/Music/lossless.flac', 'sid-2'),
+        )
+    )
+
+    assert report.matched == 2
+    assert report.skipped == []
+    assert report.warning() is None
+    assert len(playlists[0].tracks) == 2
+
+    flac = next(t for t in playlists[0].tracks if t.path.suffix == '.flac')
+    assert flac.subbox_id == 'sid-2'
+    # No cues, because subbox cannot read them off this container yet -- but the
+    # track is in the playlist, which is the whole point.
+    assert flac.serato_hot_cues is None
+
+
+def test_a_file_whose_extension_lies_costs_that_track_and_not_the_import(
+    orchestrator, tmp_path, library
+):
+    """
+    The same failure one line earlier: music_tag reads the container, not the
+    name, so a `.mp3` holding FLAC bytes raises out of the tag load before the cue
+    read is even reached. Skipped with a reason, like every other track subbox
+    cannot place.
+    """
+    add_library_track(library, 'Artist/Album/known.mp3')
+    add_library_track(library, 'Artist/Album/liar.mp3', source=FIXTURE_FLAC)
+    beets_returns(orchestrator, {
+        'sid-1': 'Artist/Album/known.mp3',
+        'sid-2': 'Artist/Album/liar.mp3',
+    })
+
+    crate = Crate('House')
+    crate.add_track(Track.from_path('/Users/dj/Music/known.mp3'))
+    crate.add_track(Track.from_path('/Users/dj/Music/liar.mp3'))
+    zip_path = write_crate_zip(tmp_path, crate)
+
+    playlists, report = orchestrator.get_subbox_playlists_from_crates(
+        USER, zip_path, manifest(
+            ('/Users/dj/Music/known.mp3', 'sid-1'),
+            ('/Users/dj/Music/liar.mp3', 'sid-2'),
+        )
+    )
+
+    assert report.matched == 1
+    assert [s.crate_path for s in report.skipped] == ['/Users/dj/Music/liar.mp3']
+    assert report.skipped[0].reason == 'the file could not be read'
+    assert len(playlists[0].tracks) == 1
+
+
+def test_an_mp3_serato_has_never_analysed_imports_without_cues(
+    orchestrator, tmp_path, library
+):
+    """No Markers2 frame at all. The pre-existing KeyError path, kept honest."""
+    add_library_track(library, 'Artist/Album/known.mp3')
+    beets_returns(orchestrator, {'sid-1': 'Artist/Album/known.mp3'})
+
+    crate = Crate('House')
+    crate.add_track(Track.from_path('/Users/dj/Music/known.mp3'))
+    zip_path = write_crate_zip(tmp_path, crate)
+
+    playlists, report = orchestrator.get_subbox_playlists_from_crates(
+        USER, zip_path, manifest(('/Users/dj/Music/known.mp3', 'sid-1'))
+    )
+
+    assert report.matched == 1
+    assert playlists[0].tracks[0].serato_hot_cues is None
