@@ -41,6 +41,17 @@ COPY ./alembic.ini ./alembic.ini
 COPY ./pymix ./pymix
 
 # ---------- Non-root user ----------
+# The local dev compose overrides `user:` to the host UID (e.g. 501:20) so
+# bind-mounted volumes come out host-owned -- that UID has no /etc/passwd
+# entry in the container, so $HOME defaults to "/". Any code that touches
+# beets' global config (e.g. rekordbox_xml_controller._tag_duplicate_paths's
+# in-process `Item.write()`) makes confuse try to `os.makedirs('/.config')`
+# and crashes with PermissionError, silently failing a whole watch-dir/
+# rekordbox import the moment it contains even one duplicate track (laker-93/pymix#147).
+# BEETSDIR pins beets' config dir to a location that's pre-created and
+# world-writable, so this resolves cleanly under *any* runtime UID.
+RUN mkdir -p /tmp/pymix-beetsdir && chmod 1777 /tmp/pymix-beetsdir
+ENV BEETSDIR=/tmp/pymix-beetsdir
 RUN useradd -u 1000 -m deploy
 USER deploy
 
