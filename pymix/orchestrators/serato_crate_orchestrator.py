@@ -7,6 +7,7 @@ import music_tag
 from pyserato.builder import Builder
 from pyserato.encoders.v2_mp3_encoder import V2Mp3Encoder
 from pyserato.model.crate import Crate
+from pyserato.model.hot_cue import HotCue
 
 from pymix.controllers.db_controller import DbController
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
@@ -22,6 +23,13 @@ logger = logging.getLogger(__name__)
 
 
 class SeratoCrateOrchestrator:
+    # The formats subbox can read Serato's cues out of on the server. Serato
+    # itself stores Markers2 in FLAC (a base64'd Vorbis comment), WAV and AIFF
+    # (an ID3 chunk, byte-identical to the MP3 GEOB frame) and M4A (a freeform
+    # atom) as well, but pyserato only ships an MP3 encoder, so for anything else
+    # the server has no reading to offer -- laker-93/pyserato#12.
+    _CUE_READABLE_SUFFIXES = frozenset({'.mp3'})
+
     def __init__(
         self,
         crate_builder: Builder,
@@ -70,6 +78,43 @@ class SeratoCrateOrchestrator:
 
         return None
 
+    def _read_cues_from_library_copy(self, path: Path, song) -> Optional[List[HotCue]]:
+        """
+        The cues on the server's own copy of the file, or None if it has none to give.
+
+        Only reached when the client sent no cues for this crate entry, which is
+        also how "this client cannot read cues off this format" arrives -- the
+        client omits the field rather than sending an empty list, because an empty
+        list means "read them, there were none" and would clear what subbox holds.
+
+        Never fatal. A track whose cues subbox cannot read still belongs in the
+        playlist, and this is the line that used to take the whole import down: one
+        FLAC anywhere in the crate tree raised HeaderNotFoundError out of a
+        background task, *after* every track had already uploaded and *before* a
+        single playlist was built, so the user was left with their whole library
+        imported, no playlists, and an "Import Failed" screen telling them to
+        upload again (#145).
+        """
+        if path.suffix.lower() not in self._CUE_READABLE_SUFFIXES:
+            # Not a failure and not worth a warning: most of a real library is
+            # formats we cannot read cues from, and they import fine without them.
+            logger.debug('no serato cue reader for %s; importing it without cues', path)
+            return None
+        try:
+            return self._mp3_encoder.read_cues(song)
+        except KeyError:
+            # An MP3 Serato has never analysed: no Markers2 frame at all.
+            return None
+        except Exception:
+            # A .mp3 that is not one, a truncated file, or a Markers2 blob this
+            # decoder does not understand. One unreadable track is not a reason to
+            # fail the import of every other one.
+            logger.warning(
+                'could not read serato cues from %s; importing it without them',
+                path, exc_info=True,
+            )
+            return None
+
     def _build_subbox_playlists(
         self,
         user: dict,
@@ -114,7 +159,21 @@ class SeratoCrateOrchestrator:
                     )
                     continue
 
-                tags = music_tag.load_file(p)
+                try:
+                    tags = music_tag.load_file(p)
+                except Exception:
+                    # In the library, but not parseable at all: a truncated upload,
+                    # or an extension that lies about the container it holds. One
+                    # such file costs the user that track, not the import (#145).
+                    logger.warning(
+                        'could not read tags from %s for crate entry %s; skipping it',
+                        p, crate_path, exc_info=True,
+                    )
+                    report.skipped.append(
+                        SkippedCrateTrack(crate_path, 'the file could not be read')
+                    )
+                    continue
+
                 song.path = p
                 # The client's cues win when it sent any, and the server's copy of
                 # the file is not even read then. The two are not equivalent: the
@@ -124,10 +183,7 @@ class SeratoCrateOrchestrator:
                 # user is actually cueing.
                 cues = None
                 if identity.cues is None:
-                    try:
-                        cues = self._mp3_encoder.read_cues(song)
-                    except KeyError:
-                        cues = None
+                    cues = self._read_cues_from_library_copy(p, song)
 
                 rating = tags.get('composer').value.count('⭐')
                 report.matched += 1
