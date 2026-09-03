@@ -125,6 +125,27 @@ class RekordboxXMLOrchestrator:
             cue_data = lib_entry["cuedata"]
             return cue_data
 
+    @staticmethod
+    def _resolve_bpm(cue_data: Optional[Dict], track: SubBoxTrack) -> Optional[float]:
+        """
+        The tempo to write as AverageBpm, most precise source first.
+
+        cuedata holds the exact value a Rekordbox import was given; beets can only
+        hold the rounded integer, and SubBoxTrack.bpm comes back through that (via
+        the file tag and Navidrome's scan). Prefer the exact one where we have it.
+        """
+        raw = (cue_data or {}).get("bpm")
+        if raw is None:
+            raw = track.bpm
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            # never let an unparseable tempo take down an otherwise good export
+            logger.warning(f"unusable bpm {raw!r} for track {track.name}, writing no AverageBpm")
+            return None
+
     def add_track_to_rekordbox_playlist(self, rekordbox_xml: RekordboxXml, user_root: str, user: dict, track: SubBoxTrack, playlist: Node, force: bool = True):
         """
         Add track in playlist. Optionally force the track in to playlist even if the track is already in the XML.
@@ -172,6 +193,11 @@ class RekordboxXMLOrchestrator:
             playlist.add_track(rekordbox_track.TrackID)
             logger.info(f"track {rekordbox_track} from {track} added to {playlist}")
             rekordbox_track["TotalTime"] = duration
+            bpm = self._resolve_bpm(cue_data, track)
+            if bpm is not None:
+                # Rekordbox re-analyses a track with no AverageBpm from scratch, so
+                # an import at 128.5 used to come back with no tempo at all (#152).
+                rekordbox_track["AverageBpm"] = bpm
             if cue_data:
                 cues = cue_data.get("cues", [])
                 loops = cue_data.get("loops", [])

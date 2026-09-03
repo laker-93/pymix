@@ -848,11 +848,15 @@ class RekordboxXMLController:
             if subbox_id is None:
                 logger.warning(f"subbox id tag not present on {track_match.pymix_path}, skipping cue and loop import for this track.")
                 continue
-            if track.AverageBpm is None:
+            bpm = track.AverageBpm
+            if bpm is None:
                 logger.info(f"No AverageBpm in XML for track {track.Name}, skipping bpm update.")
             else:
-                # doesn't support float value for bpm so convert to int
-                bpms_by_subbox_id.append((subbox_id, int(track.AverageBpm)))
+                # beets' `bpm` is a fixed INTEGER field, so the rounded value is the
+                # best beets can hold -- round rather than truncate, so 128.9 is 129
+                # and not 128 (#152). The exact value is kept in cuedata below, which
+                # is what the Rekordbox export reads back.
+                bpms_by_subbox_id.append((subbox_id, round(bpm)))
             #logger.info(f"Mapped subbox_id={subbox_id} → beet_id={beet_id}")
             # todo create pydantic model for cues and attack to subbox track and pass this to the db controller
             self._db_controller.update_metadata(
@@ -876,6 +880,11 @@ class RekordboxXMLController:
                             # "color": cue.color todo
                         } for i, cue in enumerate(loops)
                     ],
+                    # The precise, un-rounded tempo. beets can only hold the integer
+                    # (above), so this is the only place the XML's own value survives;
+                    # the export reads it back from here (#152). `bpm` is already a
+                    # declared property of the cuedata schema in routers/track.py.
+                    **({"bpm": bpm} if bpm is not None else {}),
                 },
                 source_app="rekordbox",
                 change_type="upload"
