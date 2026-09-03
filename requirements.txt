@@ -22,6 +22,9 @@ pytest~=7.2.0
 # Test-only: fastapi.testclient.TestClient is httpx-backed.
 httpx~=0.27
 starlette~=0.37.2
+# The Prometheus exposition format and its process/platform collectors, for
+# GET /metrics (pymix/services/metrics.py). Apache-2.0, no transitive deps.
+prometheus-client~=0.20
 watchfiles~=0.21.0
 jsonschema
 pytaglib==2.1.0

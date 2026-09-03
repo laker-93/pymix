@@ -37,6 +37,7 @@ so the dependency would survive the rewrite.
 | uvicorn | BSD-3-Clause |
 | anyio | MIT |
 | aiohttp | Apache-2.0 |
+| prometheus-client | Apache-2.0 |
 | httpx, httplib2 | BSD-3-Clause |
 | sqlalchemy, alembic | MIT |
 | psycopg2-binary | LGPL-3.0-or-later (dynamically linked) |

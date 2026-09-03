@@ -26,10 +26,10 @@ Two variants exist for the `demo` account, which has no container stack of its o
 
 Both are hardcoded username checks, not a role system — `demo` is a one-off account.
 
-Two endpoints sit outside the session cookie entirely: `/admin/*` (a shared-secret
-header — see "Admin" below) and `POST /invite-request`, an unauthenticated write
-because its caller has no account by definition (see "Beta invites"). Neither is a
-precedent for anything else.
+Three endpoints sit outside the session cookie entirely: `/admin/*` (a shared-secret
+header — see "Admin" below), `GET /metrics` (a bearer token — see "Metrics"), and
+`POST /invite-request`, an unauthenticated write because its caller has no account by
+definition (see "Beta invites"). None is a precedent for anything else.
 
 All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 
@@ -45,6 +45,25 @@ All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 
 ## Maintenance — `routers/maintenance.py`
 | GET `/healthcheck` | Liveness. |
+
+## Metrics — `routers/metrics.py`
+| Method/Path | Purpose |
+|---|---|
+| GET `/metrics` | Prometheus exposition for pymix itself: HTTP request rate and latency by route template, users against `max_number_of_users`, signup tokens claimed/unclaimed, invite requests by status and DJ software, jobs by state, wishlist items by status, and the cgroup/allocator memory figures `mem_watch_loop` logs. Scraped by vmagent on the droplet — see `../subbox-workspace/docs/monitoring.md`. |
+
+Authenticated with `Authorization: Bearer $PYMIX_METRICS_TOKEN`, and **it has to be**:
+pymix is published at `pymix.sub-box.net`, so unlike the per-user Navidrome `/metrics`
+endpoints (only addressable on the Docker network) anything mounted here is reachable
+from the open internet. Its own env var rather than `PYMIX_ADMIN_TOKEN` because the
+holder is a scraper that needs to read one page, and `PYMIX_ADMIN_TOKEN` can recreate any
+user's containers. Unset token ⇒ 503, never "no auth required".
+
+Gauges are sampled at scrape time by a collector, not updated from business logic, so
+they cannot drift from the database; each sample is guarded individually so a failing
+one is omitted rather than 500ing the whole scrape. Request labels use the route
+*template* (`/beets/{username}/status`), and anything unmatched collapses to
+`<unmatched>` — otherwise every 404 from an internet scanner would mint a permanent
+series.
 
 ## Rekordbox import/export — `routers/rb_import_export.py`
 | Method/Path | Purpose |

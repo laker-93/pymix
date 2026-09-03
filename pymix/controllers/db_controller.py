@@ -5,6 +5,7 @@ import datetime
 from pathlib import Path
 from typing import Optional, Dict
 
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
@@ -13,7 +14,7 @@ from pymix.model.db_tables import (
     MetaHistoryRow, UserJobRow, JobRow, OriginalTrackMetaRow, UserTokenRow,
     PlaylistPathRow, WishlistRow, InviteRequestRow,
 )
-from pymix.model.invite_request import InviteRequestStatus
+from pymix.model.invite_request import DJ_SOFTWARE_OPTIONS, INVITE_REQUEST_STATUSES, InviteRequestStatus
 from pymix.model.original_track_meta import OriginalTracks
 from pymix.model.wishlist import MetadataSource, ResolveState, WishlistStatus
 from pymix.services.import_progress import ImportPhase
@@ -775,6 +776,90 @@ class DbController:
     def get_total_number_of_users(self) -> int:
         with self._session_factory() as session:
             return session.query(UserRow).count()
+
+    # --- Metrics support -------------------------------------------------------
+    #
+    # One GROUP BY per table rather than a query per label value: these run on every
+    # Prometheus scrape, so they have to stay cheap and constant in the number of
+    # round trips. They deliberately return raw counts and no derived state -- deciding
+    # what is alarming is the alert rule's job, not the database's.
+
+    def count_signup_tokens(self) -> dict[str, int]:
+        """Signup tokens split into claimed and unclaimed.
+
+        `unclaimed` is how many invites could still be redeemed right now. Read it
+        together with `pymix_users_total` against the cap: minting more invites than
+        there are free slots is how a beta oversells itself.
+        """
+        with self._session_factory() as session:
+            unclaimed = session.query(UserTokenRow).filter(UserTokenRow.user_id == '').count()
+            total = session.query(UserTokenRow).count()
+            return {'unclaimed': unclaimed, 'claimed': total - unclaimed}
+
+    def count_invite_requests_by_status(self) -> dict[str, int]:
+        """Beta-invite requests by fulfilment status.
+
+        `new` is the unworked queue. Fulfilment is a human reading the table, so
+        without this the only trace of a signup is a log line -- which is exactly how
+        the funnel came to have no operational visibility at all.
+        """
+        with self._session_factory() as session:
+            rows = (
+                session.query(InviteRequestRow.status, func.count(InviteRequestRow.id))
+                .group_by(InviteRequestRow.status)
+                .all()
+            )
+            # Seed every known status so a series exists at zero from the first scrape.
+            # A counter that only appears once it is non-zero cannot be alerted on, and
+            # reads as a gap in the graph rather than as "none yet".
+            counts = {status: 0 for status in INVITE_REQUEST_STATUSES}
+            counts.update({status: count for status, count in rows})
+            return counts
+
+    def count_invite_requests_by_dj_software(self) -> dict[str, int]:
+        """Beta-invite requests by the software the requester DJs on -- what the list
+        is actually made of, and so which import path the next bug report will be
+        about."""
+        with self._session_factory() as session:
+            rows = (
+                session.query(InviteRequestRow.dj_software, func.count(InviteRequestRow.id))
+                .group_by(InviteRequestRow.dj_software)
+                .all()
+            )
+            counts = {software: 0 for software in DJ_SOFTWARE_OPTIONS}
+            counts.update({software: count for software, count in rows})
+            return counts
+
+    def count_jobs_by_state(self) -> dict[str, int]:
+        """Import/export jobs as running, succeeded or failed.
+
+        `in_progress` is the one that matters live: a job that never leaves it is a
+        stuck import, which is invisible to the client (it just keeps polling) and has
+        no other signal.
+        """
+        with self._session_factory() as session:
+            in_progress = session.query(JobRow).filter(JobRow.in_progress.is_(True)).count()
+            succeeded = session.query(JobRow).filter(
+                JobRow.in_progress.is_(False), JobRow.result.is_(True)
+            ).count()
+            failed = session.query(JobRow).filter(
+                JobRow.in_progress.is_(False), JobRow.result.is_(False)
+            ).count()
+            return {'in_progress': in_progress, 'succeeded': succeeded, 'failed': failed}
+
+    def count_wishlist_items_by_status(self) -> dict[str, int]:
+        """Wishlist items by status -- the backlog the Soulseek downloader works
+        through, and where a stalled reconcile loop shows up as a status that stops
+        moving."""
+        with self._session_factory() as session:
+            rows = (
+                session.query(WishlistRow.status, func.count(WishlistRow.id))
+                .group_by(WishlistRow.status)
+                .all()
+            )
+            counts = {status.value: 0 for status in WishlistStatus}
+            counts.update({status: count for status, count in rows})
+            return counts
 
     def user_library_size_exceeded(self, username: str, size_import: int) -> tuple[bool, int, int]:
         total_size = 0
