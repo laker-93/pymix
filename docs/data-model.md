@@ -18,7 +18,7 @@
 |---|---|---|---|
 | `user_table` | `UserRow` | username (unique), password, email, user_id (uuid), beets_port, subsonic_port, max_library_size | One row per user. Ports allocated via `utils/get_available_port`. |
 | `session_table` | `SessionRow` | session_id (uuid), user_id | One active session per user (enforced in code). |
-| `user_token_table` | `UserTokenRow` | token, user_id | Signup tokens; `user_id=''` until claimed at create. |
+| `user_token_table` | `UserTokenRow` | token, user_id | Signup tokens; `user_id=''` until claimed at create. **Single use** — `create_user` claims the row by filtering on `user_id == ''`, so a token that already minted an account is dead. `unclaim_token` puts it back if the create then fails. |
 | `subbox_beets_map_table` | `SubboxBeetsMapRow` | user_id, subbox_id, beet_id | Maps the cross-system `subbox_id` to that user's beets track id. Presence here = track is in the user's library. |
 | `library_table` | `LibraryRow` | user_id, subbox_id, cuedata (JSON), source_app, updated_at, version | Latest cue/loop metadata per track, versioned. |
 | `meta_history_table` | `MetaHistoryRow` | user_id, subbox_id, version, cuedata, source_app, change_type, changed_at | Append-only history of every metadata change. |

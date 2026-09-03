@@ -10,7 +10,7 @@ from starlette.responses import JSONResponse
 
 from pymix.containers import Container
 from pymix.orchestrators.services_orchestrator import ServicesOrchestrator
-from pymix.controllers.db_controller import DbController, InvalidCredentialsError
+from pymix.controllers.db_controller import DbController, InvalidCredentialsError, InvalidTokenError
 from pymix.routers.auth import require_username
 
 router = APIRouter()
@@ -45,12 +45,27 @@ async def create_user(
     session_id = ""
     try:
         session_id = await services_orchestrator.create(username, password, email, request.token)
+    except InvalidTokenError as ex:
+        # A client error, not a server one: the caller supplied a token that does not
+        # exist or that somebody has already signed up with. Logged without a stack
+        # trace, and answered with the exception's own message rather than `repr(ex)` --
+        # this is the one create failure a stranger can reach, so it must not echo
+        # internal detail back. It stays a 500 because that is the only failure status
+        # the client's ts-rest contract declares for this route; see the PR for the
+        # follow-up that makes it the 403 it should be, in lockstep with subbox-app.
+        logger.warning(f'refused to create user {username}: {ex}')
+        reason = str(ex)
+        success = False
     except Exception as ex:
         logger.error(f'error occurred creating services for user', exc_info=True)
         reason = repr(ex)
         success = False
     if session_id is None:
+        # The user cap was hit, so no account exists. This used to leave `success` True
+        # and answer 200 with the reason in the body, i.e. report a signup that never
+        # happened as a success -- the cap is 10, so a beta reaches it for real.
         reason = "max number of users reached"
+        success = False
     response = JSONResponse(content=reason, status_code=HTTPStatus.OK if success else HTTPStatus.INTERNAL_SERVER_ERROR)
     if success and session_id:
         logger.info(f'setting cookie to {session_id}')

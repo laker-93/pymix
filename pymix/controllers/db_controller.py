@@ -26,6 +26,16 @@ class InvalidCredentialsError(Exception):
     client error with 401 instead of reporting it as a 500."""
 
 
+class InvalidTokenError(Exception):
+    """Raised by ``create_user`` when a signup token cannot be claimed — it does not
+    exist, or somebody has already used it to create an account.
+
+    A distinct type because the caller must not treat it like a failed creation:
+    ``ServicesOrchestrator.create``'s rollback path calls ``unclaim_token``, and running
+    that for an *already-claimed* token would release the legitimate owner's token to
+    the next caller. See ``create_user`` for why the claim is the check."""
+
+
 def _has_source_url(youtube_url, bandcamp_url, soundcloud_url) -> bool:
     """Whether an item carries a source URL, and so is identified by that link rather than
     by its artist/title free text. The two ``_derive_*`` helpers below must agree on this,
@@ -629,8 +639,30 @@ class DbController:
             subsonic_port = get_available_port()
             user_id = uuid.uuid4().hex
 
-            # Update the user_token table with the user_id
-            token_row = session.query(UserTokenRow).filter(UserTokenRow.token == token).one()
+            # Claim the signup token, and let the claim *be* the check.
+            #
+            # This used to match on the token alone and overwrite whatever `user_id` it
+            # already held, which made every invite infinitely reusable: one leaked link
+            # could mint accounts until `max_number_of_users` ran out, silently orphaning
+            # each previous holder's row from its token. `is_valid_token` (behind
+            # GET /user/is_valid_token) has always had the right predicate, but it is
+            # only a pre-flight check the signup form makes — nothing forced the create
+            # itself to honour it.
+            #
+            # Filtering on `user_id == ''` here makes the claim atomic: the row is
+            # selected and written in one transaction, so the check cannot be true when
+            # it is made and false when it is used. FOR UPDATE takes a row lock so two
+            # concurrent creates with the same token serialise and the loser sees the
+            # claimed row (SQLAlchemy's SQLite dialect drops the clause, which is fine —
+            # the tests run one at a time; prod is Postgres, where it is load-bearing).
+            token_row = session.query(UserTokenRow).filter(
+                UserTokenRow.token == token,
+                UserTokenRow.user_id == '',
+            ).with_for_update().first()
+            if token_row is None:
+                raise InvalidTokenError(
+                    'signup token is not valid or has already been used'
+                )
             token_row.user_id = user_id
 
             session.add(UserRow(
