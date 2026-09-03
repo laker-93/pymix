@@ -26,10 +26,10 @@ Two variants exist for the `demo` account, which has no container stack of its o
 
 Both are hardcoded username checks, not a role system — `demo` is a one-off account.
 
-Two endpoints sit outside the session cookie entirely: `/admin/*` (a shared-secret
-header — see "Admin" below) and `POST /invite-request`, an unauthenticated write
-because its caller has no account by definition (see "Beta invites"). Neither is a
-precedent for anything else.
+Three endpoints sit outside the session cookie entirely: `/admin/*` (a shared-secret
+header — see "Admin" below), `GET /metrics` (a bearer token — see "Metrics"), and
+`POST /invite-request`, an unauthenticated write because its caller has no account by
+definition (see "Beta invites"). None is a precedent for anything else.
 
 All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 
@@ -45,6 +45,51 @@ All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 
 ## Maintenance — `routers/maintenance.py`
 | GET `/healthcheck` | Liveness. |
+
+## Metrics — `routers/metrics.py`
+| Method/Path | Purpose |
+|---|---|
+| GET `/metrics` | Prometheus exposition for pymix itself. Scraped by vmagent on the droplet — see `../subbox-workspace/docs/monitoring.md`. |
+
+What it exposes, in five groups:
+
+- **Traffic** — request rate and latency by route template, plus
+  `pymix_http_requests_in_flight` (the saturation signal a duration histogram cannot
+  give: on 1 vCPU a slow route queues everything behind it).
+- **State**, sampled at scrape time — users against `max_number_of_users`, signup
+  tokens claimed/unclaimed, invite requests by status and DJ software, sessions, jobs
+  by state, wishlist items by status, and the cgroup/allocator memory figures
+  `mem_watch_loop` logs.
+- **The funnel**, counted as it happens — `pymix_invite_request_submissions_total`,
+  `pymix_user_signups_total`, `pymix_user_logins_total`. See "Beta invites" below for
+  why the submission counter exists at all.
+- **Where the time goes** — `pymix_job_duration_seconds` (import/export, creation to
+  completion), `pymix_dependency_request_duration_seconds` (outbound calls to a user's
+  Navidrome/Subsonic), `pymix_beets_exec_duration_seconds` and
+  `pymix_beets_write_lock_wait_seconds`. The request histogram is close to useless for
+  the expensive routes — an import returns a job id in milliseconds and then works for
+  ten minutes — so these time the work rather than the request.
+- **Engagement, per user** — `pymix_user_requests_total{username}` and
+  `pymix_user_last_request_timestamp_seconds{username}`, recorded in `require_user`.
+  One series per user is bounded by `max_number_of_users`; a deleted user's series
+  persists until restart. These are *API* activity only: playback goes straight from
+  the client to the user's Navidrome and never touches pymix, so listening shows up on
+  the Navidrome side of the dashboard, not here.
+
+Authenticated with `Authorization: Bearer $PYMIX_METRICS_TOKEN`, and **it has to be**:
+pymix is published at `pymix.sub-box.net`, so unlike the per-user Navidrome `/metrics`
+endpoints (only addressable on the Docker network) anything mounted here is reachable
+from the open internet. Its own env var rather than `PYMIX_ADMIN_TOKEN` because the
+holder is a scraper that needs to read one page, and `PYMIX_ADMIN_TOKEN` can recreate any
+user's containers. Unset token ⇒ 503, never "no auth required".
+
+Gauges are sampled at scrape time by a collector, not updated from business logic, so
+they cannot drift from the database; each sample is guarded individually so a failing
+one is omitted rather than 500ing the whole scrape. Counters are the opposite by
+necessity — they record events that leave no state to sample. Request labels use the
+route *template* (`/beets/{username}/status`), and anything unmatched collapses to
+`<unmatched>` — otherwise every 404 from an internet scanner would mint a permanent
+series.
 
 ## Rekordbox import/export — `routers/rb_import_export.py`
 | Method/Path | Purpose |
@@ -202,8 +247,32 @@ that costs, and how it's paid for:
   `body:` parameter, so bad input comes back as one flat 400 the client can render inline
   against the email field (and so the size cap runs before anything is parsed).
 - **No membership oracle.** The response is identical whether the address was new or
-  already on the list, and `create_invite_request` returns nothing, so the route can't
-  leak who has signed up.
+  already on the list, so the route can't leak who has signed up.
+  `create_invite_request` *does* return which branch of the upsert it took
+  (`'created'` / `'refreshed'`), but only to feed an aggregate counter — no address
+  reaches the metric, and the response body is unchanged.
+
+### Measuring the funnel
+
+Every submission is counted at the point it is decided, as
+`pymix_invite_request_submissions_total{outcome}` — `created`, `refreshed`, `invalid`,
+`too_large`, `rate_limited`, `error`. The reason it exists: the row count alone cannot
+show a drop, because a submission that never became a row leaves nothing behind to
+sample. `submissions - created` is exactly the set of people who pressed the button and
+are not in the table, and the largest term in it is normally `refreshed` — the upsert
+means a second submission is a success that adds no row.
+
+Two more, sampled: `pymix_invite_request_oldest_new_age_seconds` (how long somebody has
+been waiting on the manual fulfilment step; absent, not zero, when the queue is empty)
+and `pymix_invite_request_last_arrival_timestamp_seconds` (the funnel-went-quiet
+signal).
+
+**What pymix still cannot see** is a click that never became a request — a browser that
+blocked it, a network that dropped it, client-side validation that stopped it. The
+nearest proxy is the CORS preflight: browsers send `OPTIONS /invite-request` before the
+POST and both land in `pymix_http_requests_total`, so OPTIONS materially exceeding POST
+means the form reaches the server and the submission does not. Anything earlier than
+that needs telemetry in subbox-app.
 
 There is deliberately **no listing endpoint**. (`require_admin_token` has since arrived
 for `/admin/*`, so one is now *possible* — it still isn't worth it while fulfilment is a

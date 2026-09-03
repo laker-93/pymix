@@ -19,7 +19,8 @@ from pymix.handlers.mem_watch_handler import mem_watch_loop
 from pymix.handlers.sheet_sync_handler import sheet_sync_loop
 from pymix.handlers.wishlist_reconcile_handler import wishlist_reconcile_loop
 from pymix.handlers.wishlist_resolve_handler import wishlist_resolve_loop
-from pymix.routers import admin, auth, maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, wishlist, invite_request
+from pymix.routers import admin, auth, maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, wishlist, invite_request, metrics
+from pymix.services import metrics as metrics_service
 
 
 logger = logging.getLogger(__name__)
@@ -172,6 +173,21 @@ def create_app(container):
     app.include_router(wishlist.router)
     app.include_router(invite_request.router)
     app.include_router(admin.router)
+    app.include_router(metrics.router)
+
+    # Added last so it is the outermost middleware, and therefore times the whole
+    # request including everything CORS and the routers do inside it -- that is the
+    # latency a client actually experiences. Starlette applies middleware in reverse
+    # order of registration.
+    app.middleware("http")(metrics.metrics_middleware)
+
+    # Point the metrics registry at this app's database. Kept here rather than at
+    # import time because it needs the wired container.
+    metrics_service.register_state_collector(
+        container.db_controller(),
+        max_number_of_users=container.config()['max_number_of_users'],
+        environment=container.config().get('app_env', 'unknown'),
+    )
     return app
 
 
@@ -199,7 +215,7 @@ def create_container(environment="dev"):
     )
     container.wire(
         modules=[
-            auth, maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, wishlist, invite_request, admin, sys.modules[__name__]
+            auth, maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, wishlist, invite_request, admin, metrics, sys.modules[__name__]
         ]
     )
     return container

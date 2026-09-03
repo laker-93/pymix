@@ -5,6 +5,7 @@ import datetime
 from pathlib import Path
 from typing import Optional, Dict
 
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
@@ -13,9 +14,10 @@ from pymix.model.db_tables import (
     MetaHistoryRow, UserJobRow, JobRow, OriginalTrackMetaRow, UserTokenRow,
     PlaylistPathRow, WishlistRow, InviteRequestRow,
 )
-from pymix.model.invite_request import InviteRequestStatus
+from pymix.model.invite_request import DJ_SOFTWARE_OPTIONS, INVITE_REQUEST_STATUSES, InviteRequestStatus
 from pymix.model.original_track_meta import OriginalTracks
 from pymix.model.wishlist import MetadataSource, ResolveState, WishlistStatus
+from pymix.services import metrics
 from pymix.services.import_progress import ImportPhase
 from pymix.utils.get_available_port import get_available_port
 
@@ -483,6 +485,10 @@ class DbController:
         job_id = uuid.uuid4().hex
         self._add_user_job(user_id, job_id)
         self._add_import_job(job_id, number_of_tracks_to_import, total_n_imported_tracks)
+        # Timed from here rather than from the router, because this is the one place
+        # every import path goes through — the client's /beets/import, the Rekordbox
+        # and Serato importers, and the watch-directory handler.
+        metrics.job_started(job_id, 'import')
         return job_id
 
     def create_export_job(self, username: str, total_n_tracks: int) -> str:
@@ -491,6 +497,7 @@ class DbController:
         job_id = uuid.uuid4().hex
         self._add_user_job(user_id, job_id)
         self._add_export_job(job_id, total_n_tracks)
+        metrics.job_started(job_id, 'export')
         return job_id
 
     def get_job_by_id(self, username: str, job_id: str) -> dict:
@@ -581,6 +588,10 @@ class DbController:
             if result:
                 job.phase = ImportPhase.COMPLETE.value
             session.commit()
+
+        # After the commit, so a job is never counted as finished before it is. This
+        # runs on the import's worker thread; `job_finished` takes its own lock.
+        metrics.job_finished(job_id, result)
 
     def update_job_phase(self, job_id: str, phase: Optional[str], n_processed: int, n_total: int):
         """
@@ -775,6 +786,118 @@ class DbController:
     def get_total_number_of_users(self) -> int:
         with self._session_factory() as session:
             return session.query(UserRow).count()
+
+    # --- Metrics support -------------------------------------------------------
+    #
+    # One GROUP BY per table rather than a query per label value: these run on every
+    # Prometheus scrape, so they have to stay cheap and constant in the number of
+    # round trips. They deliberately return raw counts and no derived state -- deciding
+    # what is alarming is the alert rule's job, not the database's.
+
+    def count_signup_tokens(self) -> dict[str, int]:
+        """Signup tokens split into claimed and unclaimed.
+
+        `unclaimed` is how many invites could still be redeemed right now. Read it
+        together with `pymix_users_total` against the cap: minting more invites than
+        there are free slots is how a beta oversells itself.
+        """
+        with self._session_factory() as session:
+            unclaimed = session.query(UserTokenRow).filter(UserTokenRow.user_id == '').count()
+            total = session.query(UserTokenRow).count()
+            return {'unclaimed': unclaimed, 'claimed': total - unclaimed}
+
+    def count_invite_requests_by_status(self) -> dict[str, int]:
+        """Beta-invite requests by fulfilment status.
+
+        `new` is the unworked queue. Fulfilment is a human reading the table, so
+        without this the only trace of a signup is a log line -- which is exactly how
+        the funnel came to have no operational visibility at all.
+        """
+        with self._session_factory() as session:
+            rows = (
+                session.query(InviteRequestRow.status, func.count(InviteRequestRow.id))
+                .group_by(InviteRequestRow.status)
+                .all()
+            )
+            # Seed every known status so a series exists at zero from the first scrape.
+            # A counter that only appears once it is non-zero cannot be alerted on, and
+            # reads as a gap in the graph rather than as "none yet".
+            counts = {status: 0 for status in INVITE_REQUEST_STATUSES}
+            counts.update({status: count for status, count in rows})
+            return counts
+
+    def count_invite_requests_by_dj_software(self) -> dict[str, int]:
+        """Beta-invite requests by the software the requester DJs on -- what the list
+        is actually made of, and so which import path the next bug report will be
+        about."""
+        with self._session_factory() as session:
+            rows = (
+                session.query(InviteRequestRow.dj_software, func.count(InviteRequestRow.id))
+                .group_by(InviteRequestRow.dj_software)
+                .all()
+            )
+            counts = {software: 0 for software in DJ_SOFTWARE_OPTIONS}
+            counts.update({software: count for software, count in rows})
+            return counts
+
+    def count_sessions(self) -> int:
+        """Rows in session_table.
+
+        Nothing expires a session and login reuses an existing row, so this is closer
+        to "users who have ever logged in" than to concurrency. Kept anyway: against
+        `pymix_users_total` it is the share of created accounts that were ever
+        actually opened, which is the one thing an invite-conversion number needs.
+        """
+        with self._session_factory() as session:
+            return session.query(SessionRow).count()
+
+    def invite_request_timings(self) -> dict[str, Optional[float]]:
+        """When the oldest unworked request arrived, and when the last one did.
+
+        Two separate questions the status counts cannot answer. `oldest_new_created_at`
+        is how long somebody has been waiting on a human; `last_created_at` is whether
+        the form is still producing anything at all — which is how a broken submit
+        button is told apart from a quiet week.
+        """
+        with self._session_factory() as session:
+            oldest_new = (
+                session.query(func.min(InviteRequestRow.created_at))
+                .filter(InviteRequestRow.status == InviteRequestStatus.NEW.value)
+                .scalar()
+            )
+            last = session.query(func.max(InviteRequestRow.created_at)).scalar()
+            return {'oldest_new_created_at': oldest_new, 'last_created_at': last}
+
+    def count_jobs_by_state(self) -> dict[str, int]:
+        """Import/export jobs as running, succeeded or failed.
+
+        `in_progress` is the one that matters live: a job that never leaves it is a
+        stuck import, which is invisible to the client (it just keeps polling) and has
+        no other signal.
+        """
+        with self._session_factory() as session:
+            in_progress = session.query(JobRow).filter(JobRow.in_progress.is_(True)).count()
+            succeeded = session.query(JobRow).filter(
+                JobRow.in_progress.is_(False), JobRow.result.is_(True)
+            ).count()
+            failed = session.query(JobRow).filter(
+                JobRow.in_progress.is_(False), JobRow.result.is_(False)
+            ).count()
+            return {'in_progress': in_progress, 'succeeded': succeeded, 'failed': failed}
+
+    def count_wishlist_items_by_status(self) -> dict[str, int]:
+        """Wishlist items by status -- the backlog the Soulseek downloader works
+        through, and where a stalled reconcile loop shows up as a status that stops
+        moving."""
+        with self._session_factory() as session:
+            rows = (
+                session.query(WishlistRow.status, func.count(WishlistRow.id))
+                .group_by(WishlistRow.status)
+                .all()
+            )
+            counts = {status.value: 0 for status in WishlistStatus}
+            counts.update({status: count for status, count in rows})
+            return counts
 
     def user_library_size_exceeded(self, username: str, size_import: int) -> tuple[bool, int, int]:
         total_size = 0
@@ -1048,7 +1171,7 @@ class DbController:
             email: str,
             dj_software: str,
             dj_software_other: Optional[str] = None,
-    ) -> None:
+    ) -> str:
         """Record (or refresh) a beta-invite request.
 
         Upsert on the normalised email rather than insert: someone re-submitting the form
@@ -1057,8 +1180,12 @@ class DbController:
         ``updated_at`` in place. ``status`` is deliberately left alone, so re-submitting
         can't quietly reopen a request already worked as ``invited``/``declined``.
 
-        Returns nothing on purpose: the route must not leak whether the address was
-        already on the list (see ``routers/invite_request.py``).
+        Returns which of the two happened — ``'created'`` or ``'refreshed'`` — for
+        metrics only. This is not a leak of the thing the route must keep quiet about:
+        the route still answers an identical body either way, and the counter it feeds
+        is an aggregate with no address in it. The distinction has to be made *here*,
+        because after the commit the two are indistinguishable, and it is the single
+        largest reason the number of submissions and the number of rows disagree.
         """
         normalised_email = email.strip().lower()
         now = datetime.datetime.now().timestamp()
@@ -1074,7 +1201,7 @@ class DbController:
                 existing.updated_at = now
                 session.commit()
                 logger.info("Refreshed invite request for %s", normalised_email)
-                return
+                return 'refreshed'
 
             session.add(
                 InviteRequestRow(
@@ -1101,9 +1228,10 @@ class DbController:
                 row.updated_at = now
                 session.commit()
                 logger.info("Refreshed invite request for %s (raced insert)", normalised_email)
-                return
+                return 'refreshed'
 
             logger.info("Recorded invite request for %s (%s)", normalised_email, dj_software)
+            return 'created'
 
     def resolve_wishlist_item(self, wishlist_id: str, updates: dict) -> Optional[dict]:
         """Apply a resolve-loop update atomically, but only while the item is still
