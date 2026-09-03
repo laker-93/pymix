@@ -13,7 +13,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from pymix.clients.beets_exec import BeetsExec
 from pymix.clients.navidrome_client import NavidromeClient
-from pymix.controllers.db_controller import DbController
+from pymix.controllers.db_controller import DbController, InvalidTokenError
 from pymix.handlers.compose_file_handler import ComposeFileHandler
 from pymix.utils.tag_subbox_id import get_subbox_id
 
@@ -57,6 +57,7 @@ class ServicesOrchestrator:
             logger.error(f"exceeded max number of users {self._max_number_of_users}")
             return None
 
+        session_id = None
         try:
             session_id = self._db_controller.create_user(username, password, email, token)
             user = self._db_controller.get_user(username)
@@ -77,13 +78,38 @@ class ServicesOrchestrator:
             self._create_filebrowser_account(user)
             account_created = await self._attempt_to_create_account(user)
             assert account_created, 'failed to create navidrome account'
+        except InvalidTokenError:
+            # Deliberately ahead of the general handler so this never reaches the
+            # rollback below. An unclaimable token means nothing was built and there is
+            # nothing to undo -- and the rollback would call `unclaim_token`, which for a
+            # token somebody else has already claimed would release *their* invite to
+            # whoever just replayed it. Warning, not error: this is a rejected signup.
+            logger.warning(
+                f"refusing to create user {username}: signup token is not valid or has "
+                f"already been used"
+            )
+            raise
         except Exception as ex:
             logger.error(f"failed to create account for user {username} with error: {ex}")
-            self._db_controller.delete_user(username)
+            # Each step is guarded on its own. The rollback runs for failures at any
+            # point in the block above, including ones that happen before the user row
+            # exists (a duplicate username, say) -- and a rollback step that raises
+            # would replace the real reason with its own, which is how a clear
+            # "username already taken" turned into an opaque NoResultFound.
+            try:
+                self._db_controller.delete_user(username)
+            except Exception:
+                logger.warning(f"no user row to remove for {username} during rollback")
             if session_id:
                 logger.info(f"deleting session id {session_id}")
-                self._db_controller.delete_session(session_id)
-            self._db_controller.unclaim_token(token)
+                try:
+                    self._db_controller.delete_session(session_id)
+                except Exception:
+                    logger.warning(f"could not delete session {session_id} during rollback")
+            try:
+                self._db_controller.unclaim_token(token)
+            except Exception:
+                logger.warning(f"could not release signup token for {username} during rollback")
             raise
         return session_id
 

@@ -38,7 +38,7 @@ All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 |---|---|
 | POST `/user/create` | Create user + spin up their navidrome/beets/filebrowser containers (`ServicesOrchestrator.create`). Requires a valid signup `token`. Sets `session_id` cookie. |
 | POST `/user/login` | Create/return a session for username+password. Sets cookie. |
-| GET `/user/is_valid_token` | Check a signup token is valid (unused tokens gate registration). |
+| GET `/user/is_valid_token` | Check a signup token is valid (unused tokens gate registration). A pre-flight check for the signup form only — `/user/create` enforces single use itself, and does not trust that this was called. |
 | GET `/user/library_size` | Sum of bytes under `/private-music/{user}`. |
 | GET `/user/storage_check` | Whether an upload of `uploadSizeBytes` fits in quota; accepts Bearer or cookie. |
 | GET `/user/get_by_username`, GET `/user/get_by_session_id` | Lookup helpers. |
