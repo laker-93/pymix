@@ -13,13 +13,27 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from prometheus_client import generate_latest
+
 from pymix.containers import Container
 from pymix.routers import invite_request as invite_request_router
+from pymix.services import metrics
 
 
 @pytest.fixture
 def db_controller():
-    return mock.Mock()
+    controller = mock.Mock()
+    # The real controller returns which of the upsert's two branches it took, and the
+    # route counts that. A bare Mock would hand the counter a Mock object.
+    controller.create_invite_request.return_value = "created"
+    return controller
+
+
+def _submissions(outcome: str) -> float:
+    got = metrics.REGISTRY.get_sample_value(
+        "pymix_invite_request_submissions_total", {"outcome": outcome}
+    )
+    return 0.0 if got is None else got
 
 
 @pytest.fixture
@@ -32,6 +46,9 @@ def client(db_controller):
     app.include_router(invite_request_router.router)
 
     invite_request_router._recent_requests.clear()
+    metrics.invite_request_submissions_total.clear()
+    for outcome in metrics.INVITE_SUBMISSION_OUTCOMES:
+        metrics.invite_request_submissions_total.labels(outcome=outcome)
     try:
         yield TestClient(app)
     finally:
@@ -111,3 +128,73 @@ def test_response_is_identical_for_a_repeat_address(client):
 
     assert first.status_code == second.status_code == 200
     assert first.json() == second.json()
+
+
+# --- Funnel instrumentation --------------------------------------------------------
+#
+# The point of these: every one of the rejections above is a person who pressed the
+# button and did not end up in the table. Before this, all of them were indistinguishable
+# from never having visited — the route logged and moved on, and the only surviving
+# trace of the funnel was the row count, which by definition excludes them.
+
+def test_a_successful_submission_is_counted_as_created(client, db_controller):
+    client.post("/invite-request", json={"email": "dj@example.com", "dj_software": "serato"})
+
+    assert _submissions("created") == 1
+
+
+def test_a_repeat_address_is_counted_as_refreshed_not_created(client, db_controller):
+    """The response is deliberately identical either way (see the oracle test above),
+    so this counter is the only place the difference survives."""
+    db_controller.create_invite_request.return_value = "refreshed"
+
+    client.post("/invite-request", json={"email": "dj@example.com", "dj_software": "serato"})
+
+    assert _submissions("refreshed") == 1
+    assert _submissions("created") == 0
+
+
+def test_a_rejected_body_is_counted_as_invalid(client):
+    client.post("/invite-request", json={"email": "nope", "dj_software": "rekordbox"})
+    client.post("/invite-request", json={"dj_software": "rekordbox"})
+
+    assert _submissions("invalid") == 2
+    assert _submissions("created") == 0
+
+
+def test_an_oversized_body_is_counted_as_too_large(client):
+    client.post(
+        "/invite-request",
+        content=b"x" * (invite_request_router.MAX_BODY_BYTES + 1),
+        headers={"content-type": "application/json"},
+    )
+
+    assert _submissions("too_large") == 1
+
+
+def test_a_rate_limited_submission_is_counted(client):
+    body = {"email": "dj@example.com", "dj_software": "serato"}
+    for _ in range(invite_request_router.RATE_LIMIT_MAX_REQUESTS + 1):
+        client.post("/invite-request", json=body)
+
+    assert _submissions("rate_limited") == 1
+    assert _submissions("created") == invite_request_router.RATE_LIMIT_MAX_REQUESTS
+
+
+def test_a_failed_write_is_counted_and_still_500s(client, db_controller):
+    """Counted, not swallowed. A submission lost here is a person lost, so it has to be
+    the loudest outcome in the set -- but the caller still gets a real error."""
+    db_controller.create_invite_request.side_effect = RuntimeError("db gone")
+
+    with pytest.raises(RuntimeError):
+        client.post("/invite-request", json={"email": "dj@example.com", "dj_software": "serato"})
+
+    assert _submissions("error") == 1
+    assert _submissions("created") == 0
+
+
+def test_every_outcome_is_exposed_at_zero_before_anything_happens(client):
+    body = generate_latest(metrics.REGISTRY).decode()
+
+    for outcome in metrics.INVITE_SUBMISSION_OUTCOMES:
+        assert f'pymix_invite_request_submissions_total{{outcome="{outcome}"}}' in body

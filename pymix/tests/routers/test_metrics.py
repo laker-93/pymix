@@ -192,7 +192,9 @@ def test_a_failing_sample_does_not_fail_the_whole_scrape(client, db_controller):
     ):
         body = _scrape(client)
 
-    assert "pymix_jobs{" not in body
+    # Anchored to the start of a line: `pymix_jobs{` also appears mid-line in the
+    # HELP text of pymix_jobs_completed_total, which cross-references it.
+    assert "\npymix_jobs{" not in body
     # The rest of the scrape still came back.
     assert "pymix_users_total" in body
 
@@ -244,3 +246,21 @@ def test_the_scrape_itself_is_not_counted(client):
     body = _scrape(client)
 
     assert 'route="/metrics"' not in body
+
+
+def test_in_flight_returns_to_zero_after_a_request(client):
+    """A gauge that leaks on the error path is worse than no gauge: it climbs forever
+    and eventually reads as permanent saturation."""
+    client.get("/echo/alice")
+    client.get("/boom")
+
+    body = _scrape(client)
+    assert "pymix_http_requests_in_flight 0.0" in body
+
+
+def test_the_scrape_itself_is_not_counted_in_flight(client):
+    """The scrape is excluded from the request metrics, so it must not touch the gauge
+    either -- otherwise every scrape reports one request in flight: its own."""
+    body = _scrape(client)
+
+    assert "pymix_http_requests_in_flight 0.0" in body

@@ -81,11 +81,13 @@ async def metrics_middleware(request: Request, call_next):
 
     started_at = time.monotonic()
     status_code = 500
+    metrics_service.http_requests_in_flight.inc()
     try:
         response = await call_next(request)
         status_code = response.status_code
         return response
     finally:
+        metrics_service.http_requests_in_flight.dec()
         # Read after call_next: Starlette resolves the route during the call, so before
         # it `request.scope["route"]` is not set and every label would be "<unmatched>".
         route = metrics_service.route_label(request)

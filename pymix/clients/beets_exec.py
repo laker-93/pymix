@@ -1,9 +1,12 @@
 import logging
 import threading
+import time
 from contextlib import contextmanager
 from typing import Dict, Iterator, List, Union
 
 from python_on_whales import docker
+
+from pymix.services import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -47,9 +50,18 @@ class BeetsExec:
     @contextmanager
     def write_lock(self, container_name: str) -> Iterator[None]:
         """Serialize beets writes against `container_name`. Blocks until any
-        other writer for that same container finishes — no reject/retry."""
+        other writer for that same container finishes — no reject/retry.
+
+        The wait is measured because it is otherwise completely invisible: a user
+        whose import is queued behind their own watch-directory cycle sees a slow
+        import, while every other metric in the service says the work was fast. Time
+        spent here is contention, not work, and it is the one bottleneck that gets
+        worse purely because more people showed up.
+        """
         lock = self._lock_for(container_name)
+        waiting_since = time.monotonic()
         lock.acquire()
+        metrics.beets_write_lock_wait_seconds.observe(time.monotonic() - waiting_since)
         try:
             yield
         finally:
@@ -59,4 +71,22 @@ class BeetsExec:
         if isinstance(command, str):
             command = command.split()
         logger.info(f'running beets command {command} on container {container_name}')
-        return docker.execute(container_name, command, stream=stream)
+
+        if stream:
+            # Deliberately not timed. A streamed exec returns a generator immediately
+            # and the work happens as the caller consumes it, so anything measured
+            # here would be the setup cost and would report a ten-minute import as
+            # instantaneous — worse than no number at all. The streamed calls are the
+            # imports, and those are timed end-to-end by `pymix_job_duration_seconds`.
+            return docker.execute(container_name, command, stream=True)
+
+        started_at = time.monotonic()
+        ok = False
+        try:
+            result = docker.execute(container_name, command, stream=False)
+            ok = True
+            return result
+        finally:
+            metrics.observe_beets_exec(
+                metrics.beets_command_label(command), started_at, ok
+            )

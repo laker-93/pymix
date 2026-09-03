@@ -17,6 +17,7 @@ from pymix.model.db_tables import (
 from pymix.model.invite_request import DJ_SOFTWARE_OPTIONS, INVITE_REQUEST_STATUSES, InviteRequestStatus
 from pymix.model.original_track_meta import OriginalTracks
 from pymix.model.wishlist import MetadataSource, ResolveState, WishlistStatus
+from pymix.services import metrics
 from pymix.services.import_progress import ImportPhase
 from pymix.utils.get_available_port import get_available_port
 
@@ -484,6 +485,10 @@ class DbController:
         job_id = uuid.uuid4().hex
         self._add_user_job(user_id, job_id)
         self._add_import_job(job_id, number_of_tracks_to_import, total_n_imported_tracks)
+        # Timed from here rather than from the router, because this is the one place
+        # every import path goes through — the client's /beets/import, the Rekordbox
+        # and Serato importers, and the watch-directory handler.
+        metrics.job_started(job_id, 'import')
         return job_id
 
     def create_export_job(self, username: str, total_n_tracks: int) -> str:
@@ -492,6 +497,7 @@ class DbController:
         job_id = uuid.uuid4().hex
         self._add_user_job(user_id, job_id)
         self._add_export_job(job_id, total_n_tracks)
+        metrics.job_started(job_id, 'export')
         return job_id
 
     def get_job_by_id(self, username: str, job_id: str) -> dict:
@@ -582,6 +588,10 @@ class DbController:
             if result:
                 job.phase = ImportPhase.COMPLETE.value
             session.commit()
+
+        # After the commit, so a job is never counted as finished before it is. This
+        # runs on the import's worker thread; `job_finished` takes its own lock.
+        metrics.job_finished(job_id, result)
 
     def update_job_phase(self, job_id: str, phase: Optional[str], n_processed: int, n_total: int):
         """
@@ -829,6 +839,34 @@ class DbController:
             counts = {software: 0 for software in DJ_SOFTWARE_OPTIONS}
             counts.update({software: count for software, count in rows})
             return counts
+
+    def count_sessions(self) -> int:
+        """Rows in session_table.
+
+        Nothing expires a session and login reuses an existing row, so this is closer
+        to "users who have ever logged in" than to concurrency. Kept anyway: against
+        `pymix_users_total` it is the share of created accounts that were ever
+        actually opened, which is the one thing an invite-conversion number needs.
+        """
+        with self._session_factory() as session:
+            return session.query(SessionRow).count()
+
+    def invite_request_timings(self) -> dict[str, Optional[float]]:
+        """When the oldest unworked request arrived, and when the last one did.
+
+        Two separate questions the status counts cannot answer. `oldest_new_created_at`
+        is how long somebody has been waiting on a human; `last_created_at` is whether
+        the form is still producing anything at all — which is how a broken submit
+        button is told apart from a quiet week.
+        """
+        with self._session_factory() as session:
+            oldest_new = (
+                session.query(func.min(InviteRequestRow.created_at))
+                .filter(InviteRequestRow.status == InviteRequestStatus.NEW.value)
+                .scalar()
+            )
+            last = session.query(func.max(InviteRequestRow.created_at)).scalar()
+            return {'oldest_new_created_at': oldest_new, 'last_created_at': last}
 
     def count_jobs_by_state(self) -> dict[str, int]:
         """Import/export jobs as running, succeeded or failed.
@@ -1133,7 +1171,7 @@ class DbController:
             email: str,
             dj_software: str,
             dj_software_other: Optional[str] = None,
-    ) -> None:
+    ) -> str:
         """Record (or refresh) a beta-invite request.
 
         Upsert on the normalised email rather than insert: someone re-submitting the form
@@ -1142,8 +1180,12 @@ class DbController:
         ``updated_at`` in place. ``status`` is deliberately left alone, so re-submitting
         can't quietly reopen a request already worked as ``invited``/``declined``.
 
-        Returns nothing on purpose: the route must not leak whether the address was
-        already on the list (see ``routers/invite_request.py``).
+        Returns which of the two happened — ``'created'`` or ``'refreshed'`` — for
+        metrics only. This is not a leak of the thing the route must keep quiet about:
+        the route still answers an identical body either way, and the counter it feeds
+        is an aggregate with no address in it. The distinction has to be made *here*,
+        because after the commit the two are indistinguishable, and it is the single
+        largest reason the number of submissions and the number of rows disagree.
         """
         normalised_email = email.strip().lower()
         now = datetime.datetime.now().timestamp()
@@ -1159,7 +1201,7 @@ class DbController:
                 existing.updated_at = now
                 session.commit()
                 logger.info("Refreshed invite request for %s", normalised_email)
-                return
+                return 'refreshed'
 
             session.add(
                 InviteRequestRow(
@@ -1186,9 +1228,10 @@ class DbController:
                 row.updated_at = now
                 session.commit()
                 logger.info("Refreshed invite request for %s (raced insert)", normalised_email)
-                return
+                return 'refreshed'
 
             logger.info("Recorded invite request for %s (%s)", normalised_email, dj_software)
+            return 'created'
 
     def resolve_wishlist_item(self, wishlist_id: str, updates: dict) -> Optional[dict]:
         """Apply a resolve-loop update atomically, but only while the item is still

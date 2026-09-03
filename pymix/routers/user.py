@@ -12,6 +12,7 @@ from pymix.containers import Container
 from pymix.orchestrators.services_orchestrator import ServicesOrchestrator
 from pymix.controllers.db_controller import DbController, InvalidCredentialsError, InvalidTokenError
 from pymix.routers.auth import require_username
+from pymix.services import metrics
 
 router = APIRouter()
 
@@ -56,16 +57,27 @@ async def create_user(
         logger.warning(f'refused to create user {username}: {ex}')
         reason = str(ex)
         success = False
+        # `rejected`, not `error`: a deliberate refusal, not something breaking. Kept
+        # apart so a rise here reads as "invites are being replayed or mistyped"
+        # rather than as pymix failing, which is a different thing to go and look at.
+        metrics.observe_signup("rejected")
     except Exception as ex:
         logger.error(f'error occurred creating services for user', exc_info=True)
         reason = repr(ex)
         success = False
+        metrics.observe_signup("error")
     if session_id is None:
         # The user cap was hit, so no account exists. This used to leave `success` True
         # and answer 200 with the reason in the body, i.e. report a signup that never
         # happened as a success -- the cap is 10, so a beta reaches it for real.
         reason = "max number of users reached"
         success = False
+        # Also `rejected`: the cap working as designed. Separated from `error` so a
+        # rise reads as "the beta is full and people are still arriving" -- a decision
+        # to make, not a fault to fix.
+        metrics.observe_signup("rejected")
+    elif success:
+        metrics.observe_signup("created")
     response = JSONResponse(content=reason, status_code=HTTPStatus.OK if success else HTTPStatus.INTERNAL_SERVER_ERROR)
     if success and session_id:
         logger.info(f'setting cookie to {session_id}')
@@ -97,11 +109,20 @@ async def user_login(
             reason = str(ex)
             success = False
             status_code = HTTPStatus.UNAUTHORIZED
+            metrics.observe_login("invalid_credentials")
         except Exception as ex:
             logger.error(f'error occured logging in user', exc_info=True)
             reason = repr(ex)
             success = False
             status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+            metrics.observe_login("error")
+        else:
+            metrics.observe_login("created")
+    else:
+        # The client already had a session and is only asking for the cookie back. Not
+        # counted as a login attempt -- it never reached the password check -- but
+        # counted, because otherwise a returning user is invisible here.
+        metrics.observe_login("resumed")
     response = JSONResponse(content=reason, status_code=status_code)
     if success:
         logger.info(f'setting cookie to {session_id}')

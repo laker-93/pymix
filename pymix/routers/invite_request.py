@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
 from pymix.model.api.invite_requests import CreateInviteRequest
+from pymix.services import metrics
 
 router = APIRouter()
 
@@ -72,6 +73,7 @@ def check_rate_limit(request: Request) -> None:
 
     if len(hits) >= RATE_LIMIT_MAX_REQUESTS:
         logger.warning("Rate-limited invite requests from %s", ip)
+        metrics.observe_invite_submission("rate_limited")
         raise HTTPException(status_code=429, detail="Too many invite requests. Try again later.")
 
     hits.append(now)
@@ -86,21 +88,28 @@ async def parse_invite_request(request: Request) -> CreateInviteRequest:
     """
     content_length = request.headers.get("content-length")
     if content_length is not None and content_length.isdigit() and int(content_length) > MAX_BODY_BYTES:
+        metrics.observe_invite_submission("too_large")
         raise HTTPException(status_code=413, detail="Request body too large")
 
     raw = await request.body()
     if len(raw) > MAX_BODY_BYTES:
+        metrics.observe_invite_submission("too_large")
         raise HTTPException(status_code=413, detail="Request body too large")
 
     try:
         payload = json.loads(raw)
     except ValueError:
+        metrics.observe_invite_submission("invalid")
         raise HTTPException(status_code=400, detail="Invalid request body")
 
     try:
         return CreateInviteRequest.model_validate(payload)
     except ValidationError as e:
+        # The one rejection a real person can trip: a typo'd address, or a dj_software
+        # the client offered that pymix does not accept. If this rises after a client
+        # release, the two ends have drifted and every one of those is a lost signup.
         logger.info("Rejected invite request: %s", e.errors())
+        metrics.observe_invite_submission("invalid")
         raise HTTPException(status_code=400, detail="Invalid email address or DJ software")
 
 
@@ -116,10 +125,21 @@ async def create_invite_request(
     the list: telling the caller which would turn this into an address-membership oracle
     for anyone curious who has signed up.
     """
-    db_controller.create_invite_request(
-        email=str(body.email),
-        dj_software=body.dj_software,
-        dj_software_other=body.dj_software_other,
-    )
+    try:
+        outcome = db_controller.create_invite_request(
+            email=str(body.email),
+            dj_software=body.dj_software,
+            dj_software_other=body.dj_software_other,
+        )
+    except Exception:
+        # Counted before re-raising. Left to surface as a 500, unchanged -- the point
+        # of the counter is that the failure is legible on a dashboard, not that it is
+        # swallowed. A submission lost here is a person lost, so it must be the loudest
+        # outcome in the set.
+        logger.exception("failed to record invite request")
+        metrics.observe_invite_submission("error")
+        raise
+
+    metrics.observe_invite_submission(outcome)
 
     return {"status": "ok"}

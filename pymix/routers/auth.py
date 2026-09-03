@@ -20,6 +20,7 @@ from fastapi import Cookie, Depends, HTTPException
 
 from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
+from pymix.services import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,13 @@ def require_user(
         # Unknown/expired sessions come back as None rather than raising.
         logger.info("no user found for session id %s", session_id)
         raise HTTPException(status_code=401, detail=_UNAUTHENTICATED)
+
+    # Every user-scoped route resolves its caller here, so this one line is the whole
+    # per-user activity signal -- no decorator per handler, and nothing to remember
+    # when a route is added. Recorded on the identity that authenticated, before
+    # require_reader's demo -> demoadmin substitution, so demo's traffic is attributed
+    # to demo and not folded into demoadmin's.
+    metrics.observe_user_request(user["username"])
 
     return user
 
