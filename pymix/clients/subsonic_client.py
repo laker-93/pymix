@@ -270,6 +270,10 @@ class SubsonicClient(BaseAPIClient):
                 rating=entry.get('userRating', 0),
                 genre=entry.get('genre'),
                 subbox_id=subbox_id,
+                # The rounded value beets wrote to the file tag, if this server
+                # reports it at all. cuedata holds the exact one where a Rekordbox
+                # import supplied it; this is the fallback for everything else (#152).
+                bpm=entry.get('bpm'),
             )
 
         return list(await asyncio.gather(*(_build(entry) for entry in resp_playlist)))
