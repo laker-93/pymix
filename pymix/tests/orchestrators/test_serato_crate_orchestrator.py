@@ -20,8 +20,10 @@ from unittest.mock import MagicMock
 import pytest
 from pyserato.builder import Builder
 from pyserato.model.crate import Crate
+from pyserato.model.tempo import Tempo as SeratoTempo
 from pyserato.model.track import Track
 
+from pymix.model.beatgrid import BeatgridMarker
 from pymix.model.serato_cue import SeratoCue
 from pymix.model.serato_import import SeratoTrackIdentity
 from pymix.orchestrators.serato_crate_orchestrator import SeratoCrateOrchestrator
@@ -96,10 +98,12 @@ def orchestrator(tmp_path, library):
     return orch
 
 
-def manifest(*pairs: tuple, cues=None) -> list[SeratoTrackIdentity]:
+def manifest(*pairs: tuple, cues=None, beatgrid=None) -> list[SeratoTrackIdentity]:
     """The client's manifest: (crate path, subbox_id) for each crate entry."""
     return [
-        SeratoTrackIdentity(crate_path=path, subbox_id=subbox_id, cues=cues)
+        SeratoTrackIdentity(
+            crate_path=path, subbox_id=subbox_id, cues=cues, beatgrid=beatgrid,
+        )
         for path, subbox_id in pairs
     ]
 
@@ -506,3 +510,103 @@ def test_an_mp3_serato_has_never_analysed_imports_without_cues(
 
     assert report.matched == 1
     assert playlists[0].tracks[0].serato_hot_cues is None
+
+
+# The beat grid arrives on its own field and is read on its own condition: a
+# track can carry a grid and no cues, or cues and no grid, so gating one on the
+# other would both skip files that have a grid and read files that have neither.
+
+CLIENT_GRID = [
+    BeatgridMarker(position_ms=45, beats_till_next=64),
+    BeatgridMarker(position_ms=22000, bpm=175.0),
+]
+
+
+def test_a_grid_from_the_client_is_used_and_the_servers_copy_is_not_read(
+    orchestrator, tmp_path, library
+):
+    add_library_track(library, 'Artist/Album/known.mp3')
+    beets_returns(orchestrator, {'sid-1': 'Artist/Album/known.mp3'})
+    orchestrator._mp3_encoder = MagicMock()
+    orchestrator._beatgrid_encoder = MagicMock()
+
+    crate = Crate('House')
+    crate.add_track(Track.from_path('/Users/dj/Music/known.mp3'))
+    zip_path = write_crate_zip(tmp_path, crate)
+
+    playlists, _ = orchestrator.get_subbox_playlists_from_crates(
+        USER, zip_path,
+        manifest(('/Users/dj/Music/known.mp3', 'sid-1'), beatgrid=CLIENT_GRID),
+    )
+
+    track = playlists[0].tracks[0]
+    assert track.client_beatgrid == CLIENT_GRID
+    assert track.beatgrid is None
+    orchestrator._beatgrid_encoder.read_beatgrid.assert_not_called()
+
+
+def test_without_a_client_grid_the_servers_copy_is_still_read(orchestrator, tmp_path, library):
+    add_library_track(library, 'Artist/Album/known.mp3')
+    beets_returns(orchestrator, {'sid-1': 'Artist/Album/known.mp3'})
+    orchestrator._mp3_encoder = MagicMock()
+    orchestrator._beatgrid_encoder = MagicMock()
+    orchestrator._beatgrid_encoder.read_beatgrid.return_value = [
+        SeratoTempo(position=0.045958, bpm=175.0),
+    ]
+
+    crate = Crate('House')
+    crate.add_track(Track.from_path('/Users/dj/Music/known.mp3'))
+    zip_path = write_crate_zip(tmp_path, crate)
+
+    playlists, _ = orchestrator.get_subbox_playlists_from_crates(
+        USER, zip_path, manifest(('/Users/dj/Music/known.mp3', 'sid-1'))
+    )
+
+    track = playlists[0].tracks[0]
+    assert track.client_beatgrid is None
+    assert track.beatgrid == [BeatgridMarker(position_ms=46, bpm=175.0)]
+
+
+def test_an_empty_client_grid_is_not_the_same_as_sending_none(
+    orchestrator, tmp_path, library
+):
+    """An analysed-but-ungridded file decodes to `[]`, and that is a real reading.
+
+    It stops the server reading its own copy, exactly as an empty cue list does.
+    What it must not do is clear a stored grid -- see
+    SeratoController._cuedata_for.
+    """
+    add_library_track(library, 'Artist/Album/known.mp3')
+    beets_returns(orchestrator, {'sid-1': 'Artist/Album/known.mp3'})
+    orchestrator._mp3_encoder = MagicMock()
+    orchestrator._beatgrid_encoder = MagicMock()
+
+    crate = Crate('House')
+    crate.add_track(Track.from_path('/Users/dj/Music/known.mp3'))
+    zip_path = write_crate_zip(tmp_path, crate)
+
+    playlists, _ = orchestrator.get_subbox_playlists_from_crates(
+        USER, zip_path, manifest(('/Users/dj/Music/known.mp3', 'sid-1'), beatgrid=[])
+    )
+
+    assert playlists[0].tracks[0].client_beatgrid == []
+    orchestrator._beatgrid_encoder.read_beatgrid.assert_not_called()
+
+
+def test_a_track_whose_grid_cannot_be_read_still_imports(orchestrator, tmp_path, library):
+    """One unreadable grid is not a reason to fail the import of every track (#145)."""
+    add_library_track(library, 'Artist/Album/known.mp3')
+    beets_returns(orchestrator, {'sid-1': 'Artist/Album/known.mp3'})
+    orchestrator._mp3_encoder = MagicMock()
+    orchestrator._beatgrid_encoder = MagicMock()
+    orchestrator._beatgrid_encoder.read_beatgrid.side_effect = ValueError('not a grid')
+
+    crate = Crate('House')
+    crate.add_track(Track.from_path('/Users/dj/Music/known.mp3'))
+    zip_path = write_crate_zip(tmp_path, crate)
+
+    playlists, _ = orchestrator.get_subbox_playlists_from_crates(
+        USER, zip_path, manifest(('/Users/dj/Music/known.mp3', 'sid-1'))
+    )
+
+    assert playlists[0].tracks[0].beatgrid is None

@@ -18,6 +18,7 @@ import dataclasses
 
 from pydantic import BaseModel
 
+from pymix.model.beatgrid import BeatgridMarker
 from pymix.model.serato_cue import SeratoCue
 
 
@@ -35,11 +36,22 @@ class SeratoTrackIdentity(BaseModel):
     none, which is left alone rather than used to clear what's stored — subbox has
     no way to tell "the user removed their cues" from "this client can't read
     cues from this format" (only MP3 has an encoder on either side).
+
+    ``beatgrid`` is the same bargain as ``cues`` and reads the same three ways:
+    None means the client did not read one and the server falls back to its own
+    copy of the file; a list is used as sent; and an empty list means "read, and
+    there was no grid", which is left alone rather than used to clear what subbox
+    holds -- for exactly the reason the cue case is, plus one of its own. An
+    analysed-but-ungridded Serato file carries the beat-grid frame with zero
+    markers in it, so an empty list is what a *present* frame decodes to as often
+    as it is what a missing encoder produces. Frame presence is not evidence of a
+    grid, and neither is an empty list evidence of its removal.
     """
 
     crate_path: str
     subbox_id: str
     cues: Optional[List[SeratoCue]] = None
+    beatgrid: Optional[List[BeatgridMarker]] = None
 
 
 class SeratoImportRequest(BaseModel):
