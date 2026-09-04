@@ -17,6 +17,7 @@ from pymix.clients.subsonic_client import SubsonicClient
 from pymix.controllers.db_controller import DbController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.handlers.rb_backup_file_handler import RBBackupFileHandler
+from pymix.model import beatgrid
 from pymix.model.subboxplaylist import SubBoxPlaylist
 from pymix.orchestrators.rekordbox_xml_orchestrator import RekordboxXMLOrchestrator
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
@@ -848,6 +849,7 @@ class RekordboxXMLController:
             if subbox_id is None:
                 logger.warning(f"subbox id tag not present on {track_match.pymix_path}, skipping cue and loop import for this track.")
                 continue
+            grid = beatgrid.to_cuedata(beatgrid.from_tempos(track.tempos))
             bpm = track.AverageBpm
             if bpm is None:
                 logger.info(f"No AverageBpm in XML for track {track.Name}, skipping bpm update.")
@@ -885,6 +887,10 @@ class RekordboxXMLController:
                     # the export reads it back from here (#152). `bpm` is already a
                     # declared property of the cuedata schema in routers/track.py.
                     **({"bpm": bpm} if bpm is not None else {}),
+                    # The grid, from the XML's TEMPO nodes. Omitted entirely when the
+                    # XML carried none, so the row stays indistinguishable from every
+                    # row written before grids existed (#154).
+                    **({"beatgrid": grid} if grid else {}),
                 },
                 source_app="rekordbox",
                 change_type="upload"

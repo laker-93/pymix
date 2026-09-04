@@ -62,7 +62,29 @@ cue_schema = {
             "minItems": 0  # loops can be empty
         },
         "bpm": {"type": "number"},
-        "key": {"type": "string"}
+        "key": {"type": "string"},
+        # A grid is a list of anchors; see pymix/model/beatgrid.py for why the
+        # last one is structurally different from the rest. `bpm` is optional
+        # per-anchor because a Serato-sourced anchor carries a beat count
+        # instead, and `beats_till_next` is absent on the anchor that carries a
+        # tempo -- so neither can be required, and a marker needs only a
+        # position to be worth storing.
+        "beatgrid": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "position_ms": {"type": "number"},
+                    "beats_till_next": {"type": ["integer", "null"]},
+                    "bpm": {"type": ["number", "null"]},
+                    "metro": {"type": "string"},
+                    "battito": {"type": "integer"}
+                },
+                "required": ["position_ms"],
+                "additionalProperties": False
+            },
+            "minItems": 0
+        }
     },
     "additionalProperties": False
 }

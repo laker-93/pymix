@@ -6,6 +6,7 @@ import dataclasses
 
 from pyserato.model.hot_cue import HotCue
 
+from pymix.model.beatgrid import BeatgridMarker
 from pymix.model.serato_cue import SeratoCue
 
 
@@ -31,6 +32,9 @@ class SubBoxTrack:
     # Wins over serato_hot_cues where present -- see SeratoTrackIdentity.
     client_cues: Optional[list[SeratoCue]] = None
     bpm: Optional[float] = None
+    # The track's beat grid, read off a Rekordbox XML's TEMPO nodes. None means
+    # "not read", not "no grid" -- same three-state convention as client_cues.
+    beatgrid: Optional[list[BeatgridMarker]] = None
 
     def __eq__(self, other):
         return self.name == other.name and self.artist == other.artist
