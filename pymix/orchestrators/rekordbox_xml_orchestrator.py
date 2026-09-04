@@ -8,6 +8,7 @@ from pyrekordbox.rbxml import Node, RATING_MAPPING, RekordboxXml, XmlDuplicateEr
 
 from pymix.controllers.db_controller import DbController
 from pymix.factories.rekordbox_xml_factory import RekordboxXMLFactory
+from pymix.model import beatgrid
 from pymix.model.subboxplaylist import SubBoxPlaylist
 from pymix.model.subboxtrack import SubBoxTrack
 from pymix.utils.get_duration import get_duration
@@ -198,6 +199,11 @@ class RekordboxXMLOrchestrator:
                 # Rekordbox re-analyses a track with no AverageBpm from scratch, so
                 # an import at 128.5 used to come back with no tempo at all (#152).
                 rekordbox_track["AverageBpm"] = bpm
+            for tempo in beatgrid.to_tempos(beatgrid.from_cuedata(cue_data)):
+                # No stored grid emits nothing at all, exactly as a track with
+                # no cues emits no marks -- Rekordbox re-analysing is the right
+                # behaviour when subbox has nothing better to offer.
+                rekordbox_track.add_tempo(**tempo)
             if cue_data:
                 cues = cue_data.get("cues", [])
                 loops = cue_data.get("loops", [])
@@ -287,7 +293,8 @@ class RekordboxXMLOrchestrator:
                     genre=rekordbox_track.Genre,
                     track_id=rekordbox_track.TrackID,
                     rating=rekordbox_track.Rating,
-                    bpm=rekordbox_track.AverageBpm
+                    bpm=rekordbox_track.AverageBpm,
+                    beatgrid=beatgrid.from_tempos(rekordbox_track.tempos),
                 )
             )
         return all_tracks
