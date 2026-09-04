@@ -11,6 +11,7 @@ from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.handlers.rb_backup_file_handler import RBBackupFileHandler
 from pymix.handlers.serato_backup_file_handler import SeratoBackupFileHandler
+from pymix.model import beatgrid
 from pymix.model.serato_cue import SeratoCue, from_cuedata, to_cuedata
 from pymix.model.serato_export import (
     SeratoExportCrate,
@@ -120,6 +121,7 @@ class SeratoController:
                 relative_path = self._relative_path_in_export(username, track)
                 if relative_path is None:
                     continue
+                stored_grid = beatgrid.from_cuedata(cuedata_by_id.get(track.subbox_id))
                 tracks.append(
                     SeratoExportTrack(
                         relative_path=relative_path,
@@ -129,6 +131,8 @@ class SeratoController:
                         rating=track.rating or 0,
                         subbox_id=track.subbox_id,
                         cues=from_cuedata(cuedata_by_id.get(track.subbox_id)),
+                        beatgrid=beatgrid.to_serato_anchors(stored_grid),
+                        beatgrid_notes=beatgrid.lossy_notes(stored_grid),
                     )
                 )
             if not tracks:
@@ -259,19 +263,33 @@ class SeratoController:
         return subbox_playlists, report
 
     @staticmethod
-    def _cuedata_for(track: SubBoxTrack) -> Optional[Dict]:
-        """The cues to store for this track, or None if there is nothing to store.
+    def _cuedata_for(track: SubBoxTrack, stored: Optional[Dict] = None) -> Optional[Dict]:
+        """The blob to store for this track, or None if there is nothing to store.
 
         The client's reading of the user's own file wins over pyserato's reading
-        of the server's copy — see SeratoTrackIdentity. An empty result is None
-        rather than an empty blob, so a track with no cues leaves whatever subbox
-        already holds alone instead of overwriting it with nothing.
+        of the server's copy, for cues and for the grid independently — see
+        SeratoTrackIdentity. An empty reading gives None rather than an empty
+        blob, so a track with no cues leaves whatever subbox already holds alone
+        instead of overwriting it with nothing.
+
+        Built *onto* `stored` rather than from scratch, because update_metadata
+        replaces the row's blob wholesale. Without this, "an empty reading does
+        not clear what's stored" would only be true of a track subbox had never
+        seen: a Serato import of a track that had been through the Rekordbox one
+        would write a cues-only blob over the top and take the `bpm` and any
+        stored grid with it. That was already true of the `bpm` before the grid
+        existed; the grid makes it much easier to hit, since the two importers
+        now write overlapping keys.
         """
+        cuedata = dict(stored or {})
+        stored_anything = False
+
+        cues = None
         if track.client_cues is not None:
-            cuedata = to_cuedata(track.client_cues)
+            cues = to_cuedata(track.client_cues)
         elif track.serato_hot_cues:
             # todo extract colors of cues
-            cuedata = to_cuedata([
+            cues = to_cuedata([
                 SeratoCue(
                     type='loop' if cue.type == HotCueType.LOOP else 'cue',
                     index=cue.index,
@@ -282,11 +300,19 @@ class SeratoController:
                 for cue in track.serato_hot_cues
                 if cue.type in (HotCueType.CUE, HotCueType.LOOP)
             ])
-        else:
-            return None
-        if not cuedata['cues'] and not cuedata['loops']:
-            return None
-        return cuedata
+        if cues and (cues['cues'] or cues['loops']):
+            cuedata.update(cues)
+            stored_anything = True
+
+        # A track can carry a grid and no cues, so this is asked separately
+        # rather than inside the cue branches.
+        grid = track.client_beatgrid if track.client_beatgrid is not None else track.beatgrid
+        grid_blob = beatgrid.to_cuedata(grid or [])
+        if grid_blob:
+            cuedata['beatgrid'] = grid_blob
+            stored_anything = True
+
+        return cuedata if stored_anything else None
 
     async def _set_metadata(self, user, subbox_playlists: List[SubBoxPlaylist]):
         tracks = []
@@ -296,8 +322,14 @@ class SeratoController:
         rated_tracks = list(filter(lambda t: t.rating > 0, tracks))
         # set the rating of the track in navidrome from the rating taken from track meta
         await self._subsonic_orchestrator.set_ratings(user, rated_tracks)
+        # One query for the lot: _cuedata_for merges onto what is already stored,
+        # and asking per track is a round trip per track (see
+        # DbController.get_cuedata_by_subbox_id).
+        stored_by_id = self._db_controller.get_cuedata_by_subbox_id(
+            user['username'], [t.subbox_id for t in tracks if t.subbox_id],
+        )
         for track in tracks:
-            cuedata = self._cuedata_for(track)
+            cuedata = self._cuedata_for(track, stored_by_id.get(track.subbox_id))
             if cuedata:
                 assert track.subbox_id is not None, f"subbox id tag not present on {track}"
                 self._db_controller.update_metadata(

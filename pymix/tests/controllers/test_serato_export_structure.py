@@ -191,3 +191,52 @@ async def test_requested_playlist_ids_scope_the_fetch_itself(controller):
 
     _, id_set = controller.subsonic.get_subsonic_playlists.call_args[0]
     assert id_set == {'pl-1', 'pl-2'}
+
+
+@pytest.mark.anyio
+async def test_the_stored_grid_goes_out_already_in_seratos_shape(controller):
+    """The beat-count derivation happens here, not in the client.
+
+    A Rekordbox-sourced grid stores a tempo on every anchor; Serato wants a whole
+    beat count on all but the last. Doing it server-side keeps the arithmetic in
+    one language, and leaves the client a field mapping -- the same division of
+    labour `cues` already has.
+    """
+    controller.db.get_cuedata_by_subbox_id.return_value = {
+        'sid-1': {'beatgrid': [
+            {'position_ms': 0, 'bpm': 120.0},
+            {'position_ms': 4000, 'bpm': 140.0},
+        ]},
+    }
+    playlists_are(controller, SubBoxPlaylist(name='House', tracks=[track('a/b/x.mp3')]))
+
+    exported = (await controller.get_export_structure(USER)).crates[0].tracks[0]
+
+    assert [m.position_ms for m in exported.beatgrid] == [0, 4000]
+    assert exported.beatgrid[0].beats_till_next == 8
+    assert exported.beatgrid[1].bpm == 140.0
+    assert exported.beatgrid_notes == []
+
+
+@pytest.mark.anyio
+async def test_what_serato_cannot_hold_is_named_rather_than_dropped_in_silence(controller):
+    """Otherwise the grid lands, disagrees with the user's, and says nothing."""
+    controller.db.get_cuedata_by_subbox_id.return_value = {
+        'sid-1': {'beatgrid': [{'position_ms': 0, 'bpm': 120.0, 'metro': '3/4'}]},
+    }
+    playlists_are(controller, SubBoxPlaylist(name='House', tracks=[track('a/b/x.mp3')]))
+
+    exported = (await controller.get_export_structure(USER)).crates[0].tracks[0]
+
+    assert len(exported.beatgrid_notes) == 1
+    assert '3/4' in exported.beatgrid_notes[0]
+
+
+@pytest.mark.anyio
+async def test_a_track_with_no_stored_grid_exports_an_empty_one(controller):
+    playlists_are(controller, SubBoxPlaylist(name='House', tracks=[track('a/b/x.mp3')]))
+
+    exported = (await controller.get_export_structure(USER)).crates[0].tracks[0]
+
+    assert exported.beatgrid == []
+    assert exported.beatgrid_notes == []
