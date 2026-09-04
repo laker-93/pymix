@@ -5,12 +5,15 @@ from typing import Dict, List, Optional
 
 import music_tag
 from pyserato.builder import Builder
+from pyserato.encoders.beatgrid_mp3_encoder import BeatgridMp3Encoder
 from pyserato.encoders.v2_mp3_encoder import V2Mp3Encoder
 from pyserato.model.crate import Crate
 from pyserato.model.hot_cue import HotCue
 
 from pymix.controllers.db_controller import DbController
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
+from pymix.model import beatgrid
+from pymix.model.beatgrid import BeatgridMarker
 from pymix.model.serato_import import (
     CrateImportReport,
     SeratoTrackIdentity,
@@ -42,6 +45,7 @@ class SeratoCrateOrchestrator:
         self._rb_xml_controller = rb_xml_controller
         self._serving_music_path_base = serving_music_path_base
         self._mp3_encoder = V2Mp3Encoder()
+        self._beatgrid_encoder = BeatgridMp3Encoder()
 
     def _resolve_identity(
         self,
@@ -77,6 +81,36 @@ class SeratoCrateOrchestrator:
             )
 
         return None
+
+    def _read_grid_from_library_copy(self, path: Path, song) -> Optional[List[BeatgridMarker]]:
+        """The beat grid on the server's own copy of the file, or None.
+
+        Reached on the same condition the cue reader is -- the client sent
+        nothing for this crate entry -- and carries the same caveat: this file is
+        whatever was uploaded, so its grid is the one the track had at upload
+        time and not the one the user has been adjusting since.
+
+        Returns None rather than `[]` for every kind of nothing. The three-state
+        convention that matters so much on `SeratoTrackIdentity.beatgrid` -- where
+        "read, and empty" must be told apart from "could not read" -- does not
+        apply here, because both readings lead to the same act: a grid subbox
+        does not have is a grid subbox does not store, and a stored one is never
+        cleared either way. pyserato's `read_beatgrid` collapses absent,
+        analysed-but-ungridded and unreadable into `[]` for the same reason.
+
+        Never fatal, for the reason the cue reader is never fatal (#145).
+        """
+        if path.suffix.lower() not in self._CUE_READABLE_SUFFIXES:
+            logger.debug('no serato beat grid reader for %s; importing it without one', path)
+            return None
+        try:
+            return beatgrid.from_serato(self._beatgrid_encoder.read_beatgrid(song)) or None
+        except Exception:
+            logger.warning(
+                'could not read a serato beat grid from %s; importing it without one',
+                path, exc_info=True,
+            )
+            return None
 
     def _read_cues_from_library_copy(self, path: Path, song) -> Optional[List[HotCue]]:
         """
@@ -184,6 +218,12 @@ class SeratoCrateOrchestrator:
                 cues = None
                 if identity.cues is None:
                     cues = self._read_cues_from_library_copy(p, song)
+                # Read independently of the cues: a track can carry a grid and no
+                # cues, or cues and no grid, and the client sends the two fields
+                # separately for that reason.
+                grid = None
+                if identity.beatgrid is None:
+                    grid = self._read_grid_from_library_copy(p, song)
 
                 rating = tags.get('composer').value.count('⭐')
                 report.matched += 1
@@ -198,6 +238,8 @@ class SeratoCrateOrchestrator:
                         subbox_id=subbox_id,
                         serato_hot_cues=cues,
                         client_cues=identity.cues,
+                        beatgrid=grid,
+                        client_beatgrid=identity.beatgrid,
                     )
                 )
             # A crate whose every track was skipped becomes an empty playlist,

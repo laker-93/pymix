@@ -11,7 +11,7 @@ music-tag
 sqlalchemy~=2.0
 psycopg2-binary~=2.9
 alembic~=1.13
-pyserato~=0.2
+pyserato~=0.3
 mediafile~=0.17.0
 beets==2.13.1
 jinja2~=3.1.4
