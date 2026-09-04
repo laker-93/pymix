@@ -22,6 +22,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel
 
+from pymix.model.beatgrid import BeatgridMarker
 from pymix.model.serato_cue import SeratoCue
 
 
@@ -42,6 +43,15 @@ class SeratoExportTrack(BaseModel):
     rating: int = 0
     subbox_id: Optional[str] = None
     cues: List[SeratoCue] = []
+    # Already in Serato's shape: every anchor but the last carries a whole beat
+    # count, the last carries a BPM. The derivation from a Rekordbox-sourced
+    # grid, where each anchor instead carries its own tempo, happens server-side
+    # (beatgrid.to_serato_anchors) so it exists in one language and not two.
+    beatgrid: List[BeatgridMarker] = []
+    # What that derivation could not carry -- a time signature Serato has no
+    # room for, an anchor Serato will read as a downbeat when it isn't, a span
+    # rounded to a whole number of beats. For the client to show, not to act on.
+    beatgrid_notes: List[str] = []
 
 
 class SeratoExportCrate(BaseModel):

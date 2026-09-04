@@ -24,9 +24,12 @@ Positions are milliseconds, matching SeratoCue and the rest of
 `meta_history.cuedata`. Both source formats speak seconds; the conversion
 happens at the edges, in the same place the cue side does it.
 """
+import logging
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 # Serato and Rekordbox need not agree on where t=0 sits in an MP3. Measured in
 # laker-93/pymix#153 across 30 gridded files: whatever the disagreement is, it
@@ -162,3 +165,117 @@ def to_tempos(grid: List[BeatgridMarker]) -> List[dict]:
             "Battito": marker.battito,
         })
     return out
+
+
+def from_serato(tempos) -> List[BeatgridMarker]:
+    """`pyserato` Tempo anchors -> wire shape.
+
+    Not sorted, unlike `from_tempos`. Serato's frame is an ordered list whose
+    terminal anchor is its last entry; sorting by position could move an anchor
+    past that one and produce a grid that cannot be re-encoded. Rekordbox's XML
+    offers no ordering guarantee, which is why the other direction does sort.
+    """
+    out: List[BeatgridMarker] = []
+    for tempo in tempos or []:
+        if tempo.position is None:
+            continue
+        out.append(BeatgridMarker(
+            position_ms=round(tempo.position * 1000.0 + SERATO_TIME_ZERO_OFFSET_MS),
+            beats_till_next=tempo.beats_till_next,
+            bpm=tempo.bpm,
+        ))
+    return out
+
+
+def to_serato_anchors(grid: List[BeatgridMarker]) -> List[BeatgridMarker]:
+    """Wire shape -> the same shape, with Serato's beat counts filled in.
+
+    Serato spaces its anchors in whole beats and puts an explicit BPM only on
+    the last one, so a Rekordbox-sourced grid -- where every anchor carries a
+    tempo and none carries a beat count -- needs those counts derived before a
+    Serato encoder can write it: `beats = span_s * bpm / 60`, rounded.
+
+    Done here rather than in the client so the arithmetic exists once. What
+    crosses the wire is then a plain field mapping on the client side, exactly
+    as `SeratoCue` is.
+
+    **An anchor that cannot be expressed takes the whole grid with it.** That is
+    deliberately stricter than `to_tempos`, which drops anchors one at a time,
+    and the two differ because the formats do: a Rekordbox anchor carries its
+    own tempo, so its neighbours do not depend on it, while a Serato anchor's
+    beat count is measured *to the next anchor* -- so dropping one silently
+    re-times every beat in the segment that closes over the gap. A missing grid
+    is a visible absence; a subtly wrong one puts every hot cue on the track
+    off-beat, including the cues the user set themselves.
+    """
+    if not grid:
+        return []
+    ordered = sorted(grid, key=lambda m: m.position_ms)
+    if ordered[-1].bpm is None:
+        logger.warning('beat grid has no tempo on its last anchor; not converting it for Serato')
+        return []
+
+    out: List[BeatgridMarker] = []
+    for i, marker in enumerate(ordered):
+        position_ms = round(marker.position_ms - SERATO_TIME_ZERO_OFFSET_MS)
+        if i == len(ordered) - 1:
+            out.append(BeatgridMarker(position_ms=position_ms, bpm=marker.bpm))
+            continue
+        beats = marker.beats_till_next
+        if beats is None:
+            span_ms = ordered[i + 1].position_ms - marker.position_ms
+            if marker.bpm is None or span_ms <= 0:
+                logger.warning(
+                    'beat grid anchor at %sms has no beat count and none can be derived; '
+                    'not converting the grid for Serato', marker.position_ms,
+                )
+                return []
+            beats = round(span_ms * marker.bpm / 60_000.0)
+        if beats < 1:
+            # Two anchors less than half a beat apart. Serato would read the
+            # zero as a segment of no length; there is no honest count to write.
+            logger.warning(
+                'beat grid anchors at %sms and %sms are under half a beat apart; '
+                'not converting the grid for Serato',
+                marker.position_ms, ordered[i + 1].position_ms,
+            )
+            return []
+        out.append(BeatgridMarker(position_ms=position_ms, beats_till_next=beats))
+    return out
+
+
+def _mmss(position_ms: int) -> str:
+    seconds, ms = divmod(max(position_ms, 0), 1000)
+    minutes, seconds = divmod(seconds, 60)
+    return f"{minutes}:{seconds:02d}.{ms:03d}"
+
+
+def lossy_notes(grid: List[BeatgridMarker]) -> List[str]:
+    """What a trip through Serato will not carry, in the user's terms.
+
+    Serato's grid has no time signature and no beat-of-bar, and spaces its
+    anchors in whole beats. All three are real losses, and none of them is
+    visible in the result -- the grid still lands, it just quietly disagrees
+    with the one the user built. Reported rather than logged, so that the answer
+    to "why did my 3/4 track come back in 4/4" reaches the person who asked.
+    """
+    notes: List[str] = []
+    ordered = sorted(grid, key=lambda m: m.position_ms)
+    for i, marker in enumerate(ordered):
+        at = _mmss(marker.position_ms)
+        if marker.metro != DEFAULT_METRO:
+            notes.append(f"{at}: {marker.metro} time signature dropped - Serato grids are 4/4 only")
+        if marker.battito != DEFAULT_BATTITO:
+            notes.append(
+                f"{at}: anchor sits on beat {marker.battito} of the bar - "
+                f"Serato has no beat-of-bar and will treat it as a downbeat"
+            )
+        if i + 1 < len(ordered) and marker.beats_till_next is None and marker.bpm:
+            span_ms = ordered[i + 1].position_ms - marker.position_ms
+            beats = span_ms * marker.bpm / 60_000.0
+            if span_ms > 0 and abs(beats - round(beats)) > 0.01:
+                notes.append(
+                    f"{at}: the next anchor is {beats:.2f} beats away - Serato spaces "
+                    f"anchors in whole beats, so it was rounded to {round(beats)}"
+                )
+    return notes
