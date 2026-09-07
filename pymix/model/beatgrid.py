@@ -31,13 +31,26 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-# Serato and Rekordbox need not agree on where t=0 sits in an MP3. Measured in
-# laker-93/pymix#153 across 30 gridded files: whatever the disagreement is, it
-# is not a per-file function of the encoder delay -- files identical to the last
-# float32 bit turn up with six different LAME padding values. The evidence
-# points at no correction being needed at all, but the measurement that would
-# settle it needs Serato and Rekordbox open by hand, so the term is named and
-# zero rather than absent: when it is measured, it changes here and nowhere else.
+# Serato and Rekordbox need not agree on where t=0 sits in an MP3. They do.
+#
+# Measured three ways. laker-93/pymix#153 ruled out a per-file encoder-delay
+# term across 30 gridded files: files identical to the last float32 bit turn up
+# with six different LAME padding values, and six paddings cannot produce one
+# offset. Then the same track was gridded by hand in both programs (2026-09-07,
+# docs/design-beatgrids.md §5): Serato lands +45.50 ms after a gapless decode,
+# Rekordbox +50.00 ms. Both late, both by about the same amount, because neither
+# compensates for the encoder delay the way ffmpeg does.
+#
+# That shared ~46 ms is the term that would have hurt -- a tenth of a beat at
+# 128 BPM -- and it cancels, because subbox never places a grid against a decode
+# of its own: it only ever carries one program's anchors to the other. What is
+# left is 4.5 ms +/- 1.9, inside the hand-placement noise of both measurements
+# and about 1% of a beat. Fitting a constant to that would be fitting a constant
+# to the human who dragged the markers.
+#
+# So this is zero on evidence, not for want of a measurement. Still untested at
+# 48 kHz -- every file measured was 44.1 kHz -- which matters only if the two
+# programs stop failing to compensate *identically* at another rate.
 SERATO_TIME_ZERO_OFFSET_MS = 0.0
 
 # Serato has nowhere to put either of these, so a grid that has been through it
