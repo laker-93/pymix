@@ -564,7 +564,10 @@ def test_without_a_client_grid_the_servers_copy_is_still_read(orchestrator, tmp_
 
     track = playlists[0].tracks[0]
     assert track.client_beatgrid is None
-    assert track.beatgrid == [BeatgridMarker(position_ms=46, bpm=175.0)]
+    # 45.958, not 46: Serato's float32 seconds are finer than a whole
+    # millisecond, and rounding here moves the anchor by up to 0.49ms so the
+    # grid cannot make the trip back out unchanged.
+    assert track.beatgrid == [BeatgridMarker(position_ms=45.958, bpm=175.0)]
 
 
 def test_an_empty_client_grid_is_not_the_same_as_sending_none(
