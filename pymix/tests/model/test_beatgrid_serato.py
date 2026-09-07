@@ -6,6 +6,7 @@ the last a whole number of beats until the next one, and the tempo falls out of
 the spacing. So going to Serato is arithmetic, and the arithmetic can fail --
 which is what most of this file is about.
 """
+import pytest
 from pyserato.model.tempo import Tempo
 
 from pymix.model import beatgrid
@@ -155,3 +156,36 @@ def test_a_grid_serato_can_hold_exactly_is_reported_as_nothing():
         BeatgridMarker(position_ms=0, bpm=120.0),
         BeatgridMarker(position_ms=4000, bpm=120.0),
     ]) == []
+
+
+def test_an_anchor_keeps_the_precision_serato_gave_it():
+    """Serato stores float32 seconds, which is finer than a whole millisecond.
+
+    Rounding to an int ms moved every anchor of a real hand-gridded Serato track
+    by up to 0.49ms, so the grid could not go out and come back unchanged. The
+    drift is far below anything a listener could hear; the reason to keep the
+    precision is that byte-identity is much easier to hold than to re-establish.
+
+    Measured against a grid Serato itself wrote -- see
+    scripts/serato/verify_hand_grid.py in subbox-workspace.
+    """
+    grid = beatgrid.from_serato([Tempo(position=0.045968708, beats_till_next=4)])
+
+    assert grid[0].position_ms == pytest.approx(45.968708, abs=1e-6)
+
+
+def test_a_serato_anchor_survives_the_trip_out_and_back_exactly():
+    """The round trip a hand-gridded track actually takes."""
+    original = [
+        Tempo(position=0.045968708, beats_till_next=4),
+        Tempo(position=1.921887040, beats_till_next=28),
+        Tempo(position=34.242923737, bpm=99.34040069580078),
+    ]
+
+    back = beatgrid.to_serato_anchors(beatgrid.from_serato(original))
+
+    assert [m.position_ms / 1000.0 for m in back] == pytest.approx(
+        [t.position for t in original], abs=1e-9
+    )
+    assert [m.beats_till_next for m in back] == [4, 28, None]
+    assert back[-1].bpm == original[-1].bpm

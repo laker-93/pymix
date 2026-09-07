@@ -47,7 +47,16 @@ DEFAULT_BATTITO = 1
 
 
 class BeatgridMarker(BaseModel):
-    position_ms: int
+    # Float, not int. Serato stores anchor positions as float32 seconds, which is
+    # finer than a whole millisecond, and rounding here moved every anchor of a
+    # real hand-gridded Serato track by up to 0.49 ms -- so a grid could not make
+    # the trip out and back unchanged. Sub-millisecond drift is far below
+    # anything a listener could hear, but "the bytes come back identical" is a
+    # much easier property to keep true than to re-establish later, and the JSON
+    # schema (routers/track.py) and the client's wire type both already said
+    # `number`. Only this annotation disagreed. Measured against a grid Serato
+    # itself wrote: scripts/serato/verify_hand_grid.py in subbox-workspace.
+    position_ms: float
     # Set on every anchor but the last, and only meaningful on the Serato side:
     # the whole number of beats until the next anchor.
     beats_till_next: Optional[int] = None
@@ -103,7 +112,7 @@ def from_cuedata(cuedata: Optional[Dict]) -> List[BeatgridMarker]:
             if position is None:
                 return []
             out.append(BeatgridMarker(
-                position_ms=int(position),
+                position_ms=float(position),
                 beats_till_next=marker.get("beats_till_next"),
                 bpm=marker.get("bpm"),
                 metro=marker.get("metro") or DEFAULT_METRO,
@@ -132,7 +141,7 @@ def from_tempos(tempos) -> List[BeatgridMarker]:
         if inizio is None or bpm is None:
             continue
         out.append(BeatgridMarker(
-            position_ms=round(float(inizio) * 1000),
+            position_ms=float(inizio) * 1000,
             bpm=float(bpm),
             metro=tempo.Metro or DEFAULT_METRO,
             battito=tempo.Battito if tempo.Battito is not None else DEFAULT_BATTITO,
@@ -159,6 +168,9 @@ def to_tempos(grid: List[BeatgridMarker]) -> List[dict]:
         if bpm is None or bpm <= 0:
             continue
         out.append({
+            # 3dp is Rekordbox's own precision for Inizio, so this is the
+            # format's limit rather than ours -- unlike the Serato side, where
+            # the anchor keeps every bit Serato gave it.
             "Inizio": round(marker.position_ms / 1000.0, 3),
             "Bpm": round(bpm, 2),
             "Metro": marker.metro,
@@ -180,7 +192,7 @@ def from_serato(tempos) -> List[BeatgridMarker]:
         if tempo.position is None:
             continue
         out.append(BeatgridMarker(
-            position_ms=round(tempo.position * 1000.0 + SERATO_TIME_ZERO_OFFSET_MS),
+            position_ms=tempo.position * 1000.0 + SERATO_TIME_ZERO_OFFSET_MS,
             beats_till_next=tempo.beats_till_next,
             bpm=tempo.bpm,
         ))
@@ -217,7 +229,7 @@ def to_serato_anchors(grid: List[BeatgridMarker]) -> List[BeatgridMarker]:
 
     out: List[BeatgridMarker] = []
     for i, marker in enumerate(ordered):
-        position_ms = round(marker.position_ms - SERATO_TIME_ZERO_OFFSET_MS)
+        position_ms = marker.position_ms - SERATO_TIME_ZERO_OFFSET_MS
         if i == len(ordered) - 1:
             out.append(BeatgridMarker(position_ms=position_ms, bpm=marker.bpm))
             continue
@@ -244,8 +256,8 @@ def to_serato_anchors(grid: List[BeatgridMarker]) -> List[BeatgridMarker]:
     return out
 
 
-def _mmss(position_ms: int) -> str:
-    seconds, ms = divmod(max(position_ms, 0), 1000)
+def _mmss(position_ms: float) -> str:
+    seconds, ms = divmod(int(max(position_ms, 0)), 1000)
     minutes, seconds = divmod(seconds, 60)
     return f"{minutes}:{seconds:02d}.{ms:03d}"
 

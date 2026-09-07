@@ -35,6 +35,10 @@ ALBUMS = [
 ]
 GENRES = ["House", "Techno", "Breaks", "Electro", "Ambient", "Drum & Bass"]
 KEYS = ["Am", "Cm", "Dm", "Em", "F", "Gm", "A", "C"]
+# Rekordbox's own on-disk encoding for a star rating; pyrekordbox reads a TRACK's
+# Rating attribute back through the inverse of this and yields None for anything
+# else. Mirrors pyrekordbox.rbxml.RATING_MAPPING.
+RATING_BYTES = {0: "0", 1: "51", 2: "102", 3: "153", 4: "204", 5: "255"}
 WORDS = [
     "Fold", "Vector", "Halide", "Lantern", "Quarry", "Ridge", "Signal",
     "Tessellate", "Umbra", "Vantage", "Willow", "Zenith", "Anchor", "Beacon",
@@ -112,14 +116,25 @@ def main() -> int:
             "Size": path.stat().st_size,
             "TotalTime": args.seconds,
             "Tonality": rng.choice(KEYS),
-            # _set_metadata_from_xml only processes cues/loops/ratings for
-            # tracks with rating > 0, so every track qualifies.
-            "Rating": rng.randint(3, 5),
         }
         if not args.no_bpm:
             kwargs["AverageBpm"] = bpm
 
         track = xml.add_track(location=str(path), **kwargs)
+
+        # Rekordbox does not store a rating as its star count. It stores the byte
+        # 0/51/102/153/204/255, and pyrekordbox maps that back to 0-5 on read --
+        # so a literal Rating="3" reads back as None, not 3. Passing it through
+        # add_track() wrote the star count verbatim and assigning `track.Rating`
+        # wrote no attribute at all, so every fixture ever generated here claimed
+        # a rating that pymix could not see: `_set_metadata_from_xml` filters to
+        # `rating > 0` before importing ratings, so that pass silently ran over
+        # zero tracks and the rating path was untestable (pymix#146). Set the
+        # encoded byte on the element directly, which is what Rekordbox writes.
+        #
+        # _set_metadata_from_xml only processes cues/loops/ratings for tracks with
+        # rating > 0, so every track qualifies.
+        track._element.set("Rating", RATING_BYTES[rng.randint(3, 5)])
         if not args.no_cues:
             track.add_mark("Intro", Type="cue", Start=0.5, Num=0)
             track.add_mark("Drop", Type="cue", Start=round(args.seconds / 2, 2), Num=1)
