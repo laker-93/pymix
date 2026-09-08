@@ -54,7 +54,17 @@ def add_library_track(library: Path, relative: str, source: Path | None = None) 
 FIXTURE_DIR = Path(__file__).parent.parent / 'fixtures' / 'audio'
 FIXTURE_MP3 = FIXTURE_DIR / 'tagged.mp3'
 FIXTURE_FLAC = FIXTURE_DIR / 'tagged.flac'
-FIXTURES = {'.mp3': FIXTURE_MP3, '.flac': FIXTURE_FLAC}
+FIXTURE_WAV = FIXTURE_DIR / 'tagged.wav'
+# The same track, the same real Serato payloads, in two containers -- see the
+# fixtures README. Serato itself wrote those bytes; only the files carrying them
+# were assembled here.
+ANALYSED_MP3 = FIXTURE_DIR / 'analysed.mp3'
+ANALYSED_FLAC = FIXTURE_DIR / 'analysed.flac'
+FIXTURES = {'.mp3': FIXTURE_MP3, '.flac': FIXTURE_FLAC, '.wav': FIXTURE_WAV}
+
+# What Serato left on that track: three cues and a loop, and a one-marker grid.
+ANALYSED_CUES = [('CUE 1s', 1000, None), ('CUE 5s', 5000, None),
+                 ('CUE 12s', 12000, None), ('LOOP 20 to 24s', 20000, 24000)]
 
 
 def write_crate_zip(tmp_path: Path, root: Crate) -> Path:
@@ -349,7 +359,7 @@ def test_cues_from_the_client_are_used_and_the_servers_copy_is_not_read(
 ):
     add_library_track(library, 'Artist/Album/known.mp3')
     beets_returns(orchestrator, {'sid-1': 'Artist/Album/known.mp3'})
-    orchestrator._mp3_encoder = MagicMock()
+    orchestrator._cue_encoder = MagicMock()
 
     crate = Crate('House')
     crate.add_track(Track.from_path('/Users/dj/Music/known.mp3'))
@@ -362,15 +372,15 @@ def test_cues_from_the_client_are_used_and_the_servers_copy_is_not_read(
     track = playlists[0].tracks[0]
     assert track.client_cues == CLIENT_CUES
     assert track.serato_hot_cues is None
-    orchestrator._mp3_encoder.read_cues.assert_not_called()
+    orchestrator._cue_encoder.read_cues.assert_not_called()
 
 
 def test_without_client_cues_the_servers_copy_is_still_read(orchestrator, tmp_path, library):
     """The older client, and the Rekordbox-first user resolved by user_location."""
     add_library_track(library, 'Artist/Album/known.mp3')
     beets_returns(orchestrator, {'sid-1': 'Artist/Album/known.mp3'})
-    orchestrator._mp3_encoder = MagicMock()
-    orchestrator._mp3_encoder.read_cues.return_value = []
+    orchestrator._cue_encoder = MagicMock()
+    orchestrator._cue_encoder.read_cues.return_value = []
 
     crate = Crate('House')
     crate.add_track(Track.from_path('/Users/dj/Music/known.mp3'))
@@ -381,7 +391,7 @@ def test_without_client_cues_the_servers_copy_is_still_read(orchestrator, tmp_pa
     )
 
     assert playlists[0].tracks[0].client_cues is None
-    orchestrator._mp3_encoder.read_cues.assert_called_once()
+    orchestrator._cue_encoder.read_cues.assert_called_once()
 
 
 def test_an_empty_client_cue_list_is_not_the_same_as_sending_none(
@@ -391,11 +401,12 @@ def test_an_empty_client_cue_list_is_not_the_same_as_sending_none(
 
     What it must NOT do is clear what subbox already holds -- see
     SeratoController._cuedata_for. Only MP3 has a cue encoder on either side, so
-    an empty list can equally mean "this client can't read cues from this file".
+    an empty list can equally mean "this client can't read cues from this file"
+    for a container neither side has a reader for.
     """
     add_library_track(library, 'Artist/Album/known.mp3')
     beets_returns(orchestrator, {'sid-1': 'Artist/Album/known.mp3'})
-    orchestrator._mp3_encoder = MagicMock()
+    orchestrator._cue_encoder = MagicMock()
 
     crate = Crate('House')
     crate.add_track(Track.from_path('/Users/dj/Music/known.mp3'))
@@ -406,30 +417,24 @@ def test_an_empty_client_cue_list_is_not_the_same_as_sending_none(
     )
 
     assert playlists[0].tracks[0].client_cues == []
-    orchestrator._mp3_encoder.read_cues.assert_not_called()
+    orchestrator._cue_encoder.read_cues.assert_not_called()
 
 
-def test_a_non_mp3_track_imports_without_cues_rather_than_failing_the_import(
+def test_a_flacs_cues_and_grid_are_read_the_same_as_an_mp3s(
     orchestrator, tmp_path, library
 ):
+    """laker-93/pyserato#17, and the other half of the fix for #145.
+
+    Serato keeps its cues in a FLAC's Vorbis comments rather than an ID3 GEOB
+    frame, but the payload behind them is the same bytes. These two fixtures are
+    the same track with the same Serato payloads in two containers, so what this
+    asserts is that the container makes no difference to what subbox stores.
+
+    The real encoder is deliberately not mocked -- a mock is exactly what would
+    let a regression through here.
     """
-    laker-93/pymix#145, and the reason this file exists at all.
-
-    Serato keeps its cues in a FLAC's Vorbis comments and a WAV's ID3 chunk, but
-    pyserato only ships an MP3 encoder, so reading the server's copy of a FLAC as
-    an MP3 raised `HeaderNotFoundError: can't sync to MPEG frame` -- uncaught,
-    out of a background task, killing the whole job.
-
-    It landed at the worst possible moment: *after* every track had uploaded and
-    imported into beets, and *before* one playlist was built. The user was left
-    with their whole library in place, no playlists at all, and an "Import Failed"
-    screen advising them to upload it all again.
-
-    The real encoder is deliberately not mocked here -- a mock is exactly what
-    would have let this through.
-    """
-    add_library_track(library, 'Artist/Album/known.mp3')
-    add_library_track(library, 'Artist/Album/lossless.flac')
+    add_library_track(library, 'Artist/Album/known.mp3', source=ANALYSED_MP3)
+    add_library_track(library, 'Artist/Album/lossless.flac', source=ANALYSED_FLAC)
     beets_returns(orchestrator, {
         'sid-1': 'Artist/Album/known.mp3',
         'sid-2': 'Artist/Album/lossless.flac',
@@ -448,15 +453,67 @@ def test_a_non_mp3_track_imports_without_cues_rather_than_failing_the_import(
     )
 
     assert report.matched == 2
+    flac = next(t for t in playlists[0].tracks if t.path.suffix == '.flac')
+    mp3 = next(t for t in playlists[0].tracks if t.path.suffix == '.mp3')
+
+    assert [(c.name, c.start, c.end) for c in flac.serato_hot_cues] == ANALYSED_CUES
+    assert [(c.name, c.start, c.end) for c in flac.serato_hot_cues] == \
+           [(c.name, c.start, c.end) for c in mp3.serato_hot_cues]
+    assert flac.beatgrid == mp3.beatgrid
+    assert flac.beatgrid is not None and len(flac.beatgrid) == 1
+
+
+def test_a_container_with_no_reader_imports_without_cues_rather_than_failing(
+    orchestrator, tmp_path, library
+):
+    """
+    laker-93/pymix#145, and the reason this file exists at all.
+
+    pyserato reads MP3 and FLAC; WAV, AIFF and M4A are still to come
+    (laker-93/pyserato#16). Handed one of those it raises
+    UnsupportedContainerError, naming the container, which this catches -- where
+    it once raised `HeaderNotFoundError: can't sync to MPEG frame`, uncaught, out
+    of a background task, killing the whole job.
+
+    It landed at the worst possible moment: *after* every track had uploaded and
+    imported into beets, and *before* one playlist was built. The user was left
+    with their whole library in place, no playlists at all, and an "Import Failed"
+    screen advising them to upload it all again.
+
+    The real encoder is deliberately not mocked here -- a mock is exactly what
+    would have let this through.
+    """
+    add_library_track(library, 'Artist/Album/known.mp3')
+    add_library_track(library, 'Artist/Album/uncompressed.wav')
+    beets_returns(orchestrator, {
+        'sid-1': 'Artist/Album/known.mp3',
+        'sid-2': 'Artist/Album/uncompressed.wav',
+    })
+
+    crate = Crate('House')
+    crate.add_track(Track.from_path('/Users/dj/Music/known.mp3'))
+    crate.add_track(Track.from_path('/Users/dj/Music/uncompressed.wav'))
+    zip_path = write_crate_zip(tmp_path, crate)
+
+    playlists, report = orchestrator.get_subbox_playlists_from_crates(
+        USER, zip_path, manifest(
+            ('/Users/dj/Music/known.mp3', 'sid-1'),
+            ('/Users/dj/Music/uncompressed.wav', 'sid-2'),
+        )
+    )
+
+    assert report.matched == 2
     assert report.skipped == []
     assert report.warning() is None
     assert len(playlists[0].tracks) == 2
 
-    flac = next(t for t in playlists[0].tracks if t.path.suffix == '.flac')
-    assert flac.subbox_id == 'sid-2'
-    # No cues, because subbox cannot read them off this container yet -- but the
-    # track is in the playlist, which is the whole point.
-    assert flac.serato_hot_cues is None
+    wav = next(t for t in playlists[0].tracks if t.path.suffix == '.wav')
+    assert wav.subbox_id == 'sid-2'
+    # None, not [] -- "we have no reader for this container" is not the same
+    # answer as "this track has no cues", and the track is in the playlist
+    # either way, which is the whole point.
+    assert wav.serato_hot_cues is None
+    assert wav.beatgrid is None
 
 
 def test_a_file_whose_extension_lies_costs_that_track_and_not_the_import(
@@ -467,6 +524,12 @@ def test_a_file_whose_extension_lies_costs_that_track_and_not_the_import(
     name, so a `.mp3` holding FLAC bytes raises out of the tag load before the cue
     read is even reached. Skipped with a reason, like every other track subbox
     cannot place.
+
+    Worth knowing that pyserato *would* read this one now -- it dispatches on the
+    file's magic bytes, so the cue read is no longer the thing that trips. It
+    never gets asked, because music_tag is extension-driven and fails first, and
+    that is the remaining half of "the extension lies" on the server. Fixing it
+    means teaching the tag load to sniff too, which is not this change.
     """
     add_library_track(library, 'Artist/Album/known.mp3')
     add_library_track(library, 'Artist/Album/liar.mp3', source=FIXTURE_FLAC)
@@ -493,10 +556,17 @@ def test_a_file_whose_extension_lies_costs_that_track_and_not_the_import(
     assert len(playlists[0].tracks) == 1
 
 
-def test_an_mp3_serato_has_never_analysed_imports_without_cues(
+def test_an_mp3_serato_has_never_analysed_reads_as_no_cues(
     orchestrator, tmp_path, library
 ):
-    """No Markers2 frame at all. The pre-existing KeyError path, kept honest."""
+    """No Markers2 frame at all.
+
+    `[]`, not None: the file was read and it genuinely has no cues. This used to
+    be a KeyError out of pyserato that this layer caught and turned into None
+    (laker-93/pyserato#8). Nothing downstream tells the two apart -- both are
+    falsy at SeratoController._cuedata_for -- but "read, and empty" is the true
+    answer and it is the one None is now reserved against.
+    """
     add_library_track(library, 'Artist/Album/known.mp3')
     beets_returns(orchestrator, {'sid-1': 'Artist/Album/known.mp3'})
 
@@ -509,7 +579,7 @@ def test_an_mp3_serato_has_never_analysed_imports_without_cues(
     )
 
     assert report.matched == 1
-    assert playlists[0].tracks[0].serato_hot_cues is None
+    assert playlists[0].tracks[0].serato_hot_cues == []
 
 
 # The beat grid arrives on its own field and is read on its own condition: a
@@ -527,7 +597,7 @@ def test_a_grid_from_the_client_is_used_and_the_servers_copy_is_not_read(
 ):
     add_library_track(library, 'Artist/Album/known.mp3')
     beets_returns(orchestrator, {'sid-1': 'Artist/Album/known.mp3'})
-    orchestrator._mp3_encoder = MagicMock()
+    orchestrator._cue_encoder = MagicMock()
     orchestrator._beatgrid_encoder = MagicMock()
 
     crate = Crate('House')
@@ -548,7 +618,7 @@ def test_a_grid_from_the_client_is_used_and_the_servers_copy_is_not_read(
 def test_without_a_client_grid_the_servers_copy_is_still_read(orchestrator, tmp_path, library):
     add_library_track(library, 'Artist/Album/known.mp3')
     beets_returns(orchestrator, {'sid-1': 'Artist/Album/known.mp3'})
-    orchestrator._mp3_encoder = MagicMock()
+    orchestrator._cue_encoder = MagicMock()
     orchestrator._beatgrid_encoder = MagicMock()
     orchestrator._beatgrid_encoder.read_beatgrid.return_value = [
         SeratoTempo(position=0.045958, bpm=175.0),
@@ -581,7 +651,7 @@ def test_an_empty_client_grid_is_not_the_same_as_sending_none(
     """
     add_library_track(library, 'Artist/Album/known.mp3')
     beets_returns(orchestrator, {'sid-1': 'Artist/Album/known.mp3'})
-    orchestrator._mp3_encoder = MagicMock()
+    orchestrator._cue_encoder = MagicMock()
     orchestrator._beatgrid_encoder = MagicMock()
 
     crate = Crate('House')
@@ -600,7 +670,7 @@ def test_a_track_whose_grid_cannot_be_read_still_imports(orchestrator, tmp_path,
     """One unreadable grid is not a reason to fail the import of every track (#145)."""
     add_library_track(library, 'Artist/Album/known.mp3')
     beets_returns(orchestrator, {'sid-1': 'Artist/Album/known.mp3'})
-    orchestrator._mp3_encoder = MagicMock()
+    orchestrator._cue_encoder = MagicMock()
     orchestrator._beatgrid_encoder = MagicMock()
     orchestrator._beatgrid_encoder.read_beatgrid.side_effect = ValueError('not a grid')
 
