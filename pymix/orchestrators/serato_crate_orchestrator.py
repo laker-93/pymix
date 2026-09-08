@@ -5,8 +5,9 @@ from typing import Dict, List, Optional
 
 import music_tag
 from pyserato.builder import Builder
-from pyserato.encoders.beatgrid_mp3_encoder import BeatgridMp3Encoder
-from pyserato.encoders.v2_mp3_encoder import V2Mp3Encoder
+from pyserato.encoders.beatgrid_encoder import BeatgridEncoder
+from pyserato.encoders.io import UnsupportedContainerError
+from pyserato.encoders.v2_encoder import V2Encoder
 from pyserato.model.crate import Crate
 from pyserato.model.hot_cue import HotCue
 
@@ -26,12 +27,12 @@ logger = logging.getLogger(__name__)
 
 
 class SeratoCrateOrchestrator:
-    # The formats subbox can read Serato's cues out of on the server. Serato
-    # itself stores Markers2 in FLAC (a base64'd Vorbis comment), WAV and AIFF
-    # (an ID3 chunk, byte-identical to the MP3 GEOB frame) and M4A (a freeform
-    # atom) as well, but pyserato only ships an MP3 encoder, so for anything else
-    # the server has no reading to offer -- laker-93/pyserato#12.
-    _CUE_READABLE_SUFFIXES = frozenset({'.mp3'})
+    # Which formats the server can read Serato's cues out of is pyserato's
+    # answer, not a list kept here. It reads MP3 and FLAC and raises
+    # UnsupportedContainerError, naming the container, for WAV, AIFF and M4A
+    # (laker-93/pyserato#16) -- and it decides from the file's magic bytes, so a
+    # FLAC that arrived named .mp3 is still read as a FLAC. A suffix set here
+    # was both a second copy of that answer and a worse one.
 
     def __init__(
         self,
@@ -44,8 +45,8 @@ class SeratoCrateOrchestrator:
         self._db_controller = db_controller
         self._rb_xml_controller = rb_xml_controller
         self._serving_music_path_base = serving_music_path_base
-        self._mp3_encoder = V2Mp3Encoder()
-        self._beatgrid_encoder = BeatgridMp3Encoder()
+        self._cue_encoder = V2Encoder()
+        self._beatgrid_encoder = BeatgridEncoder()
 
     def _resolve_identity(
         self,
@@ -100,11 +101,14 @@ class SeratoCrateOrchestrator:
 
         Never fatal, for the reason the cue reader is never fatal (#145).
         """
-        if path.suffix.lower() not in self._CUE_READABLE_SUFFIXES:
-            logger.debug('no serato beat grid reader for %s; importing it without one', path)
-            return None
         try:
             return beatgrid.from_serato(self._beatgrid_encoder.read_beatgrid(song)) or None
+        except UnsupportedContainerError as exc:
+            # Not a failure and not worth a warning: a real library is full of
+            # formats subbox has no reader for, and they import fine without a
+            # grid.
+            logger.debug('no serato beat grid reader for %s (%s)', path, exc.container)
+            return None
         except Exception:
             logger.warning(
                 'could not read a serato beat grid from %s; importing it without one',
@@ -114,7 +118,13 @@ class SeratoCrateOrchestrator:
 
     def _read_cues_from_library_copy(self, path: Path, song) -> Optional[List[HotCue]]:
         """
-        The cues on the server's own copy of the file, or None if it has none to give.
+        The cues on the server's own copy of the file, or None if it could not look.
+
+        `[]` and None are different answers, the same way they are on the client:
+        `[]` is a file that was read and has no cues -- one Serato has never
+        analysed -- and None is a file subbox could not read cues off at all.
+        Nothing downstream is cleared by either, but the distinction is what
+        keeps "not implemented" from being recorded as "this track has none".
 
         Only reached when the client sent no cues for this crate entry, which is
         also how "this client cannot read cues off this format" arrives -- the
@@ -129,19 +139,20 @@ class SeratoCrateOrchestrator:
         imported, no playlists, and an "Import Failed" screen telling them to
         upload again (#145).
         """
-        if path.suffix.lower() not in self._CUE_READABLE_SUFFIXES:
-            # Not a failure and not worth a warning: most of a real library is
-            # formats we cannot read cues from, and they import fine without them.
-            logger.debug('no serato cue reader for %s; importing it without cues', path)
-            return None
         try:
-            return self._mp3_encoder.read_cues(song)
-        except KeyError:
-            # An MP3 Serato has never analysed: no Markers2 frame at all.
+            return self._cue_encoder.read_cues(song)
+        except UnsupportedContainerError as exc:
+            # Not a failure and not worth a warning: a real library is full of
+            # formats subbox has no reader for, and they import fine without
+            # cues. Distinct from the `except Exception` below, which is a file
+            # that should have been readable and was not.
+            logger.debug('no serato cue reader for %s (%s)', path, exc.container)
             return None
         except Exception:
-            # A .mp3 that is not one, a truncated file, or a Markers2 blob this
-            # decoder does not understand. One unreadable track is not a reason to
+            # A truncated file, or a Markers2 blob this decoder does not
+            # understand. A track Serato has never analysed is not this case:
+            # it has no Markers2 tag, which pyserato reads as an empty list
+            # (laker-93/pyserato#8). One unreadable track is not a reason to
             # fail the import of every other one.
             logger.warning(
                 'could not read serato cues from %s; importing it without them',
