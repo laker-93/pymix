@@ -122,12 +122,39 @@ class RekordboxXMLController:
 
 
     def get_path_by_subbox_id(self, username: str, subbox_id: str, public: bool) -> Path:
+        """
+        The beets-side path (`/music/...`) of the one item carrying ``subbox_id``.
+
+        A subbox_id is meant to name exactly one item, but beets can hold two:
+        the id lives in the file's tags, so re-uploading a file beets already has
+        imports a second item -- `foo.1.mp3` -- carrying the same id. That is the
+        normal aftermath of an import that failed *after* `beet import` landed the
+        audio and before the job finished, and the user's obvious next move is to
+        retry the upload.
+
+        `beet ls -p` then prints two lines, and this used to hand back
+        `Path("<first>\n<second>")` verbatim. Nothing downstream notices a path
+        with a newline in it; it simply fails `exists()`, so every crate entry was
+        dropped as "no file in your library for that track" and the Serato import
+        died with "none of the N tracks in your N crates are in your subbox
+        library" -- a message pointing at the crates, which were fine.
+
+        Take the first line: it is the original import, the copy Navidrome and the
+        playlists already reference, while the `.1` is the redundant retry. Warn,
+        because a duplicate is still something to clean up.
+        """
         container_name = "beets" if public else f"beets{username}"
         beets_command = f"beet ls -p subbox_id::{subbox_id}"
         result = self._beets_exec.execute(container_name, beets_command)
         logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
-        path = Path(result)
-        return path
+        lines = [line for line in result.splitlines() if line.strip()]
+        if len(lines) > 1:
+            logger.warning(
+                'subbox_id %s matches %d beets items for user %s (%s); using the first. '
+                'A re-upload of a file beets already had leaves a duplicate behind.',
+                subbox_id, len(lines), username, lines,
+            )
+        return Path(lines[0] if lines else result.strip())
 
     @staticmethod
     def _subbox_id_or_query(subbox_ids: List[str]) -> List[str]:
