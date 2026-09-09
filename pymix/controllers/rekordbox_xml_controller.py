@@ -4,6 +4,7 @@ import os
 import re
 
 import anyio
+import beets
 from pathlib import Path
 from typing import List, Optional
 import mediafile
@@ -44,6 +45,29 @@ from pymix.utils.make_readable import make_readable
 from pymix.utils.tag_subbox_id import get_subbox_id
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_beets_defaults():
+    """
+    Make `beets.config` usable in-process, without a writable HOME.
+
+    `beets.config` is a lazy confuse config that materialises on first access by
+    reading the *user's* config dir -- `$BEETSDIR`, else `~/.config/beets`. That
+    is right for the `beet` CLI and wrong for us: pymix drives the beets Python
+    API directly (`Item.write()` below), and the container has no beets config of
+    its own to find. Worse, when HOME is not readable -- the dev stack runs pymix
+    as the host uid with `HOME=/` -- that first access raises PermissionError and
+    leaves confuse materialised with *zero* sources, so every later lookup fails
+    as `NotFoundError: id3v23 not found` from inside `Item.write()` and takes the
+    whole import down after the audio has already landed.
+
+    Reading with `user=False` loads only beets' packaged `config_default.yaml`,
+    which is the entirety of what we want here. Idempotent: confuse re-reads
+    happily, and once `sources` is non-empty there is nothing left to do.
+    """
+    if beets.config.sources:
+        return
+    beets.config.read(user=False, defaults=True)
 
 
 class FooPlugin(BeetsPlugin):
@@ -260,6 +284,7 @@ class RekordboxXMLController:
         if not duplicates_paths:
             return
 
+        _ensure_beets_defaults()
         FooPlugin()
         for duplicate in duplicates_paths:
             path_in_pymix = self._resolve_duplicate_path(username, duplicate)
