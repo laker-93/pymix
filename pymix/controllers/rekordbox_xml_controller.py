@@ -4,6 +4,7 @@ import os
 import re
 
 import anyio
+import beets
 from pathlib import Path
 from typing import List, Optional
 import mediafile
@@ -44,6 +45,29 @@ from pymix.utils.make_readable import make_readable
 from pymix.utils.tag_subbox_id import get_subbox_id
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_beets_defaults():
+    """
+    Make `beets.config` usable in-process, without a writable HOME.
+
+    `beets.config` is a lazy confuse config that materialises on first access by
+    reading the *user's* config dir -- `$BEETSDIR`, else `~/.config/beets`. That
+    is right for the `beet` CLI and wrong for us: pymix drives the beets Python
+    API directly (`Item.write()` below), and the container has no beets config of
+    its own to find. Worse, when HOME is not readable -- the dev stack runs pymix
+    as the host uid with `HOME=/` -- that first access raises PermissionError and
+    leaves confuse materialised with *zero* sources, so every later lookup fails
+    as `NotFoundError: id3v23 not found` from inside `Item.write()` and takes the
+    whole import down after the audio has already landed.
+
+    Reading with `user=False` loads only beets' packaged `config_default.yaml`,
+    which is the entirety of what we want here. Idempotent: confuse re-reads
+    happily, and once `sources` is non-empty there is nothing left to do.
+    """
+    if beets.config.sources:
+        return
+    beets.config.read(user=False, defaults=True)
 
 
 class FooPlugin(BeetsPlugin):
@@ -122,12 +146,39 @@ class RekordboxXMLController:
 
 
     def get_path_by_subbox_id(self, username: str, subbox_id: str, public: bool) -> Path:
+        """
+        The beets-side path (`/music/...`) of the one item carrying ``subbox_id``.
+
+        A subbox_id is meant to name exactly one item, but beets can hold two:
+        the id lives in the file's tags, so re-uploading a file beets already has
+        imports a second item -- `foo.1.mp3` -- carrying the same id. That is the
+        normal aftermath of an import that failed *after* `beet import` landed the
+        audio and before the job finished, and the user's obvious next move is to
+        retry the upload.
+
+        `beet ls -p` then prints two lines, and this used to hand back
+        `Path("<first>\n<second>")` verbatim. Nothing downstream notices a path
+        with a newline in it; it simply fails `exists()`, so every crate entry was
+        dropped as "no file in your library for that track" and the Serato import
+        died with "none of the N tracks in your N crates are in your subbox
+        library" -- a message pointing at the crates, which were fine.
+
+        Take the first line: it is the original import, the copy Navidrome and the
+        playlists already reference, while the `.1` is the redundant retry. Warn,
+        because a duplicate is still something to clean up.
+        """
         container_name = "beets" if public else f"beets{username}"
         beets_command = f"beet ls -p subbox_id::{subbox_id}"
         result = self._beets_exec.execute(container_name, beets_command)
         logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
-        path = Path(result)
-        return path
+        lines = [line for line in result.splitlines() if line.strip()]
+        if len(lines) > 1:
+            logger.warning(
+                'subbox_id %s matches %d beets items for user %s (%s); using the first. '
+                'A re-upload of a file beets already had leaves a duplicate behind.',
+                subbox_id, len(lines), username, lines,
+            )
+        return Path(lines[0] if lines else result.strip())
 
     @staticmethod
     def _subbox_id_or_query(subbox_ids: List[str]) -> List[str]:
@@ -233,6 +284,7 @@ class RekordboxXMLController:
         if not duplicates_paths:
             return
 
+        _ensure_beets_defaults()
         FooPlugin()
         for duplicate in duplicates_paths:
             path_in_pymix = self._resolve_duplicate_path(username, duplicate)
