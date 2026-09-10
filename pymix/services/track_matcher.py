@@ -64,6 +64,8 @@ class TrackMatcher:
         subsonic_client: SubsonicClient,
         concurrency: int = IMPORT_MATCH_CONCURRENCY,
         skip_if_library_empty: bool = False,
+        max_tier: int = 3,
+        min_confidence: float = 0.0,
     ):
         """
         ``skip_if_library_empty`` is opt-in because it is only sound when nothing is
@@ -73,11 +75,20 @@ class TrackMatcher:
         race costs the tracks matched too early; a cached "empty" verdict would cost
         the whole import. The upload preview runs against a library nobody is
         writing to, so it opts in.
+
+        ``max_tier`` and ``min_confidence`` are forwarded verbatim to
+        :meth:`SubsonicClient.get_track_match` (see its docstring). They belong to the
+        matcher rather than to an individual :meth:`match` call on purpose: the memo
+        cache is keyed on ``(title, artist, album)`` alone, so a per-call strictness
+        would let one caller be served a verdict reached under another caller's bar.
+        One matcher, one standard of proof.
         """
         self._subsonic_client = subsonic_client
         self._semaphore = asyncio.Semaphore(concurrency)
         self._tasks: dict[tuple, asyncio.Task] = {}
         self._skip_if_library_empty = skip_if_library_empty
+        self._max_tier = max_tier
+        self._min_confidence = min_confidence
         self._empty_check: Optional[asyncio.Task] = None
         self._n_requests = 0
         self._n_lookups = 0
@@ -108,7 +119,10 @@ class TrackMatcher:
 
     async def _lookup(self, user: dict, title: str, artist: str, album: Optional[str]) -> MatchResult:
         async with self._semaphore:
-            return await self._subsonic_client.get_track_match(user, title, artist, album)
+            return await self._subsonic_client.get_track_match(
+                user, title, artist, album,
+                max_tier=self._max_tier, min_confidence=self._min_confidence,
+            )
 
     async def _library_is_empty(self, user: dict) -> bool:
         """Answer once per matcher, sharing the single probe between concurrent callers."""

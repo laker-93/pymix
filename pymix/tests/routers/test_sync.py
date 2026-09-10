@@ -5,7 +5,16 @@ import pytest
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
-from pymix.routers.sync import SyncPlaylistsRequest, sync_download, sync_playlists
+from pymix.clients.subsonic_client import SubsonicClient
+from pymix.model.subboxtrack import SubBoxTrack
+from pymix.routers.sync import (
+    SyncPlaylistsRequest,
+    Track,
+    Tracks,
+    match_tracks,
+    sync_download,
+    sync_playlists,
+)
 
 
 @pytest.mark.anyio
@@ -280,3 +289,72 @@ async def test_sync_playlists_fails_the_sync_when_the_xml_cannot_be_built(tmp_pa
     assert result["downloadFilename"] is None
     assert result["xmlIncluded"] is False
     fb_file_handler.sync.assert_not_called()
+
+
+# --- /sync/match_tracks false positives (#164) --------------------------------------
+
+def _matching_client(library):
+    """A real SubsonicClient whose three Navidrome searches answer from ``library``.
+
+    Only the queries are faked: the tier logic and the scoring under test are the real
+    ones, so these tests exercise the same path the prod failure took.
+    """
+    client = SubsonicClient(mock.MagicMock(), mock.MagicMock(), "v", "foo", "bar", None, "test")
+    client.library_is_empty = mock.AsyncMock(return_value=False)
+    # Tier 1 queries title+artist, tiers 2 and 3 query a title or a single token. The
+    # prod library returned nothing for the first two and only surfaced the wrong track
+    # once the token tier fanned out, so model exactly that.
+    client.query_tracks_by = mock.AsyncMock(return_value=[])
+    client.query_track_by_name = mock.AsyncMock(
+        side_effect=lambda user, term: library if " " not in term else []
+    )
+    return client
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("xml_title, xml_artist, xml_album, server_track", [
+    # A different artist entirely, rescued by a marginal core title and an exact album.
+    ("Umbra Anchor 5150-003", "Dune Signal", "Paper Machines",
+     ("Tessellate Anchor 904-002", "Aurora Static", "Paper Machines")),
+    # The same artist, a different song — the pair the score alone cannot separate.
+    ("Tessellate Vantage 5150-002", "Ember Lattice", "Salt Air Sessions",
+     ("Zenith Vantage 904-001", "Ember Lattice", "Tidal Notation")),
+])
+async def test_match_tracks_does_not_claim_an_unrelated_track_is_already_owned(
+    xml_title, xml_artist, xml_album, server_track
+):
+    """#164: a false `matched` here means the file is never uploaded *and* the playlist
+    is built from someone else's track, with the job still reporting success."""
+    name, artist, album = server_track
+    client = _matching_client([SubBoxTrack(name=name, artist=artist, album=album)])
+
+    response = await match_tracks(
+        tracks=Tracks(tracks=[Track(title=xml_title, artist=xml_artist, album=xml_album)]),
+        user={"username": "demoadmin", "password": "p"},
+        subsonic_client=client,
+    )
+
+    assert response.tracks[0].matched is False
+    # ...and the response echoes what the client asked for, so it uploads that track.
+    assert response.tracks[0].title == xml_title
+
+
+@pytest.mark.anyio
+async def test_match_tracks_still_dedups_a_track_the_user_really_has():
+    """The stricter bar must not turn every re-upload into a duplicate: ordinary tag
+    drift (a track-number prefix, an artist typo, a "(Deluxe)" album) still matches."""
+    client = _matching_client([])
+    client.query_tracks_by = mock.AsyncMock(return_value=[
+        SubBoxTrack(name="One For Vertigo", artist="Skee Mask", album="Compro (Deluxe)"),
+    ])
+
+    response = await match_tracks(
+        tracks=Tracks(tracks=[
+            Track(title="06 One For Vertigo", artist="Skee Msak", album="Compro"),
+        ]),
+        user={"username": "demoadmin", "password": "p"},
+        subsonic_client=client,
+    )
+
+    assert response.tracks[0].matched is True
+    assert response.tracks[0].title == "One For Vertigo"
