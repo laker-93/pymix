@@ -96,7 +96,7 @@ async def test_update_tracks_with_subid_looks_each_track_up_once_across_playlist
     # for the 99-track fixture in #104. Both copies must still get their sub_track_id.
     queries = []
 
-    async def get_track_match(user, title, artist, album=None):
+    async def get_track_match(user, title, artist, album=None, **_strictness):
         queries.append((title, artist, album))
         return (SubBoxTrack(artist=artist, album=album, name=title, sub_track_id=7), 1.0)
 
@@ -134,8 +134,11 @@ async def test_update_tracks_with_subid_passes_album(mock_playlist_a):
         user={'username': 'demoadmin'}, subbox_playlists=[mock_playlist_a]
     )
 
+    # The trailing pair is TrackMatcher forwarding its defaults — this caller wants the
+    # permissive tiers, unlike /sync/match_tracks (#164).
     mock_subsonic_client.get_track_match.assert_awaited_once_with(
-        {'username': 'demoadmin'}, 'DJ John - IT', 'DJ John', 'Utopia (2007)'
+        {'username': 'demoadmin'}, 'DJ John - IT', 'DJ John', 'Utopia (2007)',
+        max_tier=3, min_confidence=0.0,
     )
 
 
@@ -144,7 +147,7 @@ async def test_update_tracks_with_subid_matches_concurrently(mock_playlist_a):
     in_flight = 0
     max_in_flight = 0
 
-    async def get_track_match(user, title, artist, album=None):
+    async def get_track_match(user, title, artist, album=None, **_strictness):
         nonlocal in_flight, max_in_flight
         in_flight += 1
         max_in_flight = max(max_in_flight, in_flight)
@@ -197,7 +200,7 @@ async def test_update_tracks_with_subid_reuses_a_shared_matcher(mock_playlist_a)
 
 @pytest.mark.anyio
 async def test_update_tracks_with_subid_survives_a_failed_lookup(mock_playlist_a):
-    async def get_track_match(user, title, artist, album=None):
+    async def get_track_match(user, title, artist, album=None, **_strictness):
         if title == 'bad':
             raise KeyError('no such track')
         return (SubBoxTrack(artist=artist, album=album, name=title, sub_track_id=7), 1.0)

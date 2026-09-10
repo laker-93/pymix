@@ -49,6 +49,15 @@ RATING_RETRY_BUDGET = 20
 # on the shared remix token). core_sim("rodent", "distant lights") = 0.30, well under this.
 CORE_TITLE_FLOOR = 0.5
 
+# The same idea for the artist, and for the inverse failure: a marginal core title must not
+# be able to drag a plainly *wrong* artist over a loose threshold. Issue #164 uploaded
+# "Umbra Anchor 5150-003" by Dune Signal and had it falsely matched to "Tessellate Anchor
+# 904-002" by Aurora Static — core_sim 0.565 (barely over the floor above) plus an exact
+# album match carried a total of 0.633 past the token tier's 0.5, on an artist_sim of 0.333.
+# Gated only when *both* sides name an artist: an empty artist on either side is missing
+# information, not a disagreement, and vetoing on it would reject every untagged track.
+ARTIST_FLOOR = 0.5
+
 # Relative weights of the composite match score. The core song title and the artist carry
 # the match; the version qualifier (the "(Kode 9 remix)" part) and album are lighter, so a
 # mismatched or absent qualifier only ranks a candidate *down* — it can never rescue a
@@ -87,20 +96,24 @@ def score_track_match(
     core_a: str, qualifier_a: str, artist_a: str, album_a: Optional[str],
     core_b: str, qualifier_b: str, artist_b: str, album_b: Optional[str],
 ) -> Optional[float]:
-    """Composite similarity in ``[0, 1]`` for two split tracks, or ``None`` if the
-    core-title gate fails.
+    """Composite similarity in ``[0, 1]`` for two split tracks, or ``None`` if either
+    independent gate fails.
 
-    The core song titles must independently clear :data:`CORE_TITLE_FLOOR` — below it the
-    pair is rejected outright, no matter how well artist/album/qualifier match. Above it,
-    the qualifier acts as a soft rank-down: an exact version qualifier boosts the score so
-    the right remix outranks the original, while a mismatched or absent qualifier merely
-    lowers the rank (it can still match when it is the only candidate).
+    The core song titles must clear :data:`CORE_TITLE_FLOOR`, and — when both sides name
+    one — the artists must clear :data:`ARTIST_FLOOR`. Below either, the pair is rejected
+    outright however well the remaining fields match: the two gates are what stop a strong
+    title rescuing a wrong artist (#164) or a strong artist rescuing a wrong title (#42).
+    Above them, the qualifier acts as a soft rank-down: an exact version qualifier boosts
+    the score so the right remix outranks the original, while a mismatched or absent
+    qualifier merely lowers the rank (it can still match when it is the only candidate).
     """
     core_sim = SequenceMatcher(None, core_a, core_b).ratio()
     if core_sim < CORE_TITLE_FLOOR:
         return None
 
     artist_sim = SequenceMatcher(None, artist_a, artist_b).ratio()
+    if artist_a and artist_b and artist_sim < ARTIST_FLOOR:
+        return None
     # Neither side carrying a qualifier is not a disagreement — score it a perfect 1.0 so a
     # plain title-vs-title match isn't penalised for lacking version info.
     if qualifier_a or qualifier_b:
@@ -463,8 +476,9 @@ class SubsonicClient(BaseAPIClient):
         Widens the search in up to three tiers, each looser than the last: (1) query by
         title+artist at threshold 0.8, (2) query by title only at 0.6, (3) query by each
         token of the title at 0.5. ``max_tier`` caps how far it widens — a caller making a
-        high-stakes, one-way decision (e.g. the wishlist reconcile flip to the terminal
-        ``available`` state) passes ``max_tier=2`` to skip the token tier entirely, since
+        high-stakes, one-way decision (the wishlist reconcile flip to the terminal
+        ``available`` state; ``POST /sync/match_tracks``, whose ``matched: true`` means the
+        track is never uploaded) passes ``max_tier=2`` to skip the token tier entirely, since
         that tier's per-token candidate expansion is what surfaces same-artist wrong-song
         matches (issue #42). ``min_confidence`` raises the acceptance bar as a floor under
         every tier's own threshold, so such a caller can also demand more confidence than
@@ -611,10 +625,16 @@ class SubsonicClient(BaseAPIClient):
             )
 
             if similarity is None:
-                # Core song title below the floor — a different song, however well the
-                # artist/album/qualifier happen to line up. Rejected outright (issue #42).
+                # One of the two independent gates failed: a different song however well the
+                # artist lines up (#42), or a different artist however well the title does
+                # (#164). Name which, so a log reading tells the two apart.
+                gate = (
+                    f"core title below floor ({CORE_TITLE_FLOOR})"
+                    if SequenceMatcher(None, core_q, track_core).ratio() < CORE_TITLE_FLOOR
+                    else f"artist below floor ({ARTIST_FLOOR})"
+                )
                 logger.warning(
-                    f"Core title below floor ({CORE_TITLE_FLOOR}) for '{title}' by '{artist}' against track '{track}'"
+                    f"Rejected — {gate} — for '{title}' by '{artist}' against track '{track}'"
                 )
             elif similarity >= similarity_threshold:
                 results[similarity] = track

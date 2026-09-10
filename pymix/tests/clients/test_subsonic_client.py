@@ -144,6 +144,40 @@ def test_missing_qualifier_still_matches_plain_titles():
     assert _score("Rodent", "Rodent") == 1.0
 
 
+# --- the artist gate (#164) --------------------------------------------------------
+
+def test_artist_gate_rejects_wrong_artist_even_with_a_passable_title_and_exact_album():
+    # The exact pair that reached prod: a core title barely over CORE_TITLE_FLOOR (0.565)
+    # plus an identical album scored 0.633, over the token tier's 0.5 acceptance, on an
+    # artist_sim of 0.333. The artist is plainly a different one, so it is now rejected.
+    assert _score(
+        "Umbra Anchor 5150-003", "Tessellate Anchor 904-002",
+        artist_a="dune signal", artist_b="aurora static",
+        album_a="paper machines", album_b="paper machines",
+    ) is None
+
+
+def test_artist_gate_does_not_fire_when_either_side_has_no_artist():
+    # An absent artist is missing information, not a disagreement — gating on it would
+    # reject every untagged track outright.
+    assert _score("Rodent", "Rodent", artist_a="", artist_b="burial") is not None
+    assert _score("Rodent", "Rodent", artist_a="burial", artist_b="") is not None
+
+
+@pytest.mark.parametrize("artist_a, artist_b", [
+    ("ember lattice", "ember latice"),                                  # typo
+    ("mount kimbie & king krule", "mount kimbie and king krule"),       # "&" spelled out
+    ("roisin murphy feat. crooked man", "roisin murphy"),               # "feat." dropped
+])
+def test_artist_gate_tolerates_ordinary_tag_drift(artist_a, artist_b):
+    # The gate must only catch a *different* artist. These are the same artist written
+    # differently, and all still have to dedup.
+    assert _score(
+        "Tessellate Vantage", "Tessellate Vantage",
+        artist_a=artist_a, artist_b=artist_b,
+    ) is not None
+
+
 # --- _find_best_match -------------------------------------------------------------
 
 @pytest.mark.anyio

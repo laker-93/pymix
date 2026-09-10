@@ -173,6 +173,25 @@ async def map_meta(
 # makes each chunk faster.
 MATCH_TRACKS_CONCURRENCY = int(os.environ.get("MATCH_TRACKS_CONCURRENCY", "16"))
 
+# This endpoint is the client's pre-upload dedup, and a `matched: true` here means the
+# track is *never uploaded*. That makes it a high-stakes, one-way decision in exactly the
+# sense get_track_match's docstring warns about, so it buys its matches at the same price
+# the wishlist reconcile flip does rather than on the permissive defaults (#164).
+#
+# Tier 3 searches one query per title token, which expands the candidate pool far beyond
+# the title — that is where a false positive comes from, so don't widen that far. The
+# confidence floor is the part that actually does the work: it applies under *every*
+# tier's own threshold, so it rejects a bad candidate however it was reached. Both of the
+# pairs reported in #164 (0.633 and 0.766) fall below it; ordinary tag drift that should
+# still dedup does not — a track-number prefix, an artist typo, a "(Deluxe)" album, "&"
+# vs "and", a "feat." moved between title and artist all score 0.80-0.99.
+#
+# The residual risk is inverted, and deliberately: a miss here re-uploads a track the user
+# already owns (a duplicate file, recoverable), where a false match silently dropped their
+# audio and put a stranger's track in their playlist.
+MATCH_TRACKS_MAX_TIER = 2
+MATCH_TRACKS_MIN_CONFIDENCE = 0.8
+
 @router.post("/sync/match_tracks", tags=["sync"])
 @inject
 async def match_tracks(
@@ -187,7 +206,8 @@ async def match_tracks(
     # library it is matching against is still empty (#105). This is the client's
     # pre-upload preview, so an empty library is the normal first-time answer.
     matcher = TrackMatcher(
-        subsonic_client, concurrency=MATCH_TRACKS_CONCURRENCY, skip_if_library_empty=True
+        subsonic_client, concurrency=MATCH_TRACKS_CONCURRENCY, skip_if_library_empty=True,
+        max_tier=MATCH_TRACKS_MAX_TIER, min_confidence=MATCH_TRACKS_MIN_CONFIDENCE,
     )
 
     async def match_one(track: Track) -> MatchedTrack:

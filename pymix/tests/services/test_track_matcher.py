@@ -19,7 +19,7 @@ async def test_resolves_each_distinct_track_once():
     # not two (#104).
     calls = []
 
-    async def get_track_match(user, title, artist, album=None):
+    async def get_track_match(user, title, artist, album=None, **_strictness):
         calls.append((title, artist, album))
         return _match(title)
 
@@ -39,7 +39,7 @@ async def test_resolves_each_distinct_track_once():
 async def test_cache_key_ignores_case_and_surrounding_whitespace():
     calls = []
 
-    async def get_track_match(user, title, artist, album=None):
+    async def get_track_match(user, title, artist, album=None, **_strictness):
         calls.append((title, artist, album))
         return _match(title)
 
@@ -58,7 +58,7 @@ async def test_album_is_part_of_the_cache_key():
     # get_track_match's result genuinely depends on album (#96), so two different
     # albums must not collapse onto one entry.
     client = mock.AsyncMock()
-    client.get_track_match = mock.AsyncMock(side_effect=lambda user, title, artist, album=None: _match(title))
+    client.get_track_match = mock.AsyncMock(side_effect=lambda user, title, artist, album=None, **_strictness: _match(title))
 
     matcher = TrackMatcher(client)
     await matcher.match(USER, 'IT', 'DJ John', 'Utopia (2007)')
@@ -72,7 +72,7 @@ async def test_album_is_part_of_the_cache_key():
 async def test_concurrent_requests_for_one_track_share_a_single_lookup():
     calls = 0
 
-    async def get_track_match(user, title, artist, album=None):
+    async def get_track_match(user, title, artist, album=None, **_strictness):
         nonlocal calls
         calls += 1
         await asyncio.sleep(0.01)
@@ -93,7 +93,7 @@ async def test_distinct_lookups_overlap_up_to_the_concurrency_cap():
     in_flight = 0
     max_in_flight = 0
 
-    async def get_track_match(user, title, artist, album=None):
+    async def get_track_match(user, title, artist, album=None, **_strictness):
         nonlocal in_flight, max_in_flight
         in_flight += 1
         max_in_flight = max(max_in_flight, in_flight)
@@ -149,7 +149,7 @@ async def test_empty_library_costs_one_probe_instead_of_a_lookup_per_track():
 async def test_non_empty_library_is_probed_once_and_then_matched_normally():
     client = mock.AsyncMock()
     client.library_is_empty = mock.AsyncMock(return_value=False)
-    client.get_track_match = mock.AsyncMock(side_effect=lambda user, title, artist, album=None: _match(title))
+    client.get_track_match = mock.AsyncMock(side_effect=lambda user, title, artist, album=None, **_strictness: _match(title))
 
     matcher = TrackMatcher(client, skip_if_library_empty=True)
     await matcher.match(USER, 'Volya', 'Szare', 'bar')
@@ -189,3 +189,31 @@ async def test_failure_reaches_every_caller_and_is_not_retried():
             await matcher.match(USER, 'Volya', 'Szare', 'bar')
 
     assert client.get_track_match.await_count == 1
+
+
+@pytest.mark.anyio
+async def test_strictness_is_forwarded_to_every_lookup():
+    # #164: /sync/match_tracks needs a narrower tier and a higher bar than the defaults,
+    # and the only way it reaches get_track_match is through here.
+    client = mock.AsyncMock()
+    client.get_track_match = mock.AsyncMock(return_value=None)
+
+    matcher = TrackMatcher(client, max_tier=2, min_confidence=0.8)
+    await matcher.match(USER, 'Volya', 'Szare', 'bar')
+
+    client.get_track_match.assert_awaited_once_with(
+        USER, 'Volya', 'Szare', 'bar', max_tier=2, min_confidence=0.8
+    )
+
+
+@pytest.mark.anyio
+async def test_defaults_are_the_permissive_ones_every_other_caller_relies_on():
+    client = mock.AsyncMock()
+    client.get_track_match = mock.AsyncMock(return_value=None)
+
+    matcher = TrackMatcher(client)
+    await matcher.match(USER, 'Volya', 'Szare', 'bar')
+
+    client.get_track_match.assert_awaited_once_with(
+        USER, 'Volya', 'Szare', 'bar', max_tier=3, min_confidence=0.0
+    )
