@@ -24,6 +24,7 @@ import logging
 import os
 import threading
 import time
+from typing import Optional
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 from prometheus_client.core import GaugeMetricFamily
@@ -309,18 +310,25 @@ def job_started(job_id: str, job: str) -> None:
         _job_started_at[job_id] = (job, time.monotonic())
 
 
-def job_finished(job_id: str, result: bool) -> None:
+def job_finished(job_id: str, result: bool, outcome: Optional[str] = None) -> None:
     """Record a job reaching a terminal state, and how long it took.
 
     A job whose start was not seen (started before a restart, or created by a path
     that does not call `job_started`) is still *counted* under `job="unknown"` -- the
     completion is real and losing it would understate the failure rate -- but it is
     not timed, because there is no honest number to report.
+
+    ``outcome`` splits the successes: a job that ran but left some of the user's
+    tracks behind is `partial`, not `succeeded` (#171). Without it a half-failing
+    import is indistinguishable from a clean one on the dashboard, which is the
+    operator-side version of the bug this whole change is about. The dashboard
+    groups by the label, so the new value appears as its own series rather than
+    quietly changing an existing one.
     """
     with _job_started_lock:
         started = _job_started_at.pop(job_id, None)
 
-    outcome = "succeeded" if result else "failed"
+    outcome = outcome or ("succeeded" if result else "failed")
     if started is None:
         jobs_completed_total.labels(job="unknown", outcome=outcome).inc()
         return

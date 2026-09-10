@@ -5,6 +5,8 @@ What a finished import job records about itself (laker-93/subbox-app#48).
 COMPLETE, which threw away both halves of what a failure screen needs: why it
 broke, and which pass it broke in.
 """
+from unittest import mock
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -12,7 +14,8 @@ from sqlalchemy.pool import StaticPool
 
 from pymix.controllers.db_controller import DbController
 from pymix.model.db_tables import Base, UserRow
-from pymix.services.import_progress import ImportPhase
+from pymix.services.import_progress import ImportPhase, ImportProgressReporter
+from pymix.services.job_outcome import OutcomeLedger
 
 
 @pytest.fixture
@@ -104,3 +107,69 @@ def test_a_clean_job_has_no_warnings(db_controller, job_id):
     db_controller.job_completed(job_id, True)
 
     assert _job(db_controller, job_id)["warnings"] is None
+
+
+# --- the verdict is computed, not asserted (laker-93/pymix#171) ---------------
+
+
+def test_a_computed_failure_lands_on_the_row_with_its_reason(db_controller, job_id):
+    # Through the reporter, as the import does, so the row's phase comes from the
+    # same call that opened the ledger entry.
+    progress = ImportProgressReporter(db_controller, job_id)
+    progress.start_phase(ImportPhase.APPLYING_METADATA, 8)
+    for i in range(8):
+        progress.failed(f"SBX-{i}", "container beetsdj is not running")
+
+    db_controller.job_completed(job_id, progress.verdict())
+
+    job = _job(db_controller, job_id)
+    assert job["result"] is False
+    assert "0 of 8" in job["reason"]
+    # A failed job keeps the phase it died in, so the screen can say which pass.
+    assert job["phase"] == ImportPhase.APPLYING_METADATA.value
+
+
+def test_a_computed_partial_succeeds_but_carries_its_warning(db_controller, job_id):
+    ledger = OutcomeLedger()
+    ledger.start_phase(ImportPhase.APPLYING_METADATA, 3)
+    ledger.ok(2)
+    ledger.skipped("Track C", "no matching track in your library")
+
+    db_controller.job_completed(job_id, ledger.verdict())
+
+    job = _job(db_controller, job_id)
+    assert job["result"] is True
+    assert job["reason"] is None
+    assert "1 skipped" in job["warnings"]
+    assert job["phase"] == ImportPhase.COMPLETE.value
+
+
+def test_a_partial_is_counted_apart_from_a_clean_success(db_controller, job_id):
+    # Otherwise a half-failing import is indistinguishable from a good one on the
+    # dashboard -- the operator-side version of the bug #171 is about.
+    ledger = OutcomeLedger()
+    ledger.start_phase(ImportPhase.APPLYING_METADATA, 3)
+    ledger.ok(2)
+    ledger.failed("SBX-C", "beets matched no track with this subbox_id")
+
+    with mock.patch("pymix.controllers.db_controller.metrics") as metrics:
+        db_controller.job_completed(job_id, ledger.verdict())
+
+    assert metrics.job_finished.call_args == mock.call(job_id, True, outcome="partial")
+
+
+def test_a_clean_success_keeps_the_label_it_always_had(db_controller, job_id):
+    ledger = OutcomeLedger()
+    ledger.start_phase(ImportPhase.MAPPING_IDS, 2)
+    ledger.ok(2)
+
+    with mock.patch("pymix.controllers.db_controller.metrics") as metrics:
+        db_controller.job_completed(job_id, ledger.verdict())
+
+    assert metrics.job_finished.call_args == mock.call(job_id, True, outcome=None)
+
+
+def test_reason_and_warnings_may_not_be_passed_alongside_an_outcome(db_controller, job_id):
+    # Two sources of truth for the same three fields is how they drift apart.
+    with pytest.raises(AssertionError):
+        db_controller.job_completed(job_id, OutcomeLedger().verdict(), "a reason")
