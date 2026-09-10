@@ -13,10 +13,24 @@ So the job row carries which phase it's in and that phase's own n/total, and the
 progress endpoint reports them alongside the overall percentage. Reporting is
 best-effort: a failed progress write must never take down the import it is
 describing, so every DB call here swallows its exception and logs.
+
+Since #171 the same reporter also carries each phase's *outcomes* -- what worked,
+what was deliberately skipped, what broke -- in an :class:`OutcomeLedger`, and the
+job's verdict is computed from that ledger instead of being asserted up front.
+Where we are and how it went arrive on the same object because they come from the
+same call sites; the rules that turn the ledger into a verdict live next door in
+``job_outcome.py``.
 """
 import logging
 from enum import Enum
 from typing import Optional
+
+from pymix.services.job_outcome import (
+    JobOutcome,
+    MAX_REASON_LEN,
+    OutcomeLedger,
+    truncate_reason,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,10 +103,9 @@ def overall_percentage(
     return round(min(total * 100, 99.0), 2)
 
 
-#: Longest failure reason we persist and hand back to the client. A traceback's
-#: worth of text is no more useful in a modal than none at all, and the full
-#: detail is in the container logs either way.
-_MAX_REASON_LEN = 300
+#: Kept as a module-level name because it is the documented cap on everything the
+#: job row hands the client; the value now lives with the ledger that shares it.
+_MAX_REASON_LEN = MAX_REASON_LEN
 
 
 def failure_reason(ex: BaseException) -> str:
@@ -107,9 +120,7 @@ def failure_reason(ex: BaseException) -> str:
     """
     detail = " ".join(str(ex).split())
     reason = f"{type(ex).__name__}: {detail}" if detail else type(ex).__name__
-    if len(reason) > _MAX_REASON_LEN:
-        reason = reason[: _MAX_REASON_LEN - 1].rstrip() + "…"
-    return reason
+    return truncate_reason(reason)
 
 
 #: What the client is told when a job is marked failed with nothing recorded --
@@ -122,13 +133,24 @@ UNRECORDED_FAILURE_REASON = (
 
 class ImportProgressReporter:
     """
-    Records phase transitions and within-phase progress against an import job.
+    Records phase transitions, within-phase progress, and per-item outcomes
+    against an import job.
 
     Constructed per job by the router that owns the background task and threaded
     down into the controller, so the controller stays free of job/DB concerns
-    beyond "tell whoever's watching where I am". Callers that have no job (the
-    watch-dir uploader, dev_sandbox scripts, the Serato path's reuse of the
-    rekordbox controller) pass None and get :class:`NullImportProgressReporter`.
+    beyond "tell whoever's watching where I am and how it went". Callers that
+    have no job (the watch-dir uploader, dev_sandbox scripts, the Serato path's
+    reuse of the rekordbox controller) pass None and get
+    :class:`NullImportProgressReporter`.
+
+    Progress and outcome are separate verbs on purpose (#171). ``advance()``
+    means "one more item is through the slow part of this phase", and the
+    metadata phase deliberately reports it while the Navidrome matches land,
+    before it can know whether each track's write will stick. ``ok`` / ``skipped``
+    / ``failed`` record the verdict for an item whenever that becomes knowable,
+    which for the batched writes is after the loop. Aliasing them would have
+    double-counted that phase, so the row's ``n_processed`` takes whichever of
+    the two counts is further along.
 
     Every method runs on whatever thread the import step is on -- a worker thread
     under `anyio.to_thread.run_sync` -- so it must stay synchronous and must not
@@ -136,32 +158,66 @@ class ImportProgressReporter:
     session per call, which satisfies that.
     """
 
-    def __init__(self, db_controller, job_id: str):
+    def __init__(self, db_controller, job_id: str, ledger: Optional[OutcomeLedger] = None):
         self._db_controller = db_controller
         self._job_id = job_id
+        self._ledger = ledger if ledger is not None else OutcomeLedger()
         self._phase: Optional[ImportPhase] = None
-        self._n_processed = 0
+        self._n_advanced = 0
         self._n_total = 0
+        self._last_written = None
+
+    @property
+    def ledger(self) -> OutcomeLedger:
+        return self._ledger
 
     def start_phase(self, phase: ImportPhase, n_total: int = 0) -> None:
         self._phase = phase
-        self._n_processed = 0
+        self._n_advanced = 0
         self._n_total = n_total
+        self._ledger.start_phase(phase, n_total)
         self._write()
 
     def advance(self, n: int = 1) -> None:
+        """Progress only: one more item is through, verdict not yet known."""
         if self._phase is None:
             return
-        self._n_processed += n
+        self._n_advanced += n
         self._write()
 
+    def ok(self, n: int = 1) -> None:
+        self._ledger.ok(n)
+        self._write()
+
+    def skipped(self, item, reason: str) -> None:
+        self._ledger.skipped(item, reason)
+        self._write()
+
+    def failed(self, item, reason: str) -> None:
+        self._ledger.failed(item, reason)
+        self._write()
+
+    def verdict(self, escaped_reason: Optional[str] = None) -> JobOutcome:
+        return self._ledger.verdict(escaped_reason)
+
+    def _n_processed(self) -> int:
+        current = self._ledger.current
+        return max(self._n_advanced, current.n_recorded if current else 0)
+
     def _write(self) -> None:
+        phase = self._phase.value if self._phase else None
+        state = (phase, self._n_processed(), self._n_total)
+        if state == self._last_written:
+            # The outcome verbs run over items whose progress was already
+            # reported; writing the same row again is pure DB traffic.
+            return
+        self._last_written = state
         try:
             self._db_controller.update_job_phase(
                 self._job_id,
-                phase=self._phase.value if self._phase else None,
-                n_processed=self._n_processed,
-                n_total=self._n_total,
+                phase=state[0],
+                n_processed=state[1],
+                n_total=state[2],
             )
         except Exception:
             # Progress is decoration; never let it fail the import.
@@ -171,11 +227,30 @@ class ImportProgressReporter:
 class NullImportProgressReporter:
     """No-op reporter for import paths that aren't tracked by a job row."""
 
+    def __init__(self):
+        self._ledger = OutcomeLedger()
+
+    @property
+    def ledger(self) -> OutcomeLedger:
+        return self._ledger
+
     def start_phase(self, phase: ImportPhase, n_total: int = 0) -> None:
         pass
 
     def advance(self, n: int = 1) -> None:
         pass
+
+    def ok(self, n: int = 1) -> None:
+        pass
+
+    def skipped(self, item, reason: str) -> None:
+        pass
+
+    def failed(self, item, reason: str) -> None:
+        pass
+
+    def verdict(self, escaped_reason: Optional[str] = None) -> JobOutcome:
+        return self._ledger.verdict(escaped_reason)
 
 
 def reporter_or_null(reporter):

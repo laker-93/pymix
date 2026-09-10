@@ -6,7 +6,7 @@ import re
 import anyio
 import beets
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 import mediafile
 import music_tag
 from beets.plugins import BeetsPlugin
@@ -29,15 +29,17 @@ from pyserato.model.hot_cue import HotCue
 from pyserato.model.track import Track
 from pyserato.model.hot_cue_type import HotCueType
 
-from pymix.services.import_progress import ImportPhase, reporter_or_null
+from pymix.services.import_progress import failure_reason, ImportPhase, reporter_or_null
 from pymix.services.track_matcher import MatchResult, TrackMatcher
 from pymix.utils.beets_batch import (
+    BatchWriteResult,
     MATCH_BY_ID,
     build_import_reads_command,
     build_set_field_command,
     chunked,
     parse_applied,
     parse_import_reads,
+    parse_missing,
     strip_duplicates_count,
 )
 from pymix.utils.beets_query import or_query
@@ -316,17 +318,23 @@ class RekordboxXMLController:
         match_field: str,
         pairs: List[tuple],
         write_tags: bool,
-    ) -> bool:
+    ) -> BatchWriteResult:
         """
         Apply every (key, value) in ``pairs`` in as few `docker exec`s as possible
         (#51), using beets' Python API inside the container rather than one
-        `beet modify` per pair. Returns False — without raising — if the batch
-        couldn't be applied, so the caller can fall back to the per-track loop:
-        per-user containers freeze their beets version at provisioning, so this
-        has to degrade rather than break an import.
+        `beet modify` per pair. Returns ``applied=False`` — without raising — if
+        the batch couldn't be applied, so the caller can fall back to the
+        per-track loop: per-user containers freeze their beets version at
+        provisioning, so this has to degrade rather than break an import.
+
+        ``missing`` carries the keys beets matched nothing for. The exec ran, so
+        this is not a fallback case — it is a per-item failure, and returning it
+        instead of only logging it is what lets the caller record that the write
+        never reached those tracks (#171).
         """
         if not pairs:
-            return True
+            return BatchWriteResult(True, [])
+        missing: List[str] = []
         try:
             for chunk in chunked(pairs):
                 command = build_set_field_command(field, match_field, chunk, write_tags)
@@ -340,16 +348,16 @@ class RekordboxXMLController:
                     f"batched beets write on {container_name}: set {field} on {applied}/{len(chunk)} "
                     f"item(s) matched by {match_field}"
                 )
-                for line in result.splitlines():
-                    if line.startswith("MISSING "):
-                        logger.warning(f"no beets item for {match_field}={line.split(' ', 1)[1]}, skipped")
+                for key in parse_missing(result):
+                    logger.warning(f"no beets item for {match_field}={key}, skipped")
+                    missing.append(key)
         except Exception:
             logger.exception(
                 f"batched beets write of {field} on {container_name} failed for {len(pairs)} item(s); "
                 f"falling back to one beet modify per item"
             )
-            return False
-        return True
+            return BatchWriteResult(False, [])
+        return BatchWriteResult(True, missing)
 
     def _fetch_unmapped_entries(self, container_name: str) -> List[tuple[int, str]]:
         """
@@ -447,11 +455,13 @@ class RekordboxXMLController:
                 p = self._resolve_path_with_special_chars(p)
                 if p is None:
                     logger.warning(f"Could not resolve path for beet_id={beet_id}, skipping.")
+                    progress.skipped(beet_id, "could not find the imported file on disk")
                     continue
                 logger.info(f"Resolved path with special chars: {p}")
             subbox_id = get_subbox_id(p)
             if not subbox_id:
                 logger.warning(f"No subbox_id tag found for {p}, skipping.")
+                progress.skipped(beet_id, "no SUBBOX_ID tag on the imported file")
                 continue
             # 4️⃣ Add mapping to DB
             self._db_controller.add_subbox_beet_map(
@@ -465,9 +475,10 @@ class RekordboxXMLController:
         # subbox_id is a flexattr with no MediaFile field behind it, and the
         # SUBBOX_ID tag we just read is already on disk — the beets DB is the only
         # thing that needs updating.
-        if not self._set_field_batched(
+        batch = self._set_field_batched(
             container_name, "subbox_id", MATCH_BY_ID, to_write, write_tags=False
-        ):
+        )
+        if not batch.applied:
             for beet_id, subbox_id in to_write:
                 beets_command = f"beet modify -y -M id:{beet_id} subbox_id={subbox_id}"
                 # detach to avoid returning potentially large stdout from the docker logs.
@@ -477,6 +488,17 @@ class RekordboxXMLController:
                     line = log.decode()
                     logger.info(f'{log_type}: {line}')
                 logger.info(f"Mapped subbox_id={subbox_id} → beet_id={beet_id}")
+
+        # The phase's verdict is recorded here, not in the loop above: a track
+        # whose subbox_id never reached beets is not mapped, however cleanly its
+        # tag read went, and it is that gap that makes the later bpm write fail
+        # with nothing to explain it.
+        unwritten = {str(key) for key in batch.missing}
+        for beet_id, _subbox_id in to_write:
+            if str(beet_id) in unwritten:
+                progress.failed(beet_id, "beets matched no item, so its subbox_id was not written")
+            else:
+                progress.ok()
 
     def remap_subbox_id_for_ids(self, username: str, beet_ids: List[int], public: bool = False) -> None:
         """
@@ -797,21 +819,32 @@ class RekordboxXMLController:
                     break
         return result
 
-    def _modify_bpms(self, username: str, bpms_by_subbox_id: List[tuple]):
+    def _modify_bpms(self, username: str, bpms_by_subbox_id: List[tuple]) -> Dict[str, str]:
         """
         Write every track's bpm into beets in one batched exec (#51), falling back
         to the old one-`beet modify`-per-track loop if the batch can't run.
+
+        Returns the subbox_ids whose bpm did not land, and why -- empty when every
+        write succeeded. These used to be swallowed: with the user's beets
+        container stopped, all eight writes of an eight-track import raised in
+        here, logged eight tracebacks, and the job still reported success because
+        nothing propagated (#135). The caller records them against the metadata
+        phase, which is what turns "every write failed" into a failed job.
         """
         if not bpms_by_subbox_id:
-            return
+            return {}
+        failures: Dict[str, str] = {}
         container_name = f"beets{username}"
         with self._beets_exec.write_lock(container_name):
             # bpm is a real media field, unlike subbox_id: write_tags mirrors
             # `beet modify`'s default of writing the value back to the file.
-            if self._set_field_batched(
+            batch = self._set_field_batched(
                 container_name, "bpm", "subbox_id", bpms_by_subbox_id, write_tags=True
-            ):
-                return
+            )
+            if batch.applied:
+                for subbox_id in batch.missing:
+                    failures[str(subbox_id)] = "beets matched no track with this subbox_id"
+                return failures
             for subbox_id, bpm in bpms_by_subbox_id:
                 beets_command = f"beet modify -y subbox_id:{subbox_id} bpm={bpm}"
                 try:
@@ -819,7 +852,7 @@ class RekordboxXMLController:
                     for log_type, log in log_iter:
                         line = log.decode()
                         logger.info(f'{log_type}: {line}')
-                except Exception:
+                except Exception as ex:
                     # if the logic to set the subbox_id tag in beets db failed in
                     # the import step (e.g. because the logic to parse the path from
                     # the output of beet ls failed) then the above beet modify step
@@ -827,6 +860,8 @@ class RekordboxXMLController:
                     # subbox_id. The fix here is to fix the logic of parsing the
                     # correct path from the beet ls output during import stage.
                     logger.exception("Failed to execute beets command for subbox_id %s", subbox_id)
+                    failures[str(subbox_id)] = failure_reason(ex)
+        return failures
 
     async def _set_data_from_xml(self, user: dict, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None, progress=None):
         # todo make this logic more similar to serato_controller where subbox_id is used for look up
@@ -885,6 +920,7 @@ class RekordboxXMLController:
         track_matches = await asyncio.gather(*(resolve_match(t) for t in xml_tracks))
 
         bpms_by_subbox_id: List[tuple] = []
+        updated_subbox_ids: List[str] = []
         for track, track_match in zip(xml_tracks, track_matches):
             marks = track.marks
             cues = list(filter(lambda m: m.Type == 'cue', marks))
@@ -893,6 +929,7 @@ class RekordboxXMLController:
             album = track.Album if track.Album else None
             if track_match is None:
                 logger.warning(f"Could not find a match in Navidrome for track {track.Name} by {track.Artist} with album {album}, skipping cue and loop import for this track.")
+                progress.skipped(track.Name, "no matching track in your library")
                 continue
             track_match = track_match[0]
             assert track_match.pymix_path
@@ -900,6 +937,7 @@ class RekordboxXMLController:
             subbox_id = get_subbox_id(track_match.pymix_path)
             if subbox_id is None:
                 logger.warning(f"subbox id tag not present on {track_match.pymix_path}, skipping cue and loop import for this track.")
+                progress.skipped(track.Name, "no SUBBOX_ID tag on the matched file")
                 continue
             grid = beatgrid.to_cuedata(beatgrid.from_tempos(track.tempos))
             bpm = track.AverageBpm
@@ -947,9 +985,20 @@ class RekordboxXMLController:
                 source_app="rekordbox",
                 change_type="upload"
             )
+            updated_subbox_ids.append(subbox_id)
 
         # One exec for every track's bpm, after the loop — see #51.
-        await anyio.to_thread.run_sync(self._modify_bpms, user['username'], bpms_by_subbox_id)
+        bpm_failures = await anyio.to_thread.run_sync(self._modify_bpms, user['username'], bpms_by_subbox_id)
+        # A track is not done until its bpm landed too, so the phase's verdict is
+        # recorded here rather than inside the loop. This is the join that #135
+        # was missing: the bpm write knew it had failed, and nothing above it
+        # ever found out.
+        for subbox_id in updated_subbox_ids:
+            failure = bpm_failures.get(str(subbox_id))
+            if failure:
+                progress.failed(subbox_id, failure)
+            else:
+                progress.ok()
 
 
     async def _create_playlists_from_xml(self, user: dict, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None, matcher: Optional[TrackMatcher] = None):

@@ -128,21 +128,23 @@ async def beets_import(
     }
 
 async def run_import_task(rekordbox_xml_controller, username, public, job_id, db_controller):
-    success = True
-    reason = ""
+    # See run_import_task in rb_import_export.py: the verdict is computed from the
+    # ledger the passes wrote, not asserted up front (#171).
+    escaped_reason = None
+    progress = ImportProgressReporter(db_controller, job_id)
     try:
         logger.info(f'starting import for user {username}')
         await rekordbox_xml_controller.consume_from_filebrowser(
-            username, public, progress=ImportProgressReporter(db_controller, job_id)
+            username, public, progress=progress
         )
     except Exception as ex:
-        success = False
-        reason = failure_reason(ex)
+        escaped_reason = failure_reason(ex)
         msg = f'error occurred importing the following path in to beets for user {username} {repr(ex)}'
         logger.error(msg, exc_info=True)
     finally:
-        logger.info(f'marking import job for user {username} as {success}')
-        db_controller.job_completed(job_id, success, reason)
+        outcome = progress.verdict(escaped_reason)
+        logger.info(f'marking import job for user {username} as {outcome.verdict.value}')
+        db_controller.job_completed(job_id, outcome)
 
 
 @router.post("/beets/reimport", tags=["import"])

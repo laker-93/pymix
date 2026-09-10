@@ -3,7 +3,7 @@ import uuid
 import logging
 import datetime
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Union
 
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
@@ -19,6 +19,7 @@ from pymix.model.original_track_meta import OriginalTracks
 from pymix.model.wishlist import MetadataSource, ResolveState, WishlistStatus
 from pymix.services import metrics
 from pymix.services.import_progress import ImportPhase
+from pymix.services.job_outcome import JobOutcome, Verdict
 from pymix.utils.get_available_port import get_available_port
 
 
@@ -109,6 +110,14 @@ logger = logging.getLogger(__name__)
 
 def _row_to_dict(row, exclude=('id',)):
     return {c.key: getattr(row, c.key) for c in row.__table__.columns if c.key not in exclude}
+
+
+def _metric_outcome(verdict) -> Optional[str]:
+    """
+    The `outcome` label for a finished job. None keeps job_finished's own
+    result-derived label, for the callers still passing a bare bool.
+    """
+    return verdict.value if verdict is Verdict.PARTIAL else None
 
 
 class DbController:
@@ -559,12 +568,20 @@ class DbController:
     def job_completed(
         self,
         job_id: str,
-        result: bool,
+        result: Union[bool, JobOutcome],
         reason: Optional[str] = None,
         warnings: Optional[str] = None,
     ):
         """
-        Mark a job finished. ``reason`` is why it failed, and is only meaningful
+        Mark a job finished.
+
+        Pass a :class:`JobOutcome` (#171): it is computed from what the job's
+        ledger actually recorded, so the row cannot claim a success nobody
+        verified. The bare-bool form is the pre-#171 signature, kept for the
+        callers that have no ledger yet -- the watch-dir handler and the Serato
+        import, which carries its own hand-rolled report.
+
+        ``reason`` is why it failed, and is only meaningful
         when ``result`` is False — it is what /beets/import/progress hands the
         client instead of a bare "Import failed" (subbox-app#48).
 
@@ -579,6 +596,16 @@ class DbController:
         the library but some metadata didn't apply" and "the import didn't
         happen", and that is the distinction the user acts on.
         """
+        verdict = None
+        if isinstance(result, JobOutcome):
+            assert reason is None and warnings is None, (
+                'pass reason/warnings inside the JobOutcome, not alongside it'
+            )
+            outcome = result
+            verdict = outcome.verdict
+            result, reason, warnings = outcome.result, outcome.reason, outcome.warnings
+            logger.info(f'job {job_id} verdict: {verdict.value}')
+
         with self._session_factory() as session:
             job = session.query(JobRow).filter(JobRow.job_id == job_id).one()
             job.in_progress = False
@@ -591,7 +618,7 @@ class DbController:
 
         # After the commit, so a job is never counted as finished before it is. This
         # runs on the import's worker thread; `job_finished` takes its own lock.
-        metrics.job_finished(job_id, result)
+        metrics.job_finished(job_id, result, outcome=_metric_outcome(verdict))
 
     def update_job_phase(self, job_id: str, phase: Optional[str], n_processed: int, n_total: int):
         """

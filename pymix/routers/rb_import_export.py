@@ -85,9 +85,13 @@ async def rekordbox_import(
 
 async def run_import_task(rekordbox_xml_controller, username, job_id, db_controller, fb_file_handler,
                           total_n_tracks_for_import, user, playlist_names: Optional[list[list[str]]]):
-    success = True
-    reason = ""
+    # No `success = True` to start with: the verdict is computed at the end from
+    # what the passes actually recorded, not asserted here and defended against
+    # exceptions (#171). An escaping exception is still a failure -- it is just no
+    # longer the *only* way to be one.
+    escaped_reason = None
     beets_output = ""
+    progress = ImportProgressReporter(db_controller, job_id)
     try:
         xml_path, zip_path, audio_path = fb_file_handler.get_xml_data_path(username)
         logger.info(f'starting RB import track staging for user {username} on {xml_path} and {audio_path}')
@@ -99,24 +103,25 @@ async def run_import_task(rekordbox_xml_controller, username, job_id, db_control
             audio_path=audio_path,
             playlist_names=playlist_names,
             # so the post-import passes report their own progress instead of the
-            # job sitting at a frozen 100% for the whole tail (#51)
-            progress=ImportProgressReporter(db_controller, job_id),
+            # job sitting at a frozen 100% for the whole tail (#51), and their own
+            # per-track outcomes so the verdict below is evidence-based (#171)
+            progress=progress,
         )
         logger.info(f'finished RB import for user {username}')
     except Exception as ex:
-        success = False
-        reason = failure_reason(ex)
+        escaped_reason = failure_reason(ex)
         msg = f'error occurred importing the following path in to beets for user {username} {repr(ex)}'
         logger.error(msg, exc_info=True)
     else:
         #total_n_imported_tracks = await beets_client.count_tracks_on_disk(user)
-        logger.info(f'successfully RB imported {total_n_tracks_for_import} for user {username}')
+        logger.info(f'finished RB import of {total_n_tracks_for_import} for user {username}')
     finally:
         logger.info(f"beets output {beets_output}")
-        logger.info(f'marking RB import job for user {username} as {success}')
+        outcome = progress.verdict(escaped_reason)
+        logger.info(f'marking RB import job for user {username} as {outcome.verdict.value}')
         # The reason goes on the job row, not just in this log line — it is the only
         # thing the user's "Import Failed" screen has to show (subbox-app#48).
-        db_controller.job_completed(job_id, success, reason)
+        db_controller.job_completed(job_id, outcome)
 
 
 class RBExportRequest(BaseModel):

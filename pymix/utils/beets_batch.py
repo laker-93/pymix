@@ -27,7 +27,7 @@ correct-but-slow import beats a fast broken one.
 """
 import logging
 import re
-from typing import List, Sequence, Tuple
+from typing import List, NamedTuple, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -256,6 +256,36 @@ def parse_import_reads(output: str) -> Tuple[List[str], List[Tuple[int, str]]]:
         except ValueError:
             logger.warning(f"Skipping malformed line in beets output: {line}")
     return duplicate_paths, unmapped
+
+
+class BatchWriteResult(NamedTuple):
+    """
+    What one batched write did. ``applied`` False means the exec could not run at
+    all and the caller must fall back to the per-item loop; ``missing`` are the
+    keys the script found no beets item for, which the batch reports rather than
+    raises -- they are per-item failures inside an exec that otherwise worked
+    (laker-93/pymix#171).
+    """
+
+    applied: bool
+    missing: List[str] = []
+
+
+def parse_missing(output: str) -> List[str]:
+    """
+    The keys the batched write matched no beets item for.
+
+    The script prints one ``MISSING <key>`` line per unmatched key before its
+    summary. These used to be logged as a warning and dropped, so a write that
+    silently reached none of its tracks was indistinguishable from one that
+    reached all of them.
+    """
+    missing = []
+    for line in output.splitlines():
+        line = line.strip()
+        if line.startswith("MISSING "):
+            missing.append(line.split(" ", 1)[1].strip())
+    return missing
 
 
 def parse_applied(output: str) -> int:
