@@ -127,14 +127,35 @@ class RekordboxXMLOrchestrator:
             return cue_data
 
     @staticmethod
-    def _resolve_bpm(cue_data: Optional[Dict], track: SubBoxTrack) -> Optional[float]:
+    def _resolve_bpm(
+        cue_data: Optional[Dict], track: SubBoxTrack, tempos: Optional[List[Dict]] = None,
+    ) -> Optional[float]:
         """
         The tempo to write as AverageBpm, most precise source first.
 
-        cuedata holds the exact value a Rekordbox import was given; beets can only
-        hold the rounded integer, and SubBoxTrack.bpm comes back through that (via
-        the file tag and Navidrome's scan). Prefer the exact one where we have it.
+        The grid wins where there is one. AverageBpm and the first <TEMPO> are two
+        statements about the same track, and Rekordbox beats to the grid -- so when
+        they disagree it is the number on screen that is wrong, and every later
+        export re-reads that number. They disagree easily: a DJ who corrects a grid
+        in Serato leaves the file's BPM tag on whatever the last analysis guessed,
+        and that tag is the only thing the two fallbacks below can see. A QA round
+        trip put AverageBpm="144.0" on a track gridded at 128 for exactly that
+        reason.
+
+        Below the grid, cuedata holds the exact value a Rekordbox import was given;
+        beets can only hold the rounded integer, and SubBoxTrack.bpm comes back
+        through that (via the file tag and Navidrome's scan). Prefer the exact one
+        where we have it.
+
+        `tempos` is what `beatgrid.to_tempos` already produced for the <TEMPO>
+        nodes, passed in rather than recomputed so the value written here is the
+        first anchor actually written -- not a second derivation that could drift
+        from it.
         """
+        if tempos:
+            # Anchors reach add_tempo in this order, so tempos[0] is the anchor
+            # Rekordbox reads first, whatever the grid's provenance.
+            return tempos[0]["Bpm"]
         raw = (cue_data or {}).get("bpm")
         if raw is None:
             raw = track.bpm
@@ -194,12 +215,13 @@ class RekordboxXMLOrchestrator:
             playlist.add_track(rekordbox_track.TrackID)
             logger.info(f"track {rekordbox_track} from {track} added to {playlist}")
             rekordbox_track["TotalTime"] = duration
-            bpm = self._resolve_bpm(cue_data, track)
+            tempos = beatgrid.to_tempos(beatgrid.from_cuedata(cue_data))
+            bpm = self._resolve_bpm(cue_data, track, tempos)
             if bpm is not None:
                 # Rekordbox re-analyses a track with no AverageBpm from scratch, so
                 # an import at 128.5 used to come back with no tempo at all (#152).
                 rekordbox_track["AverageBpm"] = bpm
-            for tempo in beatgrid.to_tempos(beatgrid.from_cuedata(cue_data)):
+            for tempo in tempos:
                 # No stored grid emits nothing at all, exactly as a track with
                 # no cues emits no marks -- Rekordbox re-analysing is the right
                 # behaviour when subbox has nothing better to offer.
