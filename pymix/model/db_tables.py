@@ -95,6 +95,12 @@ class JobRow(Base):
     # were left out of the playlists. Kept separate from `reason` so the client
     # can render an error and a notice differently. Null before migration 018.
     warnings = Column(String, nullable=True)
+    # What each pass of the job attempted and how it went: a list of
+    # {phase, total, ok, skipped, failed}, written once when the job finishes
+    # (#171, migration 019). `reason`/`warnings` summarise this into one line of
+    # prose; these are the counts a screen can do arithmetic on. Null while the
+    # job runs, on a job completed without a ledger, and before migration 019.
+    phases = Column(JSON, nullable=True)
 
 
 class OriginalTrackMetaRow(Base):

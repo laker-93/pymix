@@ -160,3 +160,44 @@ async def test_a_metadata_only_job_never_shells_into_the_beets_container():
     )
 
     beets_client.count_tracks_on_disk.assert_not_awaited()
+
+
+# --- what each pass did reaches the client (migration 019, subbox-app#50) -----
+
+
+@pytest.mark.anyio
+async def test_a_finished_job_reports_what_each_pass_did():
+    # The run subbox-app#50 was filed on: five tracks already in the library, so
+    # nothing uploaded and nothing imported, and metadata rewritten on all five.
+    # The two counts the screen had both read 0; this is the one that doesn't.
+    job = _job(
+        n_tracks_to_import=0,
+        in_progress=False,
+        result=True,
+        phase=ImportPhase.COMPLETE.value,
+        phases=[
+            {"phase": "mapping_ids", "total": 5, "ok": 5, "skipped": 0, "failed": 0},
+            {"phase": "applying_metadata", "total": 5, "ok": 5, "skipped": 0, "failed": 0},
+        ],
+    )
+
+    progress = await _progress(job)
+
+    assert progress["n_tracks_processed"] == 0
+    assert progress["phases"][1] == {
+        "phase": "applying_metadata",
+        "total": 5,
+        "ok": 5,
+        "skipped": 0,
+        "failed": 0,
+    }
+
+
+@pytest.mark.anyio
+async def test_a_job_with_no_recorded_phases_reports_an_empty_list():
+    # A job row written before migration 019, or completed without a ledger. The
+    # field is always present so the client never has to branch on undefined --
+    # empty means "not reported", which is not the same as "did nothing".
+    progress = await _progress(_job(in_progress=False, result=True, phases=None))
+
+    assert progress["phases"] == []

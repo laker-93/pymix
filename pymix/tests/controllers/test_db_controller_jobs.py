@@ -173,3 +173,29 @@ def test_reason_and_warnings_may_not_be_passed_alongside_an_outcome(db_controlle
     # Two sources of truth for the same three fields is how they drift apart.
     with pytest.raises(AssertionError):
         db_controller.job_completed(job_id, OutcomeLedger().verdict(), "a reason")
+
+
+# --- the counts reach the row (migration 019, subbox-app#50) ------------------
+
+
+def test_the_phase_counts_are_persisted_with_the_verdict(db_controller, job_id):
+    ledger = OutcomeLedger()
+    ledger.start_phase(ImportPhase.MAPPING_IDS, 5)
+    ledger.ok(5)
+    ledger.start_phase(ImportPhase.APPLYING_METADATA, 5)
+    ledger.ok(5)
+
+    db_controller.job_completed(job_id, ledger.verdict())
+
+    assert _job(db_controller, job_id)["phases"] == [
+        {"phase": "mapping_ids", "total": 5, "ok": 5, "skipped": 0, "failed": 0},
+        {"phase": "applying_metadata", "total": 5, "ok": 5, "skipped": 0, "failed": 0},
+    ]
+
+
+def test_a_job_completed_without_a_ledger_records_no_phases(db_controller, job_id):
+    # The Serato import and the watch-dir handler still pass a bare bool. Writing
+    # [] for them would claim they ran no phases; they ran unreported ones.
+    db_controller.job_completed(job_id, True)
+
+    assert _job(db_controller, job_id)["phases"] is None

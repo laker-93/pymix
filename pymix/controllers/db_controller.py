@@ -591,12 +591,17 @@ class DbController:
         unqualified success is how a job comes back result=true with half the work
         silently missing.
 
+        A ``JobOutcome`` also carries its per-phase counts into the ``phases``
+        column, so the screen that shows the result can say what each pass did
+        rather than inferring it from a single prose line (subbox-app#50).
+
         A failed job keeps the phase it died in rather than being moved to
         COMPLETE: which pass broke is the difference between "your tracks are in
         the library but some metadata didn't apply" and "the import didn't
         happen", and that is the distinction the user acts on.
         """
         verdict = None
+        phases = None
         if isinstance(result, JobOutcome):
             assert reason is None and warnings is None, (
                 'pass reason/warnings inside the JobOutcome, not alongside it'
@@ -604,7 +609,11 @@ class DbController:
             outcome = result
             verdict = outcome.verdict
             result, reason, warnings = outcome.result, outcome.reason, outcome.warnings
-            logger.info(f'job {job_id} verdict: {verdict.value}')
+            # None rather than [] when the ledger recorded nothing: a job that
+            # reported no phases did not run zero of them, we just have no
+            # account of it. The client tells those apart (migration 019).
+            phases = [dict(p) for p in outcome.phases] or None
+            logger.info(f'job {job_id} verdict: {verdict.value} over {len(outcome.phases)} phases')
 
         with self._session_factory() as session:
             job = session.query(JobRow).filter(JobRow.job_id == job_id).one()
@@ -612,6 +621,7 @@ class DbController:
             job.result = result
             job.reason = reason or None
             job.warnings = warnings or None
+            job.phases = phases
             if result:
                 job.phase = ImportPhase.COMPLETE.value
             session.commit()

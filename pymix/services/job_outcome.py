@@ -77,11 +77,19 @@ class JobOutcome:
     branches on it, and a ``PARTIAL`` is genuinely a success with something to
     say -- it is ``result=True`` with ``warnings`` populated, not a third state
     the client has to learn (design-job-outcomes.md §9 Q1).
+
+    ``phases`` is the same evidence unsummarised: per-phase counts, as
+    :meth:`PhaseOutcome.as_dict` shapes them, for the ``phases`` column
+    (migration 019) and ``GET /beets/import/progress``. ``reason`` and
+    ``warnings`` are prose *about* those counts and can only carry one phase's
+    worth; the array is what lets a screen say "metadata updated on 5 tracks" on
+    a run that uploaded nothing (subbox-app#50).
     """
 
     verdict: Verdict
     reason: str = ""
     warnings: str = ""
+    phases: Tuple[dict, ...] = ()
 
     @property
     def result(self) -> bool:
@@ -116,8 +124,12 @@ class PhaseOutcome:
 
     def as_dict(self) -> dict:
         """
-        The shape stage 2 puts on the wire (migration 019). Nothing reads it yet;
-        it lives here so the ledger is already recording what that column needs.
+        The shape that goes on the wire: the ``phases`` column (migration 019)
+        and ``GET /beets/import/progress``.
+
+        The notes stay behind. The first one is already quoted in ``reason`` or
+        ``warnings``, and the rest are a diagnostic detail for the logs -- what
+        a screen can act on is the counts.
         """
         return {
             "phase": self.phase,
@@ -196,8 +208,15 @@ class OutcomeLedger:
         another ledger entry because it must be able to fail a job whose ledger
         looks perfect -- the work can blow up after the last phase reported.
         """
+        # Carried on every verdict, failures included: what the job managed
+        # before it broke is most of the diagnosis, and it is the one part of
+        # the evidence that survives being summarised into one line of prose.
+        phases = tuple(p.as_dict() for p in self._phases)
+
         if escaped_reason:
-            return JobOutcome(Verdict.FAILURE, reason=truncate_reason(escaped_reason))
+            return JobOutcome(
+                Verdict.FAILURE, reason=truncate_reason(escaped_reason), phases=phases
+            )
 
         if not self._phases:
             # Nothing was recorded, so there is no evidence of success. A job
@@ -207,16 +226,19 @@ class OutcomeLedger:
 
         for phase in self._phases:
             if phase.n_total > 0 and phase.ok == 0 and (phase.failed + phase.skipped) > 0:
-                return JobOutcome(Verdict.FAILURE, reason=_total_failure_reason(phase))
+                return JobOutcome(
+                    Verdict.FAILURE, reason=_total_failure_reason(phase), phases=phases
+                )
 
         imperfect = [p for p in self._phases if not p.clean]
         if imperfect:
             return JobOutcome(
                 Verdict.PARTIAL,
                 warnings=truncate_reason("; ".join(_phase_warning(p) for p in imperfect)),
+                phases=phases,
             )
 
-        return JobOutcome(Verdict.SUCCESS)
+        return JobOutcome(Verdict.SUCCESS, phases=phases)
 
 
 #: What the client is told when a job is failed with nothing recorded at all.
