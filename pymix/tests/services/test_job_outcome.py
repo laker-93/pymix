@@ -158,8 +158,8 @@ def test_an_outcome_recorded_before_any_phase_is_ignored_rather_than_crashing():
 
 
 def test_the_phase_tallies_are_ready_for_the_wire():
-    # Stage 2 (migration 019) puts these on GET /beets/import/progress; nothing
-    # reads them yet, so this pins the shape the ledger is already recording.
+    # The shape the `phases` column (migration 019) and GET /beets/import/progress
+    # carry. Pinned here because it is now a contract with the client.
     ledger = OutcomeLedger()
     ledger.start_phase("mapping_ids", 2)
     ledger.ok()
@@ -168,3 +168,73 @@ def test_the_phase_tallies_are_ready_for_the_wire():
     assert [p.as_dict() for p in ledger.phases] == [
         {"phase": "mapping_ids", "total": 2, "ok": 1, "skipped": 1, "failed": 0},
     ]
+
+
+# --- the counts travel with the verdict (subbox-app#50) ----------------------
+
+
+def test_the_verdict_carries_every_phase_it_was_computed_from():
+    # subbox-app#50's run: nothing new landed, and metadata was rewritten on all
+    # five tracks. The prose says "success" and the counts say what succeeded --
+    # without them the screen has only `uploaded = 0` to go on, which is how that
+    # run came to be reported as "Imported 0 tracks".
+    ledger = OutcomeLedger()
+    ledger.start_phase("mapping_ids", 5)
+    ledger.ok(5)
+    ledger.start_phase("applying_metadata", 5)
+    ledger.ok(5)
+
+    outcome = ledger.verdict()
+
+    assert outcome.verdict is Verdict.SUCCESS
+    assert outcome.phases == (
+        {"phase": "mapping_ids", "total": 5, "ok": 5, "skipped": 0, "failed": 0},
+        {"phase": "applying_metadata", "total": 5, "ok": 5, "skipped": 0, "failed": 0},
+    )
+
+
+def test_a_failure_still_says_what_it_managed_before_it_broke():
+    # The most useful moment for the counts is the one where the job went wrong:
+    # "the audio is in, the metadata pass died" is a different instruction to the
+    # user than "nothing happened", and it is the difference #48 was about.
+    ledger = OutcomeLedger()
+    ledger.start_phase("mapping_ids", 5)
+    ledger.ok(5)
+    ledger.start_phase("applying_metadata", 5)
+    ledger.failed("SBX-1", "container beetsdj is not running")
+
+    outcome = ledger.verdict()
+
+    assert outcome.verdict is Verdict.FAILURE
+    assert [p["phase"] for p in outcome.phases] == ["mapping_ids", "applying_metadata"]
+    assert outcome.phases[0]["ok"] == 5
+
+
+def test_an_escaping_exception_does_not_throw_away_the_evidence():
+    ledger = OutcomeLedger()
+    ledger.start_phase("mapping_ids", 2)
+    ledger.ok(2)
+
+    outcome = ledger.verdict(escaped_reason="PermissionError: '/.config'")
+
+    assert outcome.verdict is Verdict.FAILURE
+    assert outcome.phases[0]["ok"] == 2
+
+
+def test_an_empty_ledger_reports_no_phases_rather_than_an_empty_one():
+    # "Recorded nothing" and "ran nothing" are different claims, and only the
+    # first one is true here. The client has to be able to tell them apart --
+    # every job completed without a ledger still lands in the first.
+    assert OutcomeLedger().verdict().phases == ()
+
+
+def test_the_wire_counts_do_not_carry_the_failure_text():
+    # The notes are bounded for the row, not for the wire, and the first one is
+    # already in `reason`. Repeating them per phase would put a traceback's worth
+    # of text through a polling endpoint.
+    ledger = OutcomeLedger()
+    ledger.start_phase("applying_metadata", 2)
+    ledger.ok()
+    ledger.failed("SBX-1", "beets matched no track with this subbox_id")
+
+    assert set(ledger.verdict().phases[0]) == {"phase", "total", "ok", "skipped", "failed"}

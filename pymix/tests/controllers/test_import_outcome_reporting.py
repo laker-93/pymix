@@ -199,6 +199,41 @@ async def test_a_metadata_phase_that_updated_everything_is_a_clean_success(tmp_p
 
 
 @pytest.mark.anyio
+async def test_the_metadata_phase_reports_the_count_the_upload_screen_was_missing(tmp_path):
+    # subbox-app#50 end to end on this side: a re-import of tracks that are all
+    # already in the library uploads nothing and imports nothing, so the two
+    # numbers that screen had both read 0 and the toast said "Imported 0 tracks".
+    # This is the number that makes it "metadata updated on 2 tracks" instead.
+    tracks = []
+    matches = {}
+    for i in (1, 2):
+        audio = tmp_path / f"{i}.mp3"
+        audio.write_bytes(b"")
+        tracks.append(_xml_track(i, f"Track {i}"))
+        matches[f"Track {i}"] = audio
+    orchestrator = mock.Mock()
+    orchestrator.get_all_xml_tracks.return_value = []
+    controller = _make_controller(BeetsExec(), rekordbox_xml_orchestrator=orchestrator)
+    progress = _reporter()
+
+    with mock.patch("pymix.clients.beets_exec.docker") as mock_docker, \
+         mock.patch("pymix.controllers.rekordbox_xml_controller.get_subbox_id") as get_subbox_id:
+        mock_docker.execute.return_value = "APPLIED 2 MISSING 0\n"
+        get_subbox_id.side_effect = lambda p: f"SBX-{p.stem}"
+
+        await controller._set_metadata_from_xml(
+            {"username": "demo"},
+            _rekordbox_xml(tracks),
+            progress=progress,
+            matcher=_matcher_matching(matches),
+        )
+
+    assert progress.verdict().phases == (
+        {"phase": "applying_metadata", "total": 2, "ok": 2, "skipped": 0, "failed": 0},
+    )
+
+
+@pytest.mark.anyio
 async def test_a_bpm_the_batch_matched_no_beets_item_for_is_recorded_as_a_failure(tmp_path):
     # The batched write ran fine and reached none of its tracks. It reported that
     # on stdout and we used to log it as a warning and move on.
