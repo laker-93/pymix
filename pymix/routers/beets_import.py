@@ -211,6 +211,12 @@ async def import_progress(
     the moment the upload returns (subbox-app#55). Its progress therefore comes
     from the phase columns alone — the audio pass has nothing to do and counts as
     already done.
+
+    A finished job also carries `phases`: what each pass attempted, and how many
+    items it got through, skipped and failed. That is the difference between
+    "0 tracks uploaded, 0 tracks imported" and "metadata updated on 5 tracks" on a
+    re-import of a library that was already there (subbox-app#50) — both describe
+    the same run, and only one of them is about the work the user asked for.
     """
     reason = ""
     percentage_complete = 0
@@ -253,6 +259,15 @@ async def import_progress(
     # of the user, but as a notice rather than a failure, so it travels separately
     # from `reason` (migration 018).
     warnings = job.get('warnings') if in_progress is False else None
+    # What each pass attempted and how it went (migration 019). Written once, when
+    # the job finishes, so it is empty for the whole run — the live view is `phase`
+    # and its n/total above, which count progress through the current pass; these
+    # count outcomes, and the two deliberately do not agree mid-pass.
+    #
+    # Empty also on a finished job completed without a ledger (the Serato import
+    # and the watch-dir handler still pass a bare bool), which is why the client
+    # has to treat an absent `phases` as "not reported" rather than "did nothing".
+    phases = job.get('phases') or []
     logger.debug(f'in phase {phase} ({phase_n_processed}/{phase_n_total})')
     logger.debug(f'have complete {percentage_complete}% out of {original_n_tracks_to_import}')
     return {
@@ -264,6 +279,7 @@ async def import_progress(
         'phase': phase,
         'phase_n_processed': phase_n_processed,
         'phase_n_total': phase_n_total,
+        'phases': phases,
         'result': result,
         'warnings': warnings
     }
