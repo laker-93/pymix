@@ -11,6 +11,7 @@ from starlette.responses import JSONResponse
 from pymix.containers import Container
 from pymix.orchestrators.services_orchestrator import ServicesOrchestrator
 from pymix.controllers.db_controller import DbController, InvalidCredentialsError, InvalidTokenError
+from pymix.routers.admin import require_admin_token
 from pymix.routers.auth import require_username
 from pymix.services import metrics
 
@@ -231,7 +232,37 @@ async def storage_check(
         'success': success
     }
 
-@router.get("/user/get_by_username", tags=["db"])
+# --- operator lookup helpers -------------------------------------------------
+#
+# These two resolve a *stranger's* row by a name or a session id, so neither can
+# authenticate its caller the way every user-scoped route does (`require_user`
+# reads the session cookie and answers about the holder, never about whoever was
+# named). `routers/auth.py` says where that leaves them:
+#
+#   > `username` survives only where it is an *argument* rather than a claim of
+#   > identity: creating a user, logging in, and the admin lookup helpers.
+#
+# They are the admin lookup helpers, and they were never gated. Until now an
+# unauthenticated caller who guessed a username got back the full `user_table`
+# row -- including the account password, which is stored in cleartext and opens
+# pymix, the user's Navidrome and filebrowser alike (GHSA-hqhc-vv93-fhcv).
+
+#: Columns that must never cross the API boundary, whoever is asking. Redacting
+#: here rather than trusting the gate is deliberate: the token only says the
+#: caller is an operator, and an operator's terminal, shell history, screen
+#: share and log scraper are all places a password should still never reach. A
+#: value that is never serialised cannot leak by accident later.
+_SECRET_USER_FIELDS = ('password',)
+
+
+def _without_secrets(user: Optional[dict]) -> dict:
+    """The user row minus anything that must not be serialised."""
+    if not user:
+        return {}
+    return {k: v for k, v in user.items() if k not in _SECRET_USER_FIELDS}
+
+
+@router.get("/user/get_by_username", tags=["db"], dependencies=[Depends(require_admin_token)])
 @inject
 async def get_user(
         username: str,
@@ -250,10 +281,10 @@ async def get_user(
     return {
         'success': success,
         'reason': reason,
-        'user': user
+        'user': _without_secrets(user)
     }
 
-@router.get("/user/get_by_session_id", tags=["db"])
+@router.get("/user/get_by_session_id", tags=["db"], dependencies=[Depends(require_admin_token)])
 @inject
 async def get_user_by_session_id(
         session_id: str,
@@ -270,9 +301,13 @@ async def get_user_by_session_id(
         reason = repr(ex)
         success = False
     finally:
-        logger.info(f'found user {user}')
+        # Log the identity, never the row: `user` carries the cleartext password, and
+        # an f-string of the whole dict wrote it into the application log on every
+        # call -- a second copy of the secret, in a place with a different audience
+        # and a much longer life than the response (GHSA-hqhc-vv93-fhcv).
+        logger.info(f'found user {user.get("username") if user else None}')
         return {
             'success': success,
             'reason': reason,
-            'user': user
+            'user': _without_secrets(user)
         }

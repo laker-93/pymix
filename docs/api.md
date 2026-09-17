@@ -41,7 +41,7 @@ All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 | GET `/user/is_valid_token` | Check a signup token is valid (unused tokens gate registration). A pre-flight check for the signup form only — `/user/create` enforces single use itself, and does not trust that this was called. |
 | GET `/user/library_size` | Sum of bytes under `/private-music/{user}`. |
 | GET `/user/storage_check` | Whether an upload of `uploadSizeBytes` fits in quota; accepts Bearer or cookie. |
-| GET `/user/get_by_username`, GET `/user/get_by_session_id` | Lookup helpers. |
+| GET `/user/get_by_username`, GET `/user/get_by_session_id` | Operator lookup helpers. **Admin-gated** (`X-Admin-Token`) — they answer about whoever is *named* in the request, not about the caller, so they cannot authenticate anyone. The password is stripped from the response whoever asks. |
 
 ## Maintenance — `routers/maintenance.py`
 | GET `/healthcheck` | Liveness. |
