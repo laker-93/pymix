@@ -49,6 +49,22 @@ def test_the_genre_mangling_lastgenre_plugin_is_not_loaded(rendered):
     assert live == []
 
 
+
+def test_the_plugins_nothing_ever_calls_are_not_loaded(rendered):
+    # `lyrics` ran with `auto: no` and no caller ever ran `beet lyrics`; `info` only
+    # adds a `beet info` command pymix never calls. Neither could do anything but add
+    # its import to every `beet` invocation. The only subcommands pymix runs are
+    # import/list/modify/rm/duplicates.
+    content, config = rendered
+
+    plugins = config["plugins"].split()
+    assert "lyrics" not in plugins
+    assert "info" not in plugins
+    # And no leftover config block for either -- an orphan block is how lastgenre's
+    # defaults stayed in force above.
+    assert "lyrics:" not in content
+
+
 def test_no_subsonic_block_is_written(rendered):
     # Dead once the plugin is gone -- and it was the only thing putting the user's
     # password in plaintext into their beets config.

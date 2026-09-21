@@ -21,7 +21,13 @@
 # in pymix wants beets to *guess* a genre -- the genre subbox wants is the one the DJ
 # set, which is exactly what this overwrote (#179, and #180 for how it reached the file).
 # If it is ever wanted back it needs at least `auto: no`.
-plugins: fetchart lyrics embedart duplicates info musicbrainz
+# no `lyrics` plugin: it was loaded with `auto: no`, and nothing in pymix has ever
+# run `beet lyrics` -- so it could never do anything except add its import to every
+# `beet` invocation's startup. Subbox does not show lyrics.
+# no `info` plugin: it only adds the `beet info` command, which pymix never calls.
+# The only beets subcommands pymix runs are `import`, `list`, `modify`, `rm` and
+# `duplicates` -- see BeetsExec's callers.
+plugins: fetchart embedart duplicates musicbrainz
 directory: /music
 library: /config/musiclibrary.blb
 art_filename: albumart
@@ -93,9 +99,6 @@ replace:
     '[\xF8]': o
     #'\.$': _
     '\s+$': ''
-
-lyrics:
-    auto: no
 
 duplicates:
     keys:

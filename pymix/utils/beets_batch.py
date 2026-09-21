@@ -160,8 +160,8 @@ _END_MARKER = "---PYMIX-END---"
 #
 # The two used to be `beet duplicates -p` followed by `beet list -f $id:$path
 # subbox_id::^$` -- two processes, each paying a full interpreter start plus the
-# container's whole plugin chain (fetchart lyrics embedart duplicates
-# info musicbrainz) to run one query. Measured locally at ~0.35s of pure startup
+# container's whole plugin chain (fetchart embedart duplicates
+# musicbrainz) to run one query. Measured locally at ~0.35s of pure startup
 # each; on prod a beets exec costs 3-6s (#100), so the second one is pure waste.
 #
 # Unlike _SET_FIELD_SCRIPT this goes through `beets.ui._raw_main` rather than
