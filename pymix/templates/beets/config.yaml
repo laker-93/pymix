@@ -12,7 +12,16 @@
 # to the DB logged `subsonic: Error: Expecting value: line 1 column 1 (char 0)`
 # (#60, #63). If it's ever re-enabled, note the URL is `http://<host>:4533` with no
 # suffix — see `containers.subsonic.host` in config.prod.yaml.
-plugins: fetchart lyrics lastgenre embedart duplicates info musicbrainz
+# no `lastgenre` plugin: it was loaded with its config block commented out, so it ran
+# on the plugin's defaults -- `auto: yes`, `force: yes`, `whitelist: yes`,
+# `fallback: none`. That combination overwrites the genre on every import and sets it to
+# None whenever the track's real genre is not one of the 1541 entries in beets' bundled
+# genres.txt. A prod user's `BASS HOUSE` is not in that list, and neither is most of the
+# vocabulary DJs use (the list has nine other house subgenres but not that one). Nothing
+# in pymix wants beets to *guess* a genre -- the genre subbox wants is the one the DJ
+# set, which is exactly what this overwrote (#179, and #180 for how it reached the file).
+# If it is ever wanted back it needs at least `auto: no`.
+plugins: fetchart lyrics embedart duplicates info musicbrainz
 directory: /music
 library: /config/musiclibrary.blb
 art_filename: albumart
@@ -63,10 +72,6 @@ import:
     quiet_fallback: asis
     timid: no
     log: /config/beet.log
-
-      #lastgenre:
-      #    auto: yes
-      #    source: album
 
 embedart:
     auto: yes
