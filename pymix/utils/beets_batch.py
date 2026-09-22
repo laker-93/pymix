@@ -48,13 +48,27 @@ MATCH_BY_ID = "id"
 # It never moves files. `beet modify` inherits `import.move: yes` from the base
 # config and would relocate a file in the same operation that retags it, which is
 # the ordering that loses Navidrome's identity (pid) on rename -- see #94 and the
-# `-M` comment in RekordboxXMLController.remap_subbox_id_for_ids. store()/write()
-# only ever touch the row and the tags in place.
+# `-M` comment in RekordboxXMLController.remap_subbox_id_for_ids. store() and the
+# tag write below only ever touch the row and that one tag, in place.
+#
+# The tag write is a scoped MediaFile save, NOT `item.try_write()` (#180).
+# try_write() flushes the *whole* beets row into the file: a pass asked to set
+# only `bpm` also rewrote title, artist, album and genre with whatever the DB
+# happened to hold. When the DB was wrong -- as it was after lastgenre emptied
+# the genre on import (#179) -- that pass is what put the wrong value in the
+# user's file, silently, inside a job that reported success. Scoping the write to
+# `field` means a stale row can no longer regress a tag nobody asked to touch.
 _SET_FIELD_SCRIPT = """
 import sys
 
 from beets import config
 from beets.library import Library
+from beets.util import syspath
+
+try:
+    from mediafile import MediaFile
+except ImportError:  # beets < 1.5 vendored it
+    from beets.mediafile import MediaFile
 
 field, match_field, write_mode = sys.argv[1], sys.argv[2], sys.argv[3]
 write_tags = write_mode == 'write'
@@ -62,8 +76,24 @@ write_tags = write_mode == 'write'
 config.read()
 lib = Library(config['library'].as_filename(), config['directory'].as_filename())
 
+if write_tags and field not in set(MediaFile.fields()):
+    # Nothing to write into. Exiting without the APPLIED summary is deliberate:
+    # the caller reads its absence as "the exec did not do what we asked" and
+    # falls back, rather than recording a tag write that never happened.
+    sys.exit('NOTAGFIELD %s' % field)
+
+# Mirror what item.write() would pass, so a scoped write lands in the same ID3
+# version as every other write in the pipeline. Guarded because a container whose
+# config did not load leaves this key unresolvable (a readable HOME is required),
+# and that must not take the whole batch down.
+try:
+    id3v23 = config['id3v23'].get(bool)
+except Exception:
+    id3v23 = False
+
 applied = 0
 missing = []
+write_failed = []
 with lib.transaction():
     for arg in sys.argv[4:]:
         key, _, value = arg.partition('=')
@@ -77,13 +107,33 @@ with lib.transaction():
             continue
         for item in items:
             item[field] = value
-            item.store()
             if write_tags:
-                item.try_write()
+                try:
+                    # item[field] rather than value: beets' field type has
+                    # normalised the argv string (bpm '120' -> int 120), and
+                    # MediaFile wants the typed value.
+                    media = MediaFile(syspath(item.path), id3v23=id3v23)
+                    setattr(media, field, item[field])
+                    media.save()
+                    # Item.write() does this too, and it is not cosmetic: a row
+                    # whose mtime predates its file reads to beets as edited out
+                    # of band, which is what `beet update` acts on.
+                    item.mtime = item.current_mtime()
+                except Exception as ex:
+                    # Per-item, not fatal: one unwritable file must not cost the
+                    # rest of the batch its DB update. Reported rather than
+                    # swallowed -- try_write() logged these where nothing read
+                    # the log, so a write that reached no file at all looked
+                    # exactly like one that reached every file.
+                    write_failed.append((key, '%s: %s' % (type(ex).__name__, ex)))
+            # After the write, so the mtime above is stored with the value.
+            item.store()
         applied += 1
 
 for key in missing:
     print('MISSING %s' % key)
+for key, reason in write_failed:
+    print('WRITEFAIL %s\\t%s' % (key, reason.replace('\\n', ' ')))
 print('APPLIED %d MISSING %d' % (applied, len(missing)))
 """
 
@@ -99,9 +149,11 @@ def build_set_field_command(
     ``match_field`` identifies.
 
     ``write_tags`` mirrors `beet modify`'s default of writing the change back to
-    the audio file. Set it only for real media fields (``bpm``); a flexattr like
-    ``subbox_id`` has no MediaFile field to write into, so writing would rewrite
-    every file's tags for no change.
+    the audio file, except that the write is scoped to ``field`` alone (#180) --
+    no other tag in the file is read, written or compared. Set it only for real
+    media fields (``bpm``); a flexattr like ``subbox_id`` has no MediaFile field
+    to write into, and asking for one makes the script report no summary so the
+    caller falls back rather than believe a tag write happened.
     """
     return [
         "python3",
@@ -265,10 +317,16 @@ class BatchWriteResult(NamedTuple):
     keys the script found no beets item for, which the batch reports rather than
     raises -- they are per-item failures inside an exec that otherwise worked
     (laker-93/pymix#171).
+
+    ``write_failed`` is the same shape for the tag write: ``(key, reason)`` for
+    each item whose row was updated but whose file could not be. The DB and the
+    file disagree for those tracks, which is not what the caller asked for and
+    is not visible anywhere else.
     """
 
     applied: bool
     missing: List[str] = []
+    write_failed: List[Tuple[str, str]] = []
 
 
 def parse_missing(output: str) -> List[str]:
@@ -286,6 +344,30 @@ def parse_missing(output: str) -> List[str]:
         if line.startswith("MISSING "):
             missing.append(line.split(" ", 1)[1].strip())
     return missing
+
+
+def parse_write_failures(output: str) -> List[Tuple[str, str]]:
+    """
+    The keys whose beets row was updated but whose file the script could not
+    write, as ``(key, reason)``.
+
+    The script prints one ``WRITEFAIL <key>\\t<reason>`` line each. Before #180 the
+    tag write went through ``item.try_write()``, which logs its failures to a
+    beets logger nothing here configures -- so an unwritable file was
+    indistinguishable from a written one, and the metadata phase reported success
+    either way.
+    """
+    failures: List[Tuple[str, str]] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line.startswith("WRITEFAIL "):
+            continue
+        key, sep, reason = line.split(" ", 1)[1].partition("\t")
+        if not sep:
+            logger.warning(f"Skipping malformed WRITEFAIL line in batch beets output: {line}")
+            continue
+        failures.append((key.strip(), reason.strip()))
+    return failures
 
 
 def parse_applied(output: str) -> int:

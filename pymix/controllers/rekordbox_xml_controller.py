@@ -40,6 +40,7 @@ from pymix.utils.beets_batch import (
     parse_applied,
     parse_import_reads,
     parse_missing,
+    parse_write_failures,
     strip_duplicates_count,
 )
 from pymix.utils.beets_query import or_query
@@ -331,10 +332,15 @@ class RekordboxXMLController:
         this is not a fallback case — it is a per-item failure, and returning it
         instead of only logging it is what lets the caller record that the write
         never reached those tracks (#171).
+
+        ``write_failed`` is the same for the tag write: the exec ran and the
+        rows were updated, but those files could not be written, so the DB and the
+        file now disagree for them (#180).
         """
         if not pairs:
             return BatchWriteResult(True, [])
         missing: List[str] = []
+        write_failed: List[tuple] = []
         try:
             for chunk in chunked(pairs):
                 command = build_set_field_command(field, match_field, chunk, write_tags)
@@ -351,13 +357,19 @@ class RekordboxXMLController:
                 for key in parse_missing(result):
                     logger.warning(f"no beets item for {match_field}={key}, skipped")
                     missing.append(key)
+                for key, reason in parse_write_failures(result):
+                    logger.warning(
+                        f"beets row for {match_field}={key} updated but its file could not be "
+                        f"written: {reason}"
+                    )
+                    write_failed.append((key, reason))
         except Exception:
             logger.exception(
                 f"batched beets write of {field} on {container_name} failed for {len(pairs)} item(s); "
                 f"falling back to one beet modify per item"
             )
             return BatchWriteResult(False, [])
-        return BatchWriteResult(True, missing)
+        return BatchWriteResult(True, missing, write_failed)
 
     def _fetch_unmapped_entries(self, container_name: str) -> List[tuple[int, str]]:
         """
@@ -844,7 +856,18 @@ class RekordboxXMLController:
             if batch.applied:
                 for subbox_id in batch.missing:
                     failures[str(subbox_id)] = "beets matched no track with this subbox_id"
+                for subbox_id, reason in batch.write_failed:
+                    # The row holds the bpm; the file does not. Rekordbox and
+                    # Serato read the file, so for those two the write did not
+                    # happen -- record it rather than let the phase pass.
+                    failures[str(subbox_id)] = f"bpm not written to the file: {reason}"
                 return failures
+            # The degraded path, reached only when the batched exec could not run
+            # at all. `beet modify` still flushes the whole row into the file
+            # (#180) and the CLI has no flag to scope that -- `-W` would skip the
+            # file write entirely, which loses the bpm Rekordbox and Serato read.
+            # Nothing better is available here: if `python3 -c` failed once it will
+            # fail again, so the scoped write above is not an option either.
             for subbox_id, bpm in bpms_by_subbox_id:
                 beets_command = f"beet modify -y subbox_id:{subbox_id} bpm={bpm}"
                 try:

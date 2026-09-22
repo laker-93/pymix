@@ -173,3 +173,35 @@ def test_bpm_writes_are_a_noop_with_nothing_to_write():
         controller._modify_bpms("demoadmin", [])
 
     mock_docker.execute.assert_not_called()
+
+
+def test_a_file_the_bpm_could_not_be_written_to_is_reported_as_a_failure():
+    # The exec ran and the row moved, so this is not a fallback case -- but the
+    # file Rekordbox and Serato read does not have the bpm, and before #180 the
+    # write error went to a beets logger nothing reads, so the metadata phase
+    # passed anyway.
+    beets_exec = BeetsExec()
+    controller = _make_controller(beets_exec)
+
+    with mock.patch("pymix.clients.beets_exec.docker") as mock_docker:
+        mock_docker.execute.return_value = (
+            "WRITEFAIL SBX-2\tPermissionError: [Errno 13] Permission denied\n"
+            "APPLIED 2 MISSING 0\n"
+        )
+        failures = controller._modify_bpms("demoadmin", [("SBX-1", 128), ("SBX-2", 174)])
+
+    assert list(failures) == ["SBX-2"]
+    assert "PermissionError" in failures["SBX-2"]
+    # It did not fall back: the batch worked, one file did not.
+    assert _modify_calls(mock_docker) == []
+
+
+def test_a_clean_batch_reports_no_failures():
+    beets_exec = BeetsExec()
+    controller = _make_controller(beets_exec)
+
+    with mock.patch("pymix.clients.beets_exec.docker") as mock_docker:
+        mock_docker.execute.return_value = "APPLIED 2 MISSING 0\n"
+        failures = controller._modify_bpms("demoadmin", [("SBX-1", 128), ("SBX-2", 174)])
+
+    assert failures == {}

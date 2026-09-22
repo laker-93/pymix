@@ -12,6 +12,7 @@ from pymix.utils.beets_batch import (
     chunked,
     parse_applied,
     parse_import_reads,
+    parse_write_failures,
     strip_duplicates_count,
 )
 
@@ -63,6 +64,25 @@ def test_parse_applied_reads_the_summary_line():
     output = "MISSING 7\nAPPLIED 2 MISSING 1\n"
 
     assert parse_applied(output) == 2
+
+
+def test_parse_write_failures_reads_the_key_and_the_reason():
+    # The tag write is scoped to one field (#180), so a failure here means the
+    # beets row moved and the file did not -- the two now disagree, and nothing
+    # else reports it.
+    output = "WRITEFAIL SBX-1\tFileNotFoundError: no such file\nAPPLIED 1 MISSING 0\n"
+
+    assert parse_write_failures(output) == [("SBX-1", "FileNotFoundError: no such file")]
+
+
+def test_parse_write_failures_is_empty_when_every_file_was_written():
+    assert parse_write_failures("APPLIED 2 MISSING 0\n") == []
+
+
+def test_parse_write_failures_skips_a_line_with_no_reason():
+    output = "WRITEFAIL SBX-1\nWRITEFAIL SBX-2\tPermissionError\nAPPLIED 2 MISSING 0\n"
+
+    assert parse_write_failures(output) == [("SBX-2", "PermissionError")]
 
 
 def test_parse_applied_rejects_output_with_no_summary():
