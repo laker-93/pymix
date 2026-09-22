@@ -7,10 +7,12 @@ import pytest
 from pymix.utils.beets_batch import (
     DEFAULT_CHUNK_SIZE,
     MATCH_BY_ID,
+    build_heal_genre_command,
     build_import_reads_command,
     build_set_field_command,
     chunked,
     parse_applied,
+    parse_heal_genre,
     parse_import_reads,
     strip_duplicates_count,
 )
@@ -201,3 +203,90 @@ def test_strip_duplicates_count_normalises_both_beets_output_shapes(record, expe
 ])
 def test_strip_duplicates_count_leaves_everything_else_alone(record):
     assert strip_duplicates_count(record) == record
+
+
+# --- the genre heal (laker-93/pymix#179) --------------------------------------------
+#
+# `lastgenre` ran on its defaults in every per-user container and emptied the genre
+# in the beets DB for anything outside beets' bundled whitelist. #181 stops it
+# recurring; these cover the repair for the rows it already emptied.
+
+
+def test_build_heal_genre_command_defaults_to_a_dry_run():
+    command = build_heal_genre_command(apply_changes=False)
+
+    assert command[0] == "python3"
+    assert command[1] == "-c"
+    assert command[3] == "pretend"
+
+
+def test_build_heal_genre_command_says_apply_only_when_asked():
+    assert build_heal_genre_command(apply_changes=True)[3] == "apply"
+
+
+def test_the_heal_script_is_valid_python():
+    # It only ever runs inside a beets container, so nothing else here would catch
+    # a syntax error in it before a real user's heal did.
+    compile(build_heal_genre_command(False)[2], "<beets_batch_heal>", "exec")
+
+
+def test_the_heal_script_never_writes_the_audio_file():
+    # #180: try_write() is a whole-row flush, and flushing the emptied row into the
+    # file is precisely how the genre reached the disk. The repair must only ever
+    # read the file.
+    script = build_heal_genre_command(True)[2]
+
+    assert "try_write" not in script
+    assert "item.write" not in script
+
+
+def test_the_heal_script_never_removes_a_row():
+    # The one-line alternative, `beet update -M -F genre`, deletes every item whose
+    # file is missing -- before and regardless of -F. A repair must not delete.
+    script = build_heal_genre_command(True)[2]
+
+    assert "lib.remove" not in script
+    assert "item.remove" not in script
+
+
+def test_parse_heal_genre_reads_each_category_and_the_summary():
+    output = (
+        "---PYMIX-HEAL-GENRE---\n"
+        "HEAL\tBASS HOUSE\t/music/A/a.mp3\n"
+        "NOSOURCE\t/music/B/b.mp3\n"
+        "UNREADABLE\t/music/C/c.mp3\n"
+        "---PYMIX-HEAL-END---\n"
+        "SUMMARY healed=1 already_set=4 no_source=1 unreadable=1 applied=yes\n"
+    )
+
+    result = parse_heal_genre(output)
+
+    assert result.applied is True
+    assert result.healed == 1
+    assert result.already_set == 4
+    assert result.changes == [("BASS HOUSE", "/music/A/a.mp3")]
+    assert result.no_source == ["/music/B/b.mp3"]
+    assert result.unreadable == ["/music/C/c.mp3"]
+
+
+def test_parse_heal_genre_reports_a_dry_run_as_one():
+    output = (
+        "---PYMIX-HEAL-GENRE---\n"
+        "HEAL\tBASS HOUSE\t/music/A/a.mp3\n"
+        "---PYMIX-HEAL-END---\n"
+        "SUMMARY healed=1 already_set=0 no_source=0 unreadable=0 applied=no\n"
+    )
+
+    assert parse_heal_genre(output).applied is False
+
+
+def test_parse_heal_genre_rejects_output_with_no_markers():
+    # An empty library and a failed exec look identical without them, and here
+    # that difference is "nothing to repair" vs "the repair never ran".
+    with pytest.raises(ValueError):
+        parse_heal_genre("Traceback (most recent call last):\n  ImportError\n")
+
+
+def test_parse_heal_genre_rejects_output_with_no_summary():
+    with pytest.raises(ValueError):
+        parse_heal_genre("---PYMIX-HEAL-GENRE---\n---PYMIX-HEAL-END---\n")

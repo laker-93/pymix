@@ -15,6 +15,7 @@ from pymix.clients.beets_exec import BeetsExec
 from pymix.clients.navidrome_client import NavidromeClient
 from pymix.controllers.db_controller import DbController, InvalidTokenError
 from pymix.handlers.compose_file_handler import ComposeFileHandler
+from pymix.utils.beets_batch import build_heal_genre_command, parse_heal_genre
 from pymix.utils.tag_subbox_id import get_subbox_id
 
 logger = logging.getLogger(__name__)
@@ -517,6 +518,70 @@ class ServicesOrchestrator:
         )
         docker.container.remove(container_name, force=True)
         return project
+
+    async def heal_beets_genres(self, username: str, apply_changes: bool = False) -> dict:
+        """
+        Put back the genre `lastgenre` emptied in this user's beets DB, reading it
+        from the file (#179). Explicit, per-user, re-runnable, and a dry run unless
+        `apply_changes` is set.
+
+        Only repairs the damage signature -- a row whose genre is empty while its
+        file still has one. It never writes the audio file (that is #180, the bug
+        that put the emptied genre on disk) and never removes a row whose file is
+        missing, which is what `beet update` would do. See build_heal_genre_command.
+
+        Run it after `migrate_beets_container`, not before: a container still on the
+        pre-#181 config has `lastgenre` loaded, and the next import there would empty
+        the rows again.
+        """
+        return await anyio.to_thread.run_sync(self._heal_beets_genres, username, apply_changes)
+
+    def _heal_beets_genres(self, username: str, apply_changes: bool) -> dict:
+        # Asserts the user exists, the same way the other per-user admin paths do.
+        self._db_controller.get_user(username)
+        container_name = f'beets{username}'
+        config_dst = self._config['containers']['beets']['config_file_dst'].format(user=username)
+        if not Path(config_dst).exists():
+            raise ValueError(f'no beets container provisioned for {username} (missing {config_dst})')
+        if not self._beets_container_is_running(container_name):
+            raise ValueError(f'beets container for {username} is not running; migrate it first')
+
+        # Refuse to run against a container that still has lastgenre loaded. The
+        # heal would appear to work and the next import would undo it, so the
+        # failure mode of skipping this check is a repair that silently expires.
+        version = self._beets_exec.execute(container_name, 'beet version')
+        if 'lastgenre' in version:
+            raise ValueError(
+                f'{container_name} still loads the lastgenre plugin; run '
+                f'POST /admin/beets/{username}/migrate first (#179)'
+            )
+
+        # A dry run reads the library and writes nothing, so it does not need the
+        # write lock -- but it takes it anyway: it is the same full-library scan the
+        # apply does, and letting it race a foreground import would report rows that
+        # the import is in the middle of changing.
+        with self._beets_exec.write_lock(container_name):
+            output = self._beets_exec.execute(
+                container_name, build_heal_genre_command(apply_changes)
+            )
+            result = parse_heal_genre(output)
+
+        if apply_changes and not result.applied:
+            # The script reports back what mode it actually ran in. If those
+            # disagree, the exec is not the script we sent.
+            raise ValueError(
+                f'asked beets to apply the genre heal for {username} but it reported a dry run'
+            )
+
+        return {
+            'username': username,
+            'applied': result.applied,
+            'healed': result.healed,
+            'already_set': result.already_set,
+            'changes': [{'genre': genre, 'path': path} for genre, path in result.changes],
+            'no_source': result.no_source,
+            'unreadable': result.unreadable,
+        }
 
     def beets_status(self, username: str) -> dict:
         """
