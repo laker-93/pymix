@@ -12,7 +12,9 @@
 # to the DB logged `subsonic: Error: Expecting value: line 1 column 1 (char 0)`
 # (#60, #63). If it's ever re-enabled, note the URL is `http://<host>:4533` with no
 # suffix — see `containers.subsonic.host` in config.prod.yaml.
-plugins: fetchart lyrics lastgenre embedart duplicates info musicbrainz
+# The only beets subcommands pymix runs are `import`, `list`, `modify`, `rm` and
+# `duplicates` -- see BeetsExec's callers.
+plugins: fetchart embedart duplicates musicbrainz
 directory: /music
 library: /config/musiclibrary.blb
 art_filename: albumart
@@ -64,10 +66,6 @@ import:
     timid: no
     log: /config/beet.log
 
-      #lastgenre:
-      #    auto: yes
-      #    source: album
-
 embedart:
     auto: yes
     remove_art_file: yes
@@ -88,9 +86,6 @@ replace:
     '[\xF8]': o
     #'\.$': _
     '\s+$': ''
-
-lyrics:
-    auto: no
 
 duplicates:
     keys:

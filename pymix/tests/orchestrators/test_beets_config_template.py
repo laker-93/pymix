@@ -31,6 +31,40 @@ def test_the_broken_subsonicupdate_plugin_is_not_loaded(rendered):
     assert "subsonicupdate" not in config["plugins"].split()
 
 
+def test_the_genre_mangling_lastgenre_plugin_is_not_loaded(rendered):
+    # Loaded with its config block commented out, it ran on the plugin's defaults:
+    # force: yes + whitelist: yes + fallback: none, which replaces the genre with None
+    # for anything outside beets' bundled 1541-entry genres.txt. A prod user's
+    # `BASS HOUSE` is not in that list (#179). The genre subbox wants is the one the DJ
+    # set, so nothing here should be guessing one.
+    content, config = rendered
+
+    assert "lastgenre" not in config["plugins"].split()
+    # Not re-added as a commented-out block either: that is exactly how the defaults got
+    # into force last time -- the plugin loaded, its config did not.
+    live = [
+        line for line in content.splitlines()
+        if "lastgenre" in line and not line.lstrip().startswith("#")
+    ]
+    assert live == []
+
+
+
+def test_the_plugins_nothing_ever_calls_are_not_loaded(rendered):
+    # `lyrics` ran with `auto: no` and no caller ever ran `beet lyrics`; `info` only
+    # adds a `beet info` command pymix never calls. Neither could do anything but add
+    # its import to every `beet` invocation. The only subcommands pymix runs are
+    # import/list/modify/rm/duplicates.
+    content, config = rendered
+
+    plugins = config["plugins"].split()
+    assert "lyrics" not in plugins
+    assert "info" not in plugins
+    # And no leftover config block for either -- an orphan block is how lastgenre's
+    # defaults stayed in force above.
+    assert "lyrics:" not in content
+
+
 def test_no_subsonic_block_is_written(rendered):
     # Dead once the plugin is gone -- and it was the only thing putting the user's
     # password in plaintext into their beets config.
