@@ -88,7 +88,7 @@ user_root: /subbox/{user}
 db:
   host: pymix-postgres
   port: 5432
-max_number_of_users: 10
+max_number_of_users: 20
 max_number_of_tracks: 1000
 max_library_size: 10737418240 # 10GB
 # number of seconds after which the export job will be updated with number of files written to zip during export job

@@ -180,10 +180,10 @@ def observe_signup(outcome: str) -> None:
 # ---------------------------------------------------------------------------
 #
 # Per-user, and that is a deliberate cardinality decision rather than an oversight.
-# `max_number_of_users` is 10, so one series per user is bounded by config, and during
-# a beta "which of the ten is actually using it" is the question the whole exercise
-# exists to answer -- an aggregate request rate cannot distinguish ten active testers
-# from one active tester and nine who signed up and left.
+# `max_number_of_users` is 20, so one series per user is bounded by config, and during
+# a beta "which of them is actually using it" is the question the whole exercise
+# exists to answer -- an aggregate request rate cannot distinguish twenty active
+# testers from two active testers and eighteen who signed up and left.
 #
 # Two caveats worth knowing before reading a graph built on these:
 #
