@@ -301,3 +301,191 @@ def parse_applied(output: str) -> int:
         if line.startswith("APPLIED "):
             return int(line.split()[1])
     raise ValueError(f"no APPLIED summary in batch beets output: {output!r}")
+
+
+# Markers for the genre heal's two sections (see build_heal_genre_command).
+_HEAL_MARKER = "---PYMIX-HEAL-GENRE---"
+_HEAL_END_MARKER = "---PYMIX-HEAL-END---"
+
+# Put the genre the DJ set back into the beets DB, reading it from the file.
+#
+# Why this exists (laker-93/pymix#179): the `lastgenre` plugin ran on its own
+# defaults in every per-user container -- `force: yes` + `whitelist: yes` +
+# `fallback: none` -- so every import replaced the genre with None for anything
+# outside beets' bundled 1541-entry genres.txt. A DJ's `BASS HOUSE` is not in that
+# list. #181 stops it happening again; this repairs the rows it already emptied.
+#
+# Deliberately NOT `beet update -M -F genre`, which is the obvious one-liner:
+#
+#   * `update` removes every item whose file is missing, and that happens before
+#     and regardless of `-F`. On a library where a file moved or a mount was late,
+#     a *repair* would silently delete rows. Here a missing file is reported and
+#     the row is left exactly as it is.
+#   * `update` re-reads every field, so a row that beets and the file disagree on
+#     for any other reason changes too. This only ever assigns `genre`.
+#
+# It never calls `item.try_write()`. That is #180 -- a whole-row flush that would
+# push the beets row back into the file, which is the bug that put the emptied
+# genre on disk in the first place. Nothing here touches the audio file: the file
+# is the source of truth and is only ever read.
+#
+# Only the damage signature is healed -- DB genre empty, file genre set. A row
+# where both hold a value is left alone even if they disagree, because that is not
+# a shape lastgenre produces and could be a deliberate edit. Every row is counted
+# into one of the reported categories, so nothing is silently skipped.
+_HEAL_GENRE_SCRIPT = """
+import sys
+
+from beets import config
+from beets.library import Library
+
+try:
+    from mediafile import MediaFile, UnreadableFileError
+except ImportError:  # beets < 1.5 vendored it
+    from beets.mediafile import MediaFile, UnreadableFileError
+
+apply_changes = sys.argv[1] == 'apply'
+marker, end_marker = sys.argv[2], sys.argv[3]
+
+config.read()
+lib = Library(config['library'].as_filename(), config['directory'].as_filename())
+
+healed = skipped_ok = skipped_no_file_genre = unreadable = missing_file = 0
+
+sys.stdout.write('%s\\n' % marker)
+with lib.transaction():
+    for item in lib.items():
+        path = item.path.decode('utf-8', 'replace')
+        db_genre = (item.genre or '').strip()
+        try:
+            media = MediaFile(item.path)
+        except (UnreadableFileError, IOError, OSError):
+            # Covers both "the file is gone" and "the file is there but not
+            # parseable". Either way the row is left untouched and reported.
+            missing_file += 1
+            sys.stdout.write('UNREADABLE\\t%s\\n' % path)
+            continue
+        file_genre = (media.genre or '').strip()
+
+        if db_genre:
+            skipped_ok += 1
+            continue
+        if not file_genre:
+            # Nothing to restore from. Either the track never had a genre, or
+            # #180 already flushed the emptied row into the file -- from here
+            # those two look identical, and neither is recoverable.
+            skipped_no_file_genre += 1
+            sys.stdout.write('NOSOURCE\\t%s\\n' % path)
+            continue
+
+        sys.stdout.write('HEAL\\t%s\\t%s\\n' % (file_genre, path))
+        if apply_changes:
+            item['genre'] = file_genre
+            item.store()
+        healed += 1
+
+sys.stdout.write('%s\\n' % end_marker)
+sys.stdout.write(
+    'SUMMARY healed=%d already_set=%d no_source=%d unreadable=%d applied=%s\\n'
+    % (healed, skipped_ok, skipped_no_file_genre, missing_file,
+       'yes' if apply_changes else 'no')
+)
+"""
+
+
+def build_heal_genre_command(apply_changes: bool) -> List[str]:
+    """
+    argv for the genre heal: restore each beets row's ``genre`` from its file.
+
+    ``apply_changes`` False is a dry run -- it reports exactly the same rows it
+    would change and writes nothing, so the caller can see the damage before
+    touching a real user's library. This is the default everywhere above it.
+    """
+    return [
+        "python3",
+        "-c",
+        _HEAL_GENRE_SCRIPT,
+        "apply" if apply_changes else "pretend",
+        _HEAL_MARKER,
+        _HEAL_END_MARKER,
+    ]
+
+
+class HealGenreResult(NamedTuple):
+    """
+    What the genre heal found, and (when applied) changed.
+
+    ``changes`` is every row whose DB genre was empty while its file had one, as
+    ``(genre, path)`` -- the rows healed, or on a dry run the rows that would be.
+    ``no_source`` and ``unreadable`` are the rows it could not help, listed rather
+    than counted so a heal that reached almost nothing is visible as such.
+    """
+
+    applied: bool
+    healed: int
+    already_set: int
+    changes: List[Tuple[str, str]]
+    no_source: List[str]
+    unreadable: List[str]
+
+
+def parse_heal_genre(output: str) -> HealGenreResult:
+    """
+    Read the heal's report back.
+
+    Raises ValueError if the markers or the summary line are missing: the script
+    emits all three unconditionally, so their absence means the exec did not do
+    what we asked (wrong interpreter, no mediafile, truncated output). An empty
+    library and a failed exec look identical otherwise, and here that difference
+    is "nothing to repair" versus "the repair never ran".
+    """
+    lines = output.splitlines()
+    try:
+        start = lines.index(_HEAL_MARKER)
+        end = lines.index(_HEAL_END_MARKER)
+    except ValueError:
+        raise ValueError(f"missing section markers in beets genre heal output: {output!r}")
+    if not start < end:
+        raise ValueError(f"section markers out of order in beets genre heal output: {output!r}")
+
+    changes: List[Tuple[str, str]] = []
+    no_source: List[str] = []
+    unreadable: List[str] = []
+    for line in lines[start + 1:end]:
+        if not line.strip():
+            continue
+        kind, sep, rest = line.partition("\t")
+        if not sep:
+            logger.warning(f"Skipping malformed line in beets genre heal output: {line}")
+            continue
+        if kind == "HEAL":
+            genre, tab, path = rest.partition("\t")
+            if not tab:
+                logger.warning(f"Skipping malformed HEAL line in beets genre heal output: {line}")
+                continue
+            changes.append((genre, path))
+        elif kind == "NOSOURCE":
+            no_source.append(rest)
+        elif kind == "UNREADABLE":
+            unreadable.append(rest)
+        else:
+            logger.warning(f"Skipping unknown record in beets genre heal output: {line}")
+
+    summary = None
+    for line in reversed(lines):
+        if line.strip().startswith("SUMMARY "):
+            summary = dict(
+                part.split("=", 1) for part in line.strip().split()[1:] if "=" in part
+            )
+            break
+    if summary is None:
+        raise ValueError(f"no SUMMARY line in beets genre heal output: {output!r}")
+
+    return HealGenreResult(
+        applied=summary.get("applied") == "yes",
+        healed=int(summary.get("healed", 0)),
+        already_set=int(summary.get("already_set", 0)),
+        changes=changes,
+        no_source=no_source,
+        unreadable=unreadable,
+    )

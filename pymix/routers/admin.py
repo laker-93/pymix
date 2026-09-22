@@ -77,6 +77,39 @@ async def migrate_beets(
         raise HTTPException(status_code=404, detail=f"no such user: {username}")
 
 
+@router.post("/beets/{username}/heal-genres", dependencies=[Depends(require_admin_token)])
+@inject
+async def heal_beets_genres(
+        username: str,
+        apply: bool = False,
+        services_orchestrator: ServicesOrchestrator = Depends(Provide[Container.services_orchestrator]),
+) -> dict:
+    """Restore the genres `lastgenre` emptied in this user's beets DB, reading each
+    one back from the file (#179). Explicit, per-user, safe to re-run.
+
+    **Dry run by default.** It reports every row it would change and writes nothing
+    unless `apply=true`, so the damage can be inspected before a real user's library
+    is touched.
+
+    Only repairs the damage signature — DB genre empty, file genre set. It never
+    writes the audio file (#180) and never removes a row whose file is missing,
+    which is what the obvious `beet update -F genre` would do.
+
+    409 if the container still loads `lastgenre`: the heal would work and the next
+    import would undo it, so `POST /admin/beets/{username}/migrate` has to come
+    first. 404 still means "not provisioned".
+    """
+    logger.info(f"admin: beets genre heal requested for {username} (apply={apply})")
+    try:
+        return await services_orchestrator.heal_beets_genres(username, apply_changes=apply)
+    except ValueError as ex:
+        if "lastgenre" in str(ex) or "not running" in str(ex):
+            raise HTTPException(status_code=409, detail=str(ex))
+        raise HTTPException(status_code=404, detail=str(ex))
+    except AssertionError:
+        raise HTTPException(status_code=404, detail=f"no such user: {username}")
+
+
 @router.post("/navidrome/{username}/migrate", dependencies=[Depends(require_admin_token)])
 @inject
 async def migrate_navidrome(
