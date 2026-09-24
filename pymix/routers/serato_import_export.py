@@ -1,6 +1,7 @@
 import logging
-from typing import Dict
+from typing import Dict, Optional
 
+import anyio
 from dependency_injector.wiring import Provide, inject
 from fastapi import APIRouter, Depends, BackgroundTasks
 
@@ -10,6 +11,7 @@ from pymix.controllers.db_controller import DbController
 from pymix.controllers.serato_controller import SeratoController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.model.serato_export import SeratoExportRequest, SeratoExportResponse
+from pymix.model.original_track_meta import UploadAttempt
 from pymix.model.serato_import import SeratoImportRequest
 from pymix.routers.auth import require_reader, require_uploader
 from pymix.services.import_progress import failure_reason
@@ -35,7 +37,10 @@ async def serato_import(
     total_n_tracks_for_import = 0
     username = user['username']
 
-    size = fb_file_handler.get_size_of_import(username)
+    # Only what this attempt's /sync/map_meta tagged is imported, and so only
+    # that is counted and checked against the quota (#38).
+    attempt = db_controller.get_upload_attempt(username)
+    size = fb_file_handler.get_size_of_import(username, attempt)
     size_import_bytes = size['size_tracks']
     total_n_tracks_for_import = size['n_tracks']
     exceeded, _1, _2 =  db_controller.user_library_size_exceeded(username, size_import_bytes)
@@ -75,7 +80,7 @@ async def serato_import(
         f'({n_with_cues} carrying cues)'
     )
     background_tasks.add_task(run_import_task, serato_controller, username, job_id, db_controller,
-                              fb_file_handler, total_n_tracks_for_import, user, identities)
+                              fb_file_handler, total_n_tracks_for_import, user, identities, attempt)
     return {
         'success': True,
         'job_id': job_id,
@@ -86,19 +91,34 @@ async def serato_import(
 
 
 async def run_import_task(serato_controller, username, job_id, db_controller, fb_file_handler,
-                          total_n_tracks_for_import, user, identities=None):
+                          total_n_tracks_for_import, user, identities=None,
+                          attempt: Optional[UploadAttempt] = None):
     success = True
     reason = ""
     warnings = None
     report = None
+    attempt = attempt or UploadAttempt(files={})
+    uploaded = []
+    selected = None
     try:
+        # Everything in uploads/ now, crates included, goes when the job finishes,
+        # whatever the outcome (#38). A failed import used to leave its crates for
+        # the next one to parse alongside its own.
+        uploaded = fb_file_handler.snapshot_uploads(username)
         logger.info(f'starting serato import track staging for user {username}')
-        subcrate_path, zip_path, audio_path = fb_file_handler.get_subcrate_audio_path(username)
+        subcrate_path, zip_path, _ = fb_file_handler.get_subcrate_audio_path(username)
+        if zip_path:
+            # Its contents were never tagged by /sync/map_meta, so staging them
+            # would put untagged tracks in the library. No client uploads one.
+            logger.warning(f'not importing audio zip {zip_path} for user {username}: its files carry no SUBBOX_ID')
+        # reads a tag per file: off the event loop
+        selected = await anyio.to_thread.run_sync(fb_file_handler.select_attempt_files, username, attempt)
         report = await serato_controller.create_subsonic_playlists_from_crates(
             user=user,
             serato_crate_path=subcrate_path,
-            zip_path=zip_path,
-            audio_path=audio_path,
+            zip_path=None,
+            audio_path=selected.root if selected.files else None,
+            audio_files=selected.files,
             identities=identities,
         )
         logger.info(f'finished serato import for user {username}')
@@ -120,6 +140,11 @@ async def run_import_task(serato_controller, username, job_id, db_controller, fb
         for skipped in report.skipped:
             logger.info(f'skipped crate entry for {username}: {skipped.crate_path} ({skipped.reason})')
     finally:
+        # Before the job is marked complete, so the client's next attempt starts
+        # on an empty directory.
+        fb_file_handler.finish_upload_attempt(username, uploaded, attempt)
+        refused = selected.refused_warning() if selected is not None else ''
+        warnings = '; '.join(w for w in (warnings, refused) if w) or None
         logger.info(f'marking serato import job for user {username} as {success}')
         db_controller.job_completed(job_id, success, reason, warnings)
 

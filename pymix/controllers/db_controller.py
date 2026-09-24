@@ -12,10 +12,10 @@ from sqlalchemy.orm import sessionmaker
 from pymix.model.db_tables import (
     UserRow, SessionRow, SubboxBeetsMapRow, LibraryRow,
     MetaHistoryRow, UserJobRow, JobRow, OriginalTrackMetaRow, UserTokenRow,
-    PlaylistPathRow, WishlistRow, InviteRequestRow,
+    PlaylistPathRow, WishlistRow, InviteRequestRow, UploadAttemptRow,
 )
 from pymix.model.invite_request import DJ_SOFTWARE_OPTIONS, INVITE_REQUEST_STATUSES, InviteRequestStatus
-from pymix.model.original_track_meta import OriginalTracks
+from pymix.model.original_track_meta import OriginalTracks, UploadAttempt
 from pymix.model.wishlist import MetadataSource, ResolveState, WishlistStatus
 from pymix.services import metrics
 from pymix.services.import_progress import ImportPhase
@@ -410,6 +410,57 @@ class DbController:
                     subbox_id=track.subbox_id,
                 )
                 session.add(new_entry)
+            session.commit()
+
+    def replace_upload_attempt(self, username: str, files: Dict[str, str]) -> None:
+        """
+        Record the files one upload attempt asks to import, replacing any earlier
+        attempt's (#38).
+
+        ``files`` maps each file's path under ``uploads/{user}`` to the subbox_id
+        /sync/map_meta tagged it with. Replaced rather than added to: the client
+        sends map_meta once per attempt, so an older set can only be one whose
+        import never ran, and those files are not part of this attempt.
+        """
+        user_id = self.get_user(username)["user_id"]
+        attempt_id = str(uuid.uuid4())
+        now = datetime.datetime.now().timestamp()
+        with self._session_factory() as session:
+            session.query(UploadAttemptRow).filter(UploadAttemptRow.user_id == user_id).delete()
+            for relative_path, subbox_id in files.items():
+                session.add(UploadAttemptRow(
+                    user_id=user_id,
+                    attempt_id=attempt_id,
+                    relative_path=relative_path,
+                    subbox_id=subbox_id,
+                    created_at=now,
+                ))
+            session.commit()
+
+    def get_upload_attempt(self, username: str) -> UploadAttempt:
+        user_id = self.get_user(username)["user_id"]
+        with self._session_factory() as session:
+            rows = session.query(UploadAttemptRow).filter(UploadAttemptRow.user_id == user_id).all()
+            return UploadAttempt(
+                files={row.relative_path: row.subbox_id for row in rows},
+                attempt_id=rows[0].attempt_id if rows else None,
+            )
+
+    def clear_upload_attempt(self, username: str, attempt: UploadAttempt) -> None:
+        """
+        Forget an attempt once its import has finished, whatever the outcome.
+
+        Only the attempt the import read is deleted. A map_meta that landed while
+        the import ran belongs to the next attempt.
+        """
+        if attempt.attempt_id is None:
+            return
+        user_id = self.get_user(username)["user_id"]
+        with self._session_factory() as session:
+            session.query(UploadAttemptRow).filter(
+                UploadAttemptRow.user_id == user_id,
+                UploadAttemptRow.attempt_id == attempt.attempt_id,
+            ).delete()
             session.commit()
 
     def get_meta_by_user_location(self, username: str, user_location: str) -> Optional[Dict]:

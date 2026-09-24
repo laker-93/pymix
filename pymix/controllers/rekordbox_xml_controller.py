@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import logging
 import os
 import re
@@ -727,18 +728,22 @@ class RekordboxXMLController:
         self._rekordbox_xml_orchestrator.save_xml(rekordbox_xml, xml_output_path)
 
     # todo this function should be part of the beets client or beets controller class and removed from here and rekordbox_xml_controller.py
-    def _import_to_beets(self, username: str, zip_path: Optional[Path], audio_path: Optional[Path], rekordbox_xml: RekordboxXml, progress=None):
+    def _import_to_beets(self, username: str, zip_path: Optional[Path], audio_path: Optional[Path], rekordbox_xml: RekordboxXml, progress=None,
+                         audio_files: Optional[List[Path]] = None):
         """
         Import into beets in quiet mode. Any exceptions will interrupt the process.
         beets should import in to the directory navidrome is working off.
         Users can use APIs after import to correct any mistakes from the beets quiet import.
+
+        ``audio_files`` limits staging to those files under ``audio_path``: the
+        current attempt's, not everything in the directory (#38).
         """
         # See _consume_from_filebrowser on why the audio phase isn't reported here.
         progress = reporter_or_null(progress)
         if zip_path:
             self._rb_backup_file_handler.restore_track_meta_and_stage_for_import(username, zip_path, rekordbox_xml)
         if audio_path:
-            self._rb_backup_file_handler.stage_for_import(username, audio_path)
+            self._rb_backup_file_handler.stage_for_import(username, audio_path, audio_files)
         # 1. invoke beets import on the audio files to import
         # set a custom field of the username that uploaded the track. This allows to query tracks that a username has uploaded.
         # group-albums to allow importing correctly tracks with different album tags.
@@ -780,6 +785,7 @@ class RekordboxXMLController:
             audio_path: Optional[Path],
             playlist_names: Optional[List[List[str]]] = None,
             progress=None,
+            audio_files: Optional[List[Path]] = None,
     ):
         username = user['username']
         # parsed fresh per call and threaded explicitly through the rest of this request -
@@ -788,15 +794,20 @@ class RekordboxXMLController:
         rekordbox_xml = self._rekordbox_xml_orchestrator.create_xml(xml_path)
 
         if zip_path or audio_path:
-            await anyio.to_thread.run_sync(self._import_to_beets, username, zip_path, audio_path, rekordbox_xml, progress)
+            await anyio.to_thread.run_sync(
+                functools.partial(
+                    self._import_to_beets, username, zip_path, audio_path, rekordbox_xml, progress,
+                    audio_files=audio_files,
+                )
+            )
         # must trigger a navidrome scan so the tracks will be queryable when creating and moving in to playlists in the
         # next step -- and wait for it to actually finish, not a fixed guess at how
         # long that takes (see SubsonicOrchestrator.scan_and_wait).
         await self._subsonic_orchestrator.scan_and_wait(user)
         await self._set_data_from_xml(user, rekordbox_xml, playlist_names, progress)
-        # the fb path is removed here as we only want to remove data in fb once import is successful to avoid
-        # unnecessarily having to reupload data from the client after a beets import failure
-        self._file_browser_file_handler.remove_fb_data_path(username)
+        # uploads/ is cleared by the router once the job finishes, whatever the
+        # outcome (#38). Clearing it only on success here let a failed attempt's
+        # files be imported by the next one.
 
     @staticmethod
     def _filter_playlists(playlists: List[SubBoxPlaylist], requested: List[List[str]]) -> List[SubBoxPlaylist]:

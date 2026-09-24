@@ -1,6 +1,7 @@
 import logging
 from typing import Dict, Optional
 
+import anyio
 from dependency_injector.wiring import Provide, inject
 from fastapi import APIRouter, Depends, BackgroundTasks
 from anyio import to_process
@@ -13,7 +14,9 @@ from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.routers.auth import require_reader, require_uploader
 from pymix.routers.beets_import import BeetsImportRequest
+from pymix.model.original_track_meta import UploadAttempt
 from pymix.services.import_progress import failure_reason, ImportProgressReporter
+from pymix.services.job_outcome import with_warning
 
 router = APIRouter()
 
@@ -41,7 +44,10 @@ async def rekordbox_import(
     total_n_tracks_for_import = 0
     username = user['username']
 
-    size = fb_file_handler.get_size_of_import(username)
+    # Only what this attempt's /sync/map_meta tagged is imported, and so only
+    # that is counted and checked against the quota (#38).
+    attempt = db_controller.get_upload_attempt(username)
+    size = fb_file_handler.get_size_of_import(username, attempt)
     size_import_bytes = size['size_tracks']
     total_n_tracks_for_import = size['n_tracks']
     exceeded, _1, _2 =  db_controller.user_library_size_exceeded(username, size_import_bytes)
@@ -71,7 +77,7 @@ async def rekordbox_import(
     logger.info(f'RB importing {total_n_tracks_for_import} tracks for user {username}')
     requested_playlists = [p for p in request.playlistNames if p] if request.playlistNames else None
     background_tasks.add_task(run_import_task, rekordbox_xml_controller, username, job_id, db_controller,
-                  fb_file_handler, total_n_tracks_for_import, user, requested_playlists)
+                  fb_file_handler, total_n_tracks_for_import, user, requested_playlists, attempt)
     success = True
 
     return {
@@ -84,7 +90,8 @@ async def rekordbox_import(
 
 
 async def run_import_task(rekordbox_xml_controller, username, job_id, db_controller, fb_file_handler,
-                          total_n_tracks_for_import, user, playlist_names: Optional[list[list[str]]]):
+                          total_n_tracks_for_import, user, playlist_names: Optional[list[list[str]]],
+                          attempt: Optional[UploadAttempt] = None):
     # No `success = True` to start with: the verdict is computed at the end from
     # what the passes actually recorded, not asserted here and defended against
     # exceptions (#171). An escaping exception is still a failure -- it is just no
@@ -92,15 +99,27 @@ async def run_import_task(rekordbox_xml_controller, username, job_id, db_control
     escaped_reason = None
     beets_output = ""
     progress = ImportProgressReporter(db_controller, job_id)
+    attempt = attempt or UploadAttempt(files={})
+    uploaded = []
+    selected = None
     try:
-        xml_path, zip_path, audio_path = fb_file_handler.get_xml_data_path(username)
-        logger.info(f'starting RB import track staging for user {username} on {xml_path} and {audio_path}')
-        logger.info(f'finished RB import track staging for user {username}')
+        # Everything in uploads/ now goes when the job finishes, whatever the
+        # outcome (#38). Taken now so a file uploaded during a long import survives it.
+        uploaded = fb_file_handler.snapshot_uploads(username)
+        xml_path, zip_path, _ = fb_file_handler.get_xml_data_path(username)
+        if zip_path:
+            # Its contents were never tagged by /sync/map_meta, so staging them
+            # would put untagged tracks in the library. No client uploads one.
+            logger.warning(f'not importing audio zip {zip_path} for user {username}: its files carry no SUBBOX_ID')
+        # reads a tag per file: off the event loop
+        selected = await anyio.to_thread.run_sync(fb_file_handler.select_attempt_files, username, attempt)
+        logger.info(f'starting RB import for user {username} on {xml_path} with {len(selected.files)} track(s)')
         beets_output = await rekordbox_xml_controller.create_subsonic_playlists_from_xml(
             user=user,
             xml_path=xml_path,
-            zip_path=zip_path,
-            audio_path=audio_path,
+            zip_path=None,
+            audio_path=selected.root if selected.files else None,
+            audio_files=selected.files,
             playlist_names=playlist_names,
             # so the post-import passes report their own progress instead of the
             # job sitting at a frozen 100% for the whole tail (#51), and their own
@@ -117,7 +136,12 @@ async def run_import_task(rekordbox_xml_controller, username, job_id, db_control
         logger.info(f'finished RB import of {total_n_tracks_for_import} for user {username}')
     finally:
         logger.info(f"beets output {beets_output}")
+        # Before the job is marked complete, so the client's next attempt starts
+        # on an empty directory.
+        fb_file_handler.finish_upload_attempt(username, uploaded, attempt)
         outcome = progress.verdict(escaped_reason)
+        if selected is not None:
+            outcome = with_warning(outcome, selected.refused_warning())
         logger.info(f'marking RB import job for user {username} as {outcome.verdict.value}')
         # The reason goes on the job row, not just in this log line — it is the only
         # thing the user's "Import Failed" screen has to show (subbox-app#48).

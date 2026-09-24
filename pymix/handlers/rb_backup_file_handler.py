@@ -4,6 +4,7 @@ import zipfile
 import music_tag
 import shutil
 from pathlib import Path
+from typing import Iterable, Optional
 
 from pyrekordbox.rbxml import RekordboxXml, Track
 
@@ -105,13 +106,17 @@ class RBBackupFileHandler:
         return n_updated_tracks
 
     # todo: move from rb handler as logic is generic to serato and rb
-    def stage_for_import(self, username: str, audio_files: Path):
+    def stage_for_import(self, username: str, audio_files: Path, only: Optional[Iterable[Path]] = None):
         """
         Move the audio file to the beets docker shared directory that is used for import in to beets.
+
+        ``only`` is the files under ``audio_files`` to stage. The Rekordbox and
+        Serato imports pass just their own attempt's files, so a leftover elsewhere
+        in the directory never reaches beets (#38).
         """
         beets_data_path = self._beets_data_path.format(user=username)
         beets_data_path = Path(beets_data_path)
-        for item in audio_files.rglob('*'):
+        for item in audio_files.rglob('*') if only is None else only:
             if item.is_file():
                 if detect_audio_type(item) is not None:
                     subbox_id = get_subbox_id(item)

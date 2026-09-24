@@ -27,11 +27,12 @@ On any failure the user + session are rolled back.
 
 ## 2. Rekordbox import (`POST /rekordbox/import`) — background job
 `RekordboxXMLController.create_subsonic_playlists_from_xml`:
-1. Router resolves user, checks storage quota, counts tracks, creates an import job,
-   schedules `run_import_task` as a `BackgroundTask`.
-2. `fb_file_handler.get_xml_data_path` finds the uploaded RB XML (+ optional audio
-   zip) in the user's `uploads/`.
-3. If audio present → `_import_to_beets` (stage → `beet import --group-albums --set
+1. Router resolves user, reads the **upload attempt** (below), checks storage quota,
+   counts tracks, creates an import job, schedules `run_import_task` as a
+   `BackgroundTask`.
+2. `fb_file_handler.get_xml_data_path` finds the uploaded RB XML in the user's
+   `uploads/`. An audio zip there is ignored: its files were never tagged.
+3. If the attempt has audio → `_import_to_beets` (stage → `beet import --group-albums --set
    user=… -q /downloads` in `beets{user}` → cleanup → dedup tag → subbox_id↔beet map).
 4. `SubsonicOrchestrator.scan` triggers a Navidrome rescan.
 5. `_set_data_from_xml`:
@@ -40,7 +41,22 @@ On any failure the user + session are rolled back.
      search → `create_playlists` in Navidrome.
    - `_set_metadata_from_xml` — set ratings, write BPM into beets, and store
      cue/loop metadata in `library_table` keyed by `subbox_id`.
-6. Remove the filebrowser upload dir (only on success).
+6. The router clears `uploads/` and the attempt, **whatever the outcome**, before it
+   marks the job complete. It clears only the files that were there when the job
+   started, so an upload that lands during a long import survives it.
+
+**The upload attempt (#38).** An import stages only the files the attempt's
+`/sync/map_meta` tagged, not everything in `uploads/`. map_meta records those
+files in `upload_attempt_table` (path under `uploads/` → the subbox_id it
+tagged), replacing any earlier set. The import stages a file only if it is in
+that set *and* still carries that SUBBOX_ID when read back
+(`FileBrowserFileHandler.select_attempt_files`). An attempt file that fails the
+read-back is refused, and the job reports it as a warning (a clean success becomes
+`partial`). Any other audio in `uploads/` is a leftover and is only logged. Before
+this, a failed upload's untagged files were imported by the next attempt; see
+#38's 2026-09-23 comment. One residual: map_meta without a following import
+(the client stopped in between) leaves an attempt the next import will pick up.
+Those files are tagged and were asked for, so the subbox_id invariant holds.
 
 Progress polled via `/beets/import/progress`. An import is **three** phases, not one
 (`ImportPhase` in `services/import_progress.py`): `importing_audio` (step 3's `beet
@@ -72,7 +88,8 @@ round trips per track, which is invisible locally and 12-32 s on a prod RTT (#10
 ## 4. Serato import/export (`/serato/import`, `/serato/export`)
 Import mirrors the Rekordbox flow but reads Serato `.crate` files via `pyserato`
 (`SeratoController` + `SeratoCrateOrchestrator`). Crate folder hierarchy ↔
-`path_components` the same way.
+`path_components` the same way. It is scoped to the upload attempt and clears
+`uploads/` (crates included) the same way as §2.
 
 Export does **not** mirror it: `/serato/export` returns the playlist and track
 structure and writes no files, because the client is the side that knows where
