@@ -6,18 +6,19 @@ import mimetypes
 import shutil
 import zipfile
 from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Optional, Dict, Any, List
 from zipfile import ZipFile
 
 import music_tag
 from watchfiles import awatch, Change
 
 from pymix.controllers.db_controller import DbController
-from pymix.model.original_track_meta import OriginalTracks, OriginalTrackMeta
+from pymix.model.original_track_meta import OriginalTracks, OriginalTrackMeta, UploadAttempt
 from pymix.model.subboxtrack import SubBoxTrack
 from pymix.services.import_progress import failure_reason
-from pymix.utils.tag_subbox_id import tag_subbox_id
+from pymix.utils.tag_subbox_id import get_subbox_id, tag_subbox_id
 from pymix.utils.utility import AUDIO_EXTENSIONS, detect_audio_type, detect_audio_type_with_reason
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,34 @@ def is_audio_zip(f: Path) -> bool:
     """
     name = f.name.lower()
     return name.endswith('.zip') and 'macosx' not in name and not is_crate_zip(f)
+
+
+@dataclass
+class AttemptFiles:
+    """
+    What one import may stage from ``uploads/{user}``: the files the attempt's
+    /sync/map_meta tagged, and nothing else (#38).
+
+    ``refused`` are the attempt's own files that cannot go in: the file is gone,
+    or no longer carries the SUBBOX_ID map_meta gave it. Staging those would put
+    a track in the library that nothing can match or delete by id, so they are
+    reported rather than imported. ``leftovers`` are audio files no attempt asked
+    for, usually what an earlier upload left behind. They are only logged. They
+    were never part of what the user asked for this time.
+    """
+    root: Path
+    files: List[Path] = field(default_factory=list)
+    refused: List[Tuple[str, str]] = field(default_factory=list)
+    leftovers: List[Path] = field(default_factory=list)
+
+    def refused_warning(self) -> str:
+        if not self.refused:
+            return ''
+        path, reason = self.refused[0]
+        return (
+            f'{len(self.refused)} uploaded track(s) were not imported because they could not be '
+            f'identified ({path}: {reason}). Upload them again.'
+        )
 
 
 def _has_audio_files(directory: Path) -> bool:
@@ -263,6 +292,9 @@ class FileBrowserFileHandler:
             'already_tagged_count': 0,
             'untagged_count': 0,
             'untagged': [],
+            # Each file tagged, by its path under uploads/, with the id it was
+            # tagged with: what the import is allowed to stage (#38).
+            'staged': {},
         }
 
         # Build a lookup by staging location so we can explain why each track was skipped.
@@ -302,6 +334,7 @@ class FileBrowserFileHandler:
             subbox_id = tag_subbox_id(f)
             if subbox_id:
                 track.subbox_id = subbox_id
+                report['staged'][str(f.relative_to(src_path))] = subbox_id
                 if existing_subbox_id and existing_subbox_id == subbox_id:
                     report['already_tagged_count'] += 1
                 else:
@@ -373,8 +406,77 @@ class FileBrowserFileHandler:
         assert xml_path
         return xml_path, zip_path, audio_path
 
-    def get_size_of_import(self, user: str) -> Dict[str, int]:
-        src_path = Path(self._filebrowser_data_path_uploads.format(user=user))
+    def uploads_dir(self, user: str) -> Path:
+        return Path(self._filebrowser_data_path_uploads.format(user=user))
+
+    def select_attempt_files(self, user: str, attempt: UploadAttempt) -> AttemptFiles:
+        """
+        The audio under ``uploads/{user}`` that this attempt may import (#38).
+
+        A file is staged only if the attempt's /sync/map_meta tagged it, and it
+        still carries that id when read back. The read-back matters:
+        ``tag_subbox_id`` can return an id it failed to write, and an untagged
+        file in beets can't be matched, deleted by id or exported. Everything
+        else in the directory is a leftover and is not staged.
+        """
+        root = self.uploads_dir(user)
+        selected = AttemptFiles(root=root)
+        found: set[str] = set()
+        for f in sorted(root.rglob('*')) if root.is_dir() else []:
+            if not f.is_file():
+                continue
+            relative_path = str(f.relative_to(root))
+            expected = attempt.files.get(relative_path)
+            if expected is None:
+                # By extension, not by sniffing it: a leftover is only logged, and
+                # an upload can leave thousands of them.
+                if f.suffix.lower() in AUDIO_EXTENSIONS - {'.zip'}:
+                    selected.leftovers.append(f)
+                continue
+            found.add(relative_path)
+            try:
+                subbox_id = get_subbox_id(f)
+            except Exception as ex:
+                selected.refused.append((relative_path, f'unreadable tags: {ex!r}'))
+                continue
+            if subbox_id != expected:
+                reason = 'no SUBBOX_ID tag' if subbox_id is None else f'SUBBOX_ID is {subbox_id}, expected {expected}'
+                selected.refused.append((relative_path, reason))
+                continue
+            selected.files.append(f)
+        for relative_path in sorted(attempt.files.keys() - found):
+            selected.refused.append((relative_path, 'file is no longer in uploads'))
+
+        logger.info(
+            f'upload attempt for {user}: {len(attempt.files)} file(s) requested, '
+            f'{len(selected.files)} to stage, {len(selected.refused)} refused, '
+            f'{len(selected.leftovers)} leftover(s) not staged'
+        )
+        if selected.refused:
+            logger.error(f'upload attempt for {user}: refused {selected.refused}')
+        if selected.leftovers:
+            sample = [str(f.relative_to(root)) for f in selected.leftovers[:5]]
+            logger.warning(
+                f'upload attempt for {user}: not staging {len(selected.leftovers)} file(s) '
+                f'no attempt asked for, e.g. {sample}'
+            )
+        return selected
+
+    def get_size_of_import(self, user: str, attempt: Optional[UploadAttempt] = None) -> Dict[str, int]:
+        """
+        How many tracks, and how many bytes, an import would add.
+
+        With ``attempt``, only that attempt's files count (what the Rekordbox and
+        Serato imports stage). They are not re-read here: this runs in the request,
+        and map_meta has already checked each one is audio. Without it, everything
+        in ``uploads/`` counts, including any audio zip, for /beets/import, which
+        still consumes the whole directory.
+        """
+        if attempt is not None:
+            root = self.uploads_dir(user)
+            files = [f for f in (root / p for p in attempt.files) if f.is_file()]
+            return {'n_tracks': len(files), 'size_tracks': sum(f.stat().st_size for f in files)}
+        src_path = self.uploads_dir(user)
         audio_files_zip = None
         n_files = 0
         total_size = 0
@@ -578,11 +680,51 @@ class FileBrowserFileHandler:
         logger.info(f"constructed metadata for {len(tracks.tracks)} audio files")
         self._db_controller.save_original_track_meta(username, tracks)
 
-    def remove_fb_data_path(self, username, watch: bool = False):
+    def snapshot_uploads(self, username: str) -> List[Path]:
+        """Every file in ``uploads/{user}`` now, for :meth:`remove_fb_data_path` to clear later."""
+        root = self.uploads_dir(username)
+        return [f for f in root.rglob('*') if f.is_file()] if root.is_dir() else []
+
+    def finish_upload_attempt(self, username: str, uploaded: List[Path], attempt: UploadAttempt) -> None:
+        """
+        Clear what an import started with, whatever its outcome (#38).
+
+        ``uploads/`` used to be cleared only after a successful import, so a
+        failed attempt's files, including ones that were never tagged, stayed
+        for the next import to pick up. Never raises: a cleanup failure must not
+        change the job's verdict.
+        """
+        try:
+            self.remove_fb_data_path(username, only=uploaded)
+        except Exception:
+            logger.exception(f'failed to clear uploads for {username}')
+        try:
+            self._db_controller.clear_upload_attempt(username, attempt)
+        except Exception:
+            logger.exception(f'failed to clear the upload attempt for {username}')
+
+    def remove_fb_data_path(self, username, watch: bool = False, only: Optional[List[Path]] = None):
+        """
+        Clear the user's filebrowser upload (or watch) directory.
+
+        ``only`` limits it to the files an import saw when it started, from
+        :meth:`snapshot_uploads`. The import clears ``uploads/`` whatever its
+        outcome (#38). A file uploaded while the import ran belongs to the next
+        attempt and must survive.
+        """
         if watch:
             src_dir = Path(self._filebrowser_data_path_watch.format(user=username))
         else:
             src_dir = Path(self._filebrowser_data_path_uploads.format(user=username))
+        if only is not None:
+            logger.info(f'removing {len(only)} file(s) from {src_dir}')
+            for filepath in only:
+                filepath.unlink(missing_ok=True)
+            # deepest first, so a parent is empty by the time it is reached
+            for directory in sorted((d for d in src_dir.rglob('*') if d.is_dir()), reverse=True):
+                if not any(directory.iterdir()):
+                    directory.rmdir()
+            return
         logger.info(f'removing contents of {src_dir}')
         for filepath in src_dir.iterdir():
             if filepath.is_dir():

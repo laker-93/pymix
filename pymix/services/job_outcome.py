@@ -27,7 +27,7 @@ or ``ImportPhase`` -- ``import_progress`` layers the reporting on top, so the
 dependency runs one way only.
 """
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import List, Optional, Tuple
 
@@ -239,6 +239,21 @@ class OutcomeLedger:
             )
 
         return JobOutcome(Verdict.SUCCESS, phases=phases)
+
+
+def with_warning(outcome: JobOutcome, warning: str) -> JobOutcome:
+    """
+    Add something the user needs to know that the phases did not record.
+
+    A clean success becomes ``PARTIAL``: something the user asked for did not
+    happen, so it is not a clean win. A failure stays a failure, and keeps the
+    warning beside its reason.
+    """
+    if not warning:
+        return outcome
+    verdict = Verdict.PARTIAL if outcome.verdict is Verdict.SUCCESS else outcome.verdict
+    warnings = truncate_reason("; ".join(w for w in (outcome.warnings, warning) if w))
+    return replace(outcome, verdict=verdict, warnings=warnings)
 
 
 #: What the client is told when a job is failed with nothing recorded at all.

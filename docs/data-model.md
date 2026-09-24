@@ -23,6 +23,7 @@
 | `library_table` | `LibraryRow` | user_id, subbox_id, cuedata (JSON), source_app, updated_at, version | Latest cue/loop metadata per track, versioned. |
 | `meta_history_table` | `MetaHistoryRow` | user_id, subbox_id, version, cuedata, source_app, change_type, changed_at | Append-only history of every metadata change. |
 | `original_track_meta_map_table` | `OriginalTrackMetaRow` | user_id, subbox_id, user_location, staging_location, original_name/artist/album | Records a track's original (client-side) identity so re-imports can be skipped/matched. |
+| `upload_attempt_table` | `UploadAttemptRow` | user_id, attempt_id, relative_path, subbox_id, created_at | The files the latest `/sync/map_meta` tagged, which are the only files the next Rekordbox/Serato import may stage (#38). One set per user: replaced by each map_meta, cleared by the import that read it. Added in migration 020. |
 | `user_job_table` | `UserJobRow` | user_id, job_id | Links a user to their jobs. |
 | `job_table` | `JobRow` | job_id, name (import/export), counts, in_progress, result, phase + phase_n_processed/phase_n_total | Drives the import/export progress endpoints. At most one in-progress job per user (asserted). The `phase` columns say which pass of a multi-pass import is running (`ImportPhase`, #51); null on export jobs and on rows predating migration 016. |
 | `playlist_path_table` | `PlaylistPathRow` | user_id, display_name, path_components (JSON) | Stores a playlist's folder path components so export can rebuild nested folder structure losslessly (Subsonic playlists are flat). Added in migration 002. |
@@ -40,6 +41,7 @@
   `subsonic_id`, `path_components` (folder hierarchy).
 - `model/original_track_meta.py` `OriginalTrackMeta` / `OriginalTracks` (pydantic) —
   payload for `/sync/map_meta`, persisted to `original_track_meta_map_table`.
+  `UploadAttempt` is `upload_attempt_table` read back for one import.
 
 ## The `subbox_id` lifecycle
 

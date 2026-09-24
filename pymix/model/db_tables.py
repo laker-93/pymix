@@ -115,6 +115,26 @@ class OriginalTrackMetaRow(Base):
     original_album = Column(String)
 
 
+class UploadAttemptRow(Base):
+    """
+    One file the latest /sync/map_meta asked to import (migration 020, #38).
+
+    The set of rows for a user is replaced by each map_meta and cleared by the
+    import that consumed it, so it only ever describes one attempt.
+    """
+    __tablename__ = 'upload_attempt_table'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, nullable=False, index=True)
+    # One per map_meta, so an import clears the set it read and no newer one.
+    attempt_id = Column(String, nullable=False)
+    # Under uploads/{user}, as map_meta found the file.
+    relative_path = Column(String, nullable=False)
+    # What map_meta tagged it with. The import stages the file only if it still
+    # carries this id.
+    subbox_id = Column(String, nullable=False)
+    created_at = Column(Float, nullable=False)
+
+
 class UserTokenRow(Base):
     __tablename__ = 'user_token_table'
     id = Column(Integer, primary_key=True, autoincrement=True)

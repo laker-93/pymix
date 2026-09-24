@@ -158,7 +158,8 @@ class SeratoController:
         )
 
     # todo this function should be part of the beets client or beets controller class and removed from here and rekordbox_xml_controller.py
-    def _import_to_beets(self, username: str, zip_path: Optional[Path], audio_path: Optional[Path]):
+    def _import_to_beets(self, username: str, zip_path: Optional[Path], audio_path: Optional[Path],
+                         audio_files: Optional[List[Path]] = None):
         """
         Import into beets in quiet mode. Any exceptions will interrupt the process.
         beets should import in to the directory navidrome is working off.
@@ -168,7 +169,7 @@ class SeratoController:
             self._serato_backup_file_handler.stage_for_import(username, zip_path)
         if audio_path:
             # todo: move from rb handler as logic is generic to serato and rb
-            self._rb_backup_file_handler.stage_for_import(username, audio_path)
+            self._rb_backup_file_handler.stage_for_import(username, audio_path, audio_files)
         # 1. invoke beets import on the audio files to import
 
         # can set to interactive with tty to pipe docker stdin input/output to terminal for user feedback.
@@ -211,11 +212,12 @@ class SeratoController:
         zip_path: Optional[Path],
         audio_path: Optional[Path],
         identities: Optional[Dict[str, str]] = None,
+        audio_files: Optional[List[Path]] = None,
     ) -> CrateImportReport:
         username = user['username']
 
         if zip_path or audio_path:
-            await anyio.to_thread.run_sync(self._import_to_beets, username, zip_path, audio_path)
+            await anyio.to_thread.run_sync(self._import_to_beets, username, zip_path, audio_path, audio_files)
         # must trigger a navidrome scan so the tracks will be queryable when creating and moving in to playlists in the
         # next step
         await self._subsonic_orchestrator.scan(user)
@@ -226,10 +228,8 @@ class SeratoController:
             await self._wishlist_reconcile_service.reconcile_user(user)
         except Exception:
             logger.exception(f"wishlist reconcile after serato import failed for {username}")
-        # the fb path is removed here as it's needed for processing the .crate files so can't be removed in
-        # import_to_beets stage. Also we only want to remove data in fb once import is successful to avoid
-        # unnecessarily having to reupload data from the client after a beets import failure
-        self._file_browser_file_handler.remove_fb_data_path(username)
+        # uploads/ (the audio and the .crate files) is cleared by the router once
+        # the job finishes, whatever the outcome (#38).
         return report
 
     async def _set_data_from_crates(

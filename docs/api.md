@@ -94,13 +94,13 @@ series.
 ## Rekordbox import/export — `routers/rb_import_export.py`
 | Method/Path | Purpose |
 |---|---|
-| POST `/rekordbox/import` | Ingest the user's uploaded RB XML (+ optional audio zip) → beets import → create Navidrome playlists + import cue/rating metadata. Runs as a **background job**; returns `job_id`. Body `playlistNames: list[list[str]]` filters which playlist paths to import. Enforces storage quota. |
+| POST `/rekordbox/import` | Ingest the user's uploaded RB XML (+ the audio the last `/sync/map_meta` tagged; nothing else in uploads/, and no audio zip, #38) → beets import → create Navidrome playlists + import cue/rating metadata. Runs as a **background job**; returns `job_id`. Body `playlistNames: list[list[str]]` filters which playlist paths to import. Enforces storage quota. |
 | POST `/rekordbox/export` | Build a Rekordbox XML from the user's Navidrome playlists. Body `user_root` (client-side music root for path rewriting) + optional `playlistIds`. Writes XML into the user's downloads dir. Kept for clients that fetch the XML as its own download; current ones ask `/sync/playlists` for it instead so the whole export is a single file. |
 
 ## Serato import/export — `routers/serato_import_export.py`
 | Method/Path | Purpose |
 |---|---|
-| POST `/serato/import` | Ingest uploaded Serato crates (+ optional audio) → beets import → Navidrome playlists/metadata. Background job; returns `job_id`. Reads the crates from a file named exactly **`all-crates.zip`** in the user's uploads dir, with the `.crate` files at the **root of the zip** — `parse_crates_from_root_path` uses `iterdir()`, not `rglob()`, so a Finder "Compress" of the SubCrates folder parses to zero crates. Optional body `track_identities: [{crate_path, subbox_id, cues?}]` — see below. |
+| POST `/serato/import` | Ingest uploaded Serato crates (+ optional audio) → beets import → Navidrome playlists/metadata. Background job; returns `job_id`. Audio is scoped to the last `/sync/map_meta`'s files like `/rekordbox/import`, and `uploads/` is cleared whatever the outcome (#38). Reads the crates from a file named exactly **`all-crates.zip`** in the user's uploads dir, with the `.crate` files at the **root of the zip** — `parse_crates_from_root_path` uses `iterdir()`, not `rglob()`, so a Finder "Compress" of the SubCrates folder parses to zero crates. Optional body `track_identities: [{crate_path, subbox_id, cues?}]` — see below. |
 | POST `/serato/export` | Return the user's playlists as the crates the **client** will write: `{crates: [{path_components, display_name, tracks: [{relative_path, title, artist, album, rating, subbox_id, cues}]}]}`. Optional body `playlistIds` (empty = all). Writes nothing — see below. |
 
 ### Why export returns data and not files
@@ -159,7 +159,7 @@ a zip that parses to zero crates, and a zip where nothing at all matched.
 | Method/Path | Purpose |
 |---|---|
 | POST `/sync/match_tracks` | Match a list of tracks against the user's Navidrome library; returns matched/unmatched flags. |
-| POST `/sync/map_meta` | Tag staged uploads with `subbox_id` and persist original metadata; 400s if any track can't be tagged. |
+| POST `/sync/map_meta` | Tag staged uploads with `subbox_id`, persist original metadata, and record the files as the upload attempt the next import stages (#38); 400s if any track can't be tagged. |
 | POST `/sync/plan` | Compute a sync plan: which requested tracks are already present vs missing on server, download size, metadata updates. Read-only. |
 | POST `/sync` and POST `/sync/tracks` | Resolve requested tracks on the server and zip them into the user's downloads dir for download. `/sync/tracks` uses a more lenient multi-stage matcher. |
 | POST `/sync/playlists` | Prepare **one** file for the client to download from selected server playlists. Tracks (excluding ones the client already has) zipped into the user's downloads dir; with `includeRekordboxXml: true` the XML goes *inside* that zip; with `includeTracks: false` the XML is the whole download and no zip is built. `user_root` is the XML's client-side music root, as on `/rekordbox/export`. Response `downloadFilename` is what to pass to `/sync/download` — clients must not assemble it. 400s if both are false; a failed XML fails the whole call rather than returning a zip silently missing it. One file because a browser only reliably saves one download per user gesture — a second is dropped silently. |

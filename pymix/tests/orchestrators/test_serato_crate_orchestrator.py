@@ -271,6 +271,26 @@ def test_nesting_survives_the_round_trip_into_path_components(orchestrator, tmp_
     assert playlists[0].name == 'Sets / 2026 / Warmup'
 
 
+def test_parsing_leaves_no_crates_beside_the_zip(orchestrator, tmp_path, library):
+    """
+    The zip sits in uploads/, which the import clears from a list of the files
+    present when the job started. Crates extracted there mid-job were not on that
+    list, so they outlived the import and the next one parsed them as its own:
+    a playlist the user had deleted came back (#38).
+    """
+    add_library_track(library, 'Artist/Album/one.mp3')
+    beets_returns(orchestrator, {'sid-1': 'Artist/Album/one.mp3'})
+    crate = Crate('House')
+    crate.add_track(Track.from_path('/Users/dj/Music/one.mp3'))
+    zip_path = write_crate_zip(tmp_path, crate)
+
+    orchestrator.get_subbox_playlists_from_crates(
+        USER, zip_path, manifest(('/Users/dj/Music/one.mp3', 'sid-1'))
+    )
+
+    assert sorted(p.name for p in zip_path.parent.iterdir()) == ['all-crates.zip']
+
+
 def test_crates_nested_inside_a_folder_is_named_as_the_cause(orchestrator, tmp_path, library):
     """
     What Finder's "Compress" produces. parse_crates_from_root_path uses iterdir(),

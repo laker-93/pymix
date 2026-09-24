@@ -1,4 +1,5 @@
 import logging
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -289,9 +290,15 @@ class SeratoCrateOrchestrator:
         subbox_playlists: List[SubBoxPlaylist] = []
         report = CrateImportReport()
 
-        with zipfile.ZipFile(zip_crate_path, 'r') as zip_ref:
-            zip_ref.extractall(zip_crate_path.parent)
-        crates = self._crate_builder.parse_crates_from_root_path(zip_crate_path.parent)
+        # Into a directory of its own, not beside the zip. The zip sits in
+        # uploads/, which the import clears from a list of the files present when
+        # the job started, so crates extracted there mid-job outlived it and the
+        # next import parsed them alongside its own (#38). Parsing reads every
+        # crate eagerly, so nothing needs the files once this block exits.
+        with tempfile.TemporaryDirectory(prefix='serato-crates-') as crate_dir:
+            with zipfile.ZipFile(zip_crate_path, 'r') as zip_ref:
+                zip_ref.extractall(crate_dir)
+            crates = self._crate_builder.parse_crates_from_root_path(Path(crate_dir))
         report.crates_parsed = len(crates)
         if not crates:
             # parse_crates_from_root_path uses iterdir(), not rglob(), so a zip

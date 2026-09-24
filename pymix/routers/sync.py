@@ -132,6 +132,10 @@ async def map_meta(
 ) -> dict:
 
     tag_report = fb_file_handler.tag_staging_with_subbox_id(user['username'], tracks)
+    # These files, and only these, are what the import that follows may stage
+    # (#38). Recorded before any 400 below, so an older attempt's set can never
+    # outlive a newer map_meta.
+    db_controller.replace_upload_attempt(user['username'], tag_report.pop('staged'))
     untagged_tracks = list(filter(lambda t: t.subbox_id is None, tracks.tracks))
     if untagged_tracks:
         logger.error(
