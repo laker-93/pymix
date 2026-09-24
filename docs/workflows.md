@@ -89,7 +89,10 @@ round trips per track, which is invisible locally and 12-32 s on a prod RTT (#10
 Import mirrors the Rekordbox flow but reads Serato `.crate` files via `pyserato`
 (`SeratoController` + `SeratoCrateOrchestrator`). Crate folder hierarchy ↔
 `path_components` the same way. It is scoped to the upload attempt and clears
-`uploads/` (crates included) the same way as §2.
+`uploads/` (crates included) the same way as §2. `all-crates.zip` is extracted
+into a temporary directory, not beside itself: crates extracted into `uploads/`
+mid-job were not in the list the cleanup works from, so they outlived the import
+and the next one parsed them as its own.
 
 Export does **not** mirror it: `/serato/export` returns the playlist and track
 structure and writes no files, because the client is the side that knows where
