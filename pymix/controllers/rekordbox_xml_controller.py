@@ -790,8 +790,9 @@ class RekordboxXMLController:
         username = user['username']
         # parsed fresh per call and threaded explicitly through the rest of this request -
         # never stored on the (singleton) orchestrator, so concurrent users' imports can't
-        # race on shared state (see #59).
-        rekordbox_xml = self._rekordbox_xml_orchestrator.create_xml(xml_path)
+        # race on shared state (see #59). Parsed in a worker thread: a full-library
+        # XML is tens of MB, and the event loop serves every other user (#191).
+        rekordbox_xml = await anyio.to_thread.run_sync(self._rekordbox_xml_orchestrator.create_xml, xml_path)
 
         if zip_path or audio_path:
             await anyio.to_thread.run_sync(
@@ -809,26 +810,27 @@ class RekordboxXMLController:
         # outcome (#38). Clearing it only on success here let a failed attempt's
         # files be imported by the next one.
 
-    @staticmethod
-    def _filter_playlists(playlists: List[SubBoxPlaylist], requested: List[List[str]]) -> List[SubBoxPlaylist]:
-        """Filter playlists by exact path_components match OR folder prefix match.
+    async def _build_playlists_from_xml(
+            self, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None
+    ) -> List[SubBoxPlaylist]:
+        """The XML's playlists, scoped to `playlist_names` when given.
 
-        Each entry in `requested` is a list of path components.
-        If a requested path is a prefix of a playlist's path_components,
-        that playlist is included (folder-level selection).
-        For example, requesting ["Genre", "House"] matches ["Genre", "House", "Deep House"].
+        Run in a worker thread: on a large library this is the longest stretch
+        of pure CPU in an import, and on the event loop it stopped pymix serving
+        anyone -- the metrics scrape included -- for minutes at a time (#191).
         """
-        normalised = [tuple(c.strip().lower() for c in r) for r in requested if r]
-        result = []
-        for p in playlists:
-            if not p.path_components:
-                continue
-            p_norm = tuple(c.strip().lower() for c in p.path_components)
-            for req in normalised:
-                if p_norm[:len(req)] == req:
-                    result.append(p)
-                    break
-        return result
+        playlists = await anyio.to_thread.run_sync(
+            self._rekordbox_xml_orchestrator.get_subbox_playlists_from_rekordbox_xml,
+            rekordbox_xml,
+            playlist_names or None,
+        )
+        if playlist_names:
+            logger.info(
+                "Filtered XML playlists for import. requested=%s matched=%s",
+                playlist_names,
+                sorted([p.name for p in playlists]),
+            )
+        return playlists
 
     def _modify_bpms(self, username: str, bpms_by_subbox_id: List[tuple]) -> Dict[str, str]:
         """
@@ -881,26 +883,28 @@ class RekordboxXMLController:
         # they share one cache and one concurrency budget instead of each paying its
         # own sequential round trip per track (#104).
         matcher = TrackMatcher(self._subsonic_client)
-        await self._create_playlists_from_xml(user, rekordbox_xml, playlist_names, matcher)
-        await self._set_metadata_from_xml(user, rekordbox_xml, playlist_names, progress, matcher)
+        # Both passes work from the same playlists, so they are built once here
+        # rather than once per pass (#191).
+        subbox_playlists = await self._build_playlists_from_xml(rekordbox_xml, playlist_names)
+        await self._create_playlists_from_xml(user, rekordbox_xml, playlist_names, matcher, subbox_playlists)
+        await self._set_metadata_from_xml(user, rekordbox_xml, playlist_names, progress, matcher, subbox_playlists)
         matcher.log_stats("rekordbox import")
 
-    async def _set_metadata_from_xml(self, user, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None, progress=None, matcher: Optional[TrackMatcher] = None):
+    async def _set_metadata_from_xml(self, user, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None, progress=None, matcher: Optional[TrackMatcher] = None, subbox_playlists: Optional[List[SubBoxPlaylist]] = None):
         progress = reporter_or_null(progress)
         if matcher is None:
             matcher = TrackMatcher(self._subsonic_client)
         allowed_track_ids = None
         if playlist_names:
-            rekordbox_xml_playlists = self._rekordbox_xml_orchestrator.get_all_xml_playlists(rekordbox_xml)
-            all_playlists: List[SubBoxPlaylist] = []
-            self._rekordbox_xml_orchestrator.get_subbox_playlists_from_rekordbox_xml_playlists(
-                rekordbox_xml, rekordbox_xml_playlists, [], all_playlists
-            )
-            filtered_playlists = self._filter_playlists(all_playlists, playlist_names)
+            filtered_playlists = subbox_playlists
+            if filtered_playlists is None:
+                filtered_playlists = await self._build_playlists_from_xml(rekordbox_xml, playlist_names)
             allowed_track_ids = {t.track_id for pl in filtered_playlists for t in pl.tracks}
             logger.info("Filtered metadata to %s track(s) from %s playlist(s)", len(allowed_track_ids), len(filtered_playlists))
 
-        all_xml_tracks = self._rekordbox_xml_orchestrator.get_all_xml_tracks(rekordbox_xml)
+        # every track in the collection, TEMPO and POSITION_MARK children parsed:
+        # linear, but on a large library still too long to hold the loop (#191).
+        all_xml_tracks = await anyio.to_thread.run_sync(self._rekordbox_xml_orchestrator.get_all_xml_tracks, rekordbox_xml)
         if allowed_track_ids is not None:
             all_xml_tracks = [t for t in all_xml_tracks if t.track_id in allowed_track_ids]
             logger.info(f"Filtered to {len(all_xml_tracks)} track(s) with metadata from XML based on playlist filter.")
@@ -910,7 +914,7 @@ class RekordboxXMLController:
         await self._subsonic_orchestrator.set_ratings(user, rated_tracks)
         #encoder = V2Mp3Encoder()
         xml_tracks = [
-            t for t in rekordbox_xml.get_tracks()
+            t for t in await anyio.to_thread.run_sync(rekordbox_xml.get_tracks)
             if allowed_track_ids is None or t.TrackID in allowed_track_ids
         ]
         progress.start_phase(ImportPhase.APPLYING_METADATA, len(xml_tracks))
@@ -1012,23 +1016,10 @@ class RekordboxXMLController:
                 progress.ok()
 
 
-    async def _create_playlists_from_xml(self, user: dict, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None, matcher: Optional[TrackMatcher] = None):
+    async def _create_playlists_from_xml(self, user: dict, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None, matcher: Optional[TrackMatcher] = None, subbox_playlists: Optional[List[SubBoxPlaylist]] = None):
         # 4. create internal subbox playlist and tracks as below
-        rekordbox_xml_playlists = self._rekordbox_xml_orchestrator.get_all_xml_playlists(rekordbox_xml)
-        subbox_playlists: List[SubBoxPlaylist] = []
-        self._rekordbox_xml_orchestrator.get_subbox_playlists_from_rekordbox_xml_playlists(rekordbox_xml, rekordbox_xml_playlists, [],
-                                                                                           subbox_playlists)
-
-        if playlist_names:
-            original_n = len(subbox_playlists)
-            subbox_playlists = self._filter_playlists(subbox_playlists, playlist_names)
-            logger.info(
-                "Filtered XML playlists for import. requested=%s matched=%s total_before=%s total_after=%s",
-                playlist_names,
-                sorted([p.name for p in subbox_playlists]),
-                original_n,
-                len(subbox_playlists),
-            )
+        if subbox_playlists is None:
+            subbox_playlists = await self._build_playlists_from_xml(rekordbox_xml, playlist_names)
 
         if not subbox_playlists:
             logger.info("No playlists selected from XML for import.")

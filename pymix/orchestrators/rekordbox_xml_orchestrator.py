@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List, Optional, Dict
 from xml.etree.ElementTree import ElementTree, indent
 
-from pyrekordbox.rbxml import Node, RATING_MAPPING, RekordboxXml, XmlDuplicateError
+from pyrekordbox.rbxml import Node, RATING_MAPPING, RekordboxXml, Track, XmlDuplicateError
 
 from pymix.controllers.db_controller import DbController
 from pymix.factories.rekordbox_xml_factory import RekordboxXMLFactory
@@ -15,6 +15,10 @@ from pymix.utils.get_duration import get_duration
 from pymix.utils.tag_subbox_id import get_subbox_id
 
 logger = logging.getLogger(__name__)
+
+
+def _normalise_path(components: List[str]) -> tuple:
+    return tuple(c.strip().lower() for c in components)
 
 
 class RekordboxXMLOrchestrator:
@@ -56,27 +60,77 @@ class RekordboxXMLOrchestrator:
             track_number=rb_track.TrackNumber,
         )
 
-    def get_subbox_playlists_from_rekordbox_xml_playlists(self, rekordbox_xml: RekordboxXml, xml_playlists: List[Node], parent_components: List[str], subbox_playlists) -> List[SubBoxPlaylist]:
+    def get_subbox_playlists_from_rekordbox_xml(
+        self, rekordbox_xml: RekordboxXml, requested: Optional[List[List[str]]] = None
+    ) -> List[SubBoxPlaylist]:
         """
-        From the rekordbox XML playlists, create the internal Playlist datastructure
+        From the rekordbox XML playlists, create the internal Playlist datastructure.
+
+        `requested` scopes the result to the playlists an import asked for: a
+        playlist is included when a requested path is a prefix of its own (so
+        requesting a folder selects everything beneath it), compared
+        case-insensitively. None means every playlist.
+
+        This used to walk every playlist in the XML and call
+        `rekordbox_xml.get_track(TrackID=)` per entry -- a linear `find` over the
+        whole collection, TEMPO and POSITION_MARK children included. On a 322-playlist
+        library that was minutes of CPU per walk, run on the event loop (#191).
+        The collection is now indexed once, and folders that can't lead to a
+        requested playlist are never expanded.
+
         :param rekordbox_xml: the parsed XML for this request; never shared across requests
-        :param xml_playlists:
-        :param parent_components: list of parent folder names leading to this level
-        :param subbox_playlists:
-        :return:
+        :param requested: path components of the playlists/folders to include, or None for all
+        :return: the SubBoxPlaylists, in XML order
         """
+        wanted = None
+        if requested is not None:
+            wanted = [_normalise_path(r) for r in requested if r]
+        tracks_by_id = {str(t.TrackID): t for t in rekordbox_xml.get_tracks()}
+        subbox_playlists: List[SubBoxPlaylist] = []
+        self._walk_xml_playlists(
+            tracks_by_id, self.get_all_xml_playlists(rekordbox_xml), [], wanted, subbox_playlists
+        )
+        return subbox_playlists
+
+    def _walk_xml_playlists(
+        self,
+        tracks_by_id: Dict[str, Track],
+        xml_playlists: List[Node],
+        parent_components: List[str],
+        wanted: Optional[List[tuple]],
+        subbox_playlists: List[SubBoxPlaylist],
+    ) -> None:
         for playlist in xml_playlists:
             components = parent_components + [playlist.name]
-            track_ids = playlist.get_tracks()
+            if wanted is None:
+                selected = True
+            else:
+                path = _normalise_path(components)
+                # inside a requested folder, or the requested playlist itself
+                selected = any(path[:len(req)] == req for req in wanted)
+                if not selected and not playlist.is_playlist:
+                    # a folder is only worth expanding if a request lies beneath it
+                    if not any(req[:len(path)] == path for req in wanted):
+                        continue
             if not playlist.is_playlist:
                 # recurse through the folder structure until reach the playlist leaves
-                playlists = playlist.get_playlists()
-                self.get_subbox_playlists_from_rekordbox_xml_playlists(rekordbox_xml, playlists, components, subbox_playlists)
+                self._walk_xml_playlists(
+                    tracks_by_id, playlist.get_playlists(), components,
+                    None if selected else wanted, subbox_playlists,
+                )
+                continue
+            if not selected:
                 continue
             assert playlist.key_type == 'TrackID', f"playlist key type {playlist.key_type}"
             tracks = []
-            for track_id in track_ids:
-                track = rekordbox_xml.get_track(TrackID=track_id)
+            for track_id in playlist.get_tracks():
+                track = tracks_by_id.get(str(track_id))
+                if track is None:
+                    logger.warning(
+                        "playlist %s references TrackID %s, which is not in the collection; skipping it",
+                        " / ".join(components), track_id,
+                    )
+                    continue
                 tracks.append(
                     SubBoxTrack(
                         name=track.Name,
