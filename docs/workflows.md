@@ -116,11 +116,32 @@ where it does, that reading wins and the server's copy is not read at all.
 Started in `lifespan`. `poll_watchdir` watches `/user-updownloads/<user>/watch/`:
 - Debounces 15s after the last add/modify, and confirms file mtimes are stable
   (guards against partial downloads).
-- Enforces per-user storage quota using the **sum of pending files** (a past bug
-  double-counted these — see commit `2e54187`; be careful editing the accounting).
+- Enforces per-user storage quota **once per debounced pass**, charging the size of
+  everything in `watch/` (what the pass would stage) against the `bytes_used` counter
+  (§ Storage quota below). An over-quota pass is dropped and its files stay put; the
+  next change in `watch/` is judged afresh. Nothing is latched (it used to be, until
+  restart — #183). Measuring the directory rather than summing per-event sizes also
+  keeps clear of the double count fixed in `2e54187`.
 - Sends the username to `trigger_processing`, which runs
   `consume_from_filebrowser(..., watch=True)` (files are **moved**, not copied, so
   new arrivals mid-import are left for the next cycle), then beets import + mapping.
+
+### Storage quota (#183)
+Usage = `user_table.bytes_used` (the library, `/private-music/<user>`) + a live walk
+of the user's staging dir (`/private-staged/<user>`, so a failed import's residue
+counts). Every check — `/user/storage_check`, `/user/library_size`, the three import
+routers and the watch poller — reads that; none walks the library.
+- **Imports** wrap `beet import` in `DbController.record_staged_import`: what left
+  staging while beets ran is what landed, and the counter moves by it.
+- **Deletes** (`beet rm -df`, `beet duplicates -d`) list the files first under the
+  same beets write lock and wrap the delete in `record_removals`, which subtracts
+  only the files that are actually gone afterwards.
+- **Drift** (embedded art, BPM/cue write-backs, anything outside pymix) is corrected
+  by `library_usage_reconcile_loop`: a full walk per user under their beets write
+  lock, at startup and then every `library_usage.reconcile_interval_s` (default 24h).
+  A NULL counter (every user before migration 021) is walked on first read.
+- Any new path that adds or removes library files must go through one of the two
+  recorders, or the quota drifts until the next reconcile.
 
 ## 6. Sync (`/sync/plan`, `/sync`, `/sync/tracks`, `/sync/playlists`)
 Client tells the server which tracks/playlists it has; server computes what's

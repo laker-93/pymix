@@ -3,6 +3,7 @@ import functools
 import logging
 import os
 import re
+from contextlib import nullcontext
 
 import anyio
 import beets
@@ -137,7 +138,8 @@ class RekordboxXMLController:
         container_name = "beets" if public else f"beets{username}"
         beets_command = "beet duplicates -d"
         with self._beets_exec.write_lock(container_name):
-            result = self._beets_exec.execute(container_name, beets_command)
+            with self._recording_removals(username, public, self._duplicate_paths_for_removal):
+                result = self._beets_exec.execute(container_name, beets_command)
         logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
         # Same version-dependent `: <count>` suffix as the read path; harmless to the
         # delete itself (beets already did it), but these paths go back to the caller.
@@ -223,10 +225,45 @@ class RekordboxXMLController:
 
     def _remove_tracks(self, username: str, subbox_ids: List[str], public: bool):
         container_name = "beets" if public else f"beets{username}"
-        beets_command = ["beet", "rm", "-df", *self._subbox_id_or_query(subbox_ids)]
+        query = self._subbox_id_or_query(subbox_ids)
+        beets_command = ["beet", "rm", "-df", *query]
         with self._beets_exec.write_lock(container_name):
-            result = self._beets_exec.execute(container_name, beets_command)
+            list_paths = functools.partial(self._item_paths_for_removal, container_name, query)
+            with self._recording_removals(username, public, list_paths):
+                result = self._beets_exec.execute(container_name, beets_command)
         logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
+
+    def _recording_removals(self, username: str, public: bool, list_paths):
+        """
+        Take what a beets delete removes off the user's quota counter (#183).
+
+        ``list_paths(username)`` names the files the delete may remove, and is only
+        called for a private library: the public one is nobody's quota. It must be
+        called under the same write lock as the delete, so nothing lands or leaves
+        in between. A failure to list is logged and the delete goes ahead
+        uncounted -- the reconcile loop corrects the drift, while refusing the
+        delete would leave the user unable to free space at all.
+        """
+        if public:
+            return nullcontext()
+        try:
+            paths = list_paths(username)
+        except Exception:
+            logger.exception(f'could not list files before a delete for {username}; the quota counter will drift until reconciled')
+            paths = []
+        return self._db_controller.record_removals(username, paths)
+
+    def _item_paths_for_removal(self, container_name: str, query: List[str], username: str) -> List[Path]:
+        result = self._beets_exec.execute(container_name, ["beet", "list", "-p", *query])
+        library = self._db_controller.library_path(username)
+        return [
+            library / line.strip().removeprefix('/music').lstrip('/')
+            for line in result.splitlines() if line.strip()
+        ]
+
+    def _duplicate_paths_for_removal(self, username: str) -> List[Path]:
+        records = self._fetch_duplicate_paths(username, public=False)
+        return [p for p in (self._resolve_duplicate_path(username, r) for r in records) if p is not None]
 
 
     def _get_duplicates(self, username: str, public: bool) -> Optional[List[str]]:
@@ -642,10 +679,14 @@ class RekordboxXMLController:
         with self._beets_exec.write_lock(f"beets{username}"):
             try:
                 # detach to avoid returning potentially large stdout from the docker logs.
-                # Instead logs are streamed incrementally
-                log_iter = self._beets_exec.execute(f"beets{username}", beets_command, stream=True)
-                for log_type, log in log_iter:
-                    logger.info(f'{log_type}: {log.decode()}')
+                # Instead logs are streamed incrementally. What leaves staging while it
+                # runs is what landed in the library, and the quota counter moves by it
+                # (#183). A public import stages elsewhere and is nobody's quota.
+                recording = nullcontext() if public else self._db_controller.record_staged_import(username)
+                with recording:
+                    log_iter = self._beets_exec.execute(f"beets{username}", beets_command, stream=True)
+                    for log_type, log in log_iter:
+                        logger.info(f'{log_type}: {log.decode()}')
             except Exception:
                 logger.exception('beets import failed')
                 raise
@@ -754,10 +795,12 @@ class RekordboxXMLController:
         with self._beets_exec.write_lock(f"beets{username}"):
             try:
                 # detach to avoid returning potentially large stdout from the docker logs.
-                # Instead logs are streamed incrementally
-                log_iter = self._beets_exec.execute(f"beets{username}", beets_command, stream=True)
-                for log_type, log in log_iter:
-                    logger.info(f'{log_type}: {log.decode()}')
+                # Instead logs are streamed incrementally. The quota counter moves by
+                # what beets takes out of staging (#183).
+                with self._db_controller.record_staged_import(username):
+                    log_iter = self._beets_exec.execute(f"beets{username}", beets_command, stream=True)
+                    for log_type, log in log_iter:
+                        logger.info(f'{log_type}: {log.decode()}')
             except Exception:
                 logger.exception('beets import failed')
                 raise

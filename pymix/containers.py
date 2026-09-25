@@ -74,7 +74,9 @@ class Container(containers.DeclarativeContainer):
         DbController,
         db,
         config.app_env,
-        config.max_library_size
+        config.max_library_size,
+        config.containers.subsonic.serving_music_path_base,
+        config.containers.beets.data,
     )
 
     compose_file_handler = providers.Singleton(

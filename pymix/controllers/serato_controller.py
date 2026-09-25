@@ -183,9 +183,11 @@ class SeratoController:
         # beets container can't interleave either (#73).
         with self._beets_exec.write_lock(f"beets{username}"):
             try:
-                log_iter = self._beets_exec.execute(f"beets{username}", beets_command, stream=True)
-                for log_type, log in log_iter:
-                    logger.info(f'{log_type}: {log.decode()}')
+                # The quota counter moves by what beets takes out of staging (#183).
+                with self._db_controller.record_staged_import(username):
+                    log_iter = self._beets_exec.execute(f"beets{username}", beets_command, stream=True)
+                    for log_type, log in log_iter:
+                        logger.info(f'{log_type}: {log.decode()}')
             except Exception:
                 logger.exception('beets import failed')
                 raise

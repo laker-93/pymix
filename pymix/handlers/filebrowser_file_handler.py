@@ -5,12 +5,12 @@ import mimetypes
 
 import shutil
 import zipfile
-from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Tuple, Optional, Dict, Any, List
 from zipfile import ZipFile
 
+import anyio
 import music_tag
 from watchfiles import awatch, Change
 
@@ -84,6 +84,19 @@ def _has_audio_files(directory: Path) -> bool:
     return False
 
 
+def _audio_bytes(directory: Path) -> int:
+    """Total size of the audio files (and zips) under *directory*."""
+    total = 0
+    for entry in directory.rglob('*'):
+        try:
+            if entry.is_file() and entry.suffix.lower() in AUDIO_EXTENSIONS:
+                total += entry.stat().st_size
+        except OSError:
+            # File may have been removed between rglob and stat
+            continue
+    return total
+
+
 def _all_files_stable(directory: Path, stable_seconds: float) -> bool:
     """Return True only if every audio file's mtime is at least *stable_seconds* ago.
 
@@ -140,8 +153,6 @@ async def poll_watchdir(user_root: Path, watch_subdir: str, send_stream, db_cont
     """
     DEBOUNCE_SECONDS = 15
     user_last_change: dict[str, float] = {}
-    user_pending_files: dict[str, dict[str, int]] = defaultdict(dict)
-    maxed_out_users: set[str] = set()
 
     async with send_stream:
         async for changes in awatch(user_root, yield_on_timeout=True, rust_timeout=1000):
@@ -160,47 +171,54 @@ async def poll_watchdir(user_root: Path, watch_subdir: str, send_stream, db_cont
                 if len(parts) < 2 or parts[1] != watch_subdir:
                     continue
                 user = parts[0]
-
-                if user in maxed_out_users:
-                    continue
-
-                if path.is_file():
-                    user_pending_files[user][str(path)] = path.stat().st_size
                 user_last_change[user] = now
-
-                pending_size = sum(user_pending_files[user].values())
-                exceeded, _, _ = db_controller.user_library_size_exceeded(user, pending_size)
-                if exceeded:
-                    logger.error(f'watch: library size exceeded for user {user}')
-                    maxed_out_users.add(user)
-                    user_pending_files.pop(user, None)
-                    user_last_change.pop(user, None)
 
             # Check which users have passed the debounce window
             ready_users = [
                 u for u, last in user_last_change.items()
-                if now - last >= DEBOUNCE_SECONDS and u not in maxed_out_users
+                if now - last >= DEBOUNCE_SECONDS
             ]
             for user in ready_users:
                 watch_dir = user_root / user / watch_subdir
                 if not _has_audio_files(watch_dir):
                     logger.info(f'watch: no audio files in watch dir for user {user}, skipping')
                     user_last_change.pop(user)
-                    user_pending_files.pop(user, None)
                     continue
                 if not _all_files_stable(watch_dir, DEBOUNCE_SECONDS):
                     logger.info(f'watch: files still being written for user {user}, deferring import')
                     # Reset debounce so we re-check after another DEBOUNCE_SECONDS
                     user_last_change[user] = now
                     continue
-                n_bytes = sum(user_pending_files.get(user, {}).values())
+                # What this pass would stage: all of watch/, not only the files whose
+                # events arrived this time -- a dropped pass leaves its files behind.
+                n_bytes = _audio_bytes(watch_dir)
+                # Checked once per pass, not per filesystem event, and against the
+                # counter rather than a walk of the library (#183). Nothing is latched:
+                # an over-quota pass is dropped and its files stay in watch/, so the
+                # next change there -- once the user has freed space -- is judged afresh.
+                # It used to be a set that only a pymix restart emptied.
+                try:
+                    exceeded, max_bytes, used_bytes = await anyio.to_thread.run_sync(
+                        db_controller.user_library_size_exceeded, user, n_bytes
+                    )
+                except Exception:
+                    logger.exception(f'watch: storage check failed for user {user}, skipping this pass')
+                    exceeded = True
+                else:
+                    if exceeded:
+                        logger.error(
+                            f'watch: library size exceeded for user {user} '
+                            f'({used_bytes} used + {n_bytes} pending > {max_bytes}), not importing'
+                        )
+                if exceeded:
+                    user_last_change.pop(user)
+                    continue
                 logger.info(
                     f'watch: triggering import for user {user} '
                     f'(~{n_bytes / 1024 / 1024:.1f} MB, debounce complete)'
                 )
                 await send_stream.send(user)
                 user_last_change.pop(user)
-                user_pending_files.pop(user, None)
 
 
 

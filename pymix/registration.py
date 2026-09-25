@@ -17,6 +17,7 @@ from pymix.containers import Container
 from pymix.handlers.filebrowser_file_handler import poll_watchdir, trigger_processing
 from pymix.handlers.mem_watch_handler import mem_watch_loop
 from pymix.handlers.sheet_sync_handler import sheet_sync_loop
+from pymix.handlers.library_usage_reconcile_handler import library_usage_reconcile_loop
 from pymix.handlers.wishlist_reconcile_handler import wishlist_reconcile_loop
 from pymix.handlers.wishlist_resolve_handler import wishlist_resolve_loop
 from pymix.routers import admin, auth, maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, wishlist, invite_request, metrics
@@ -126,6 +127,11 @@ async def lifespan(app: FastAPI, container):
 
     mem_watch_config = container.config().get('memory_watch') or {}
 
+    # Daily by default: this is the one full walk of every library the quota still
+    # does (#183), there only to correct drift, and the first pass is the backfill.
+    library_usage_config = container.config().get('library_usage') or {}
+    library_usage_interval_s = library_usage_config.get('reconcile_interval_s', 24 * 60 * 60)
+
     async with anyio.create_task_group() as tg:
         tg.start_soon(poll_watchdir, user_root, watch_subdir, send_stream, db_controller)
         tg.start_soon(trigger_processing, receive_stream, rb_xml_controller, db_controller)
@@ -135,6 +141,9 @@ async def lifespan(app: FastAPI, container):
         )
         tg.start_soon(
             wishlist_resolve_loop, wishlist_resolve_service, db_controller, resolve_interval_s
+        )
+        tg.start_soon(
+            library_usage_reconcile_loop, db_controller, container.beets_exec(), library_usage_interval_s
         )
         if mem_watch_config.get('enabled', True):
             tg.start_soon(
