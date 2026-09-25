@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 class RBImportRequest(BaseModel):
     playlistNames: Optional[list[list[str]]]
+    # The file name the client uploaded the XML under. Optional so an older client
+    # still imports; without it the newest XML in uploads/ is taken (#192).
+    xmlName: Optional[str] = None
 
 
 
@@ -77,7 +80,8 @@ async def rekordbox_import(
     logger.info(f'RB importing {total_n_tracks_for_import} tracks for user {username}')
     requested_playlists = [p for p in request.playlistNames if p] if request.playlistNames else None
     background_tasks.add_task(run_import_task, rekordbox_xml_controller, username, job_id, db_controller,
-                  fb_file_handler, total_n_tracks_for_import, user, requested_playlists, attempt)
+                  fb_file_handler, total_n_tracks_for_import, user, requested_playlists, attempt,
+                  request.xmlName)
     success = True
 
     return {
@@ -91,7 +95,7 @@ async def rekordbox_import(
 
 async def run_import_task(rekordbox_xml_controller, username, job_id, db_controller, fb_file_handler,
                           total_n_tracks_for_import, user, playlist_names: Optional[list[list[str]]],
-                          attempt: Optional[UploadAttempt] = None):
+                          attempt: Optional[UploadAttempt] = None, xml_name: Optional[str] = None):
     # No `success = True` to start with: the verdict is computed at the end from
     # what the passes actually recorded, not asserted here and defended against
     # exceptions (#171). An escaping exception is still a failure -- it is just no
@@ -106,7 +110,7 @@ async def run_import_task(rekordbox_xml_controller, username, job_id, db_control
         # Everything in uploads/ now goes when the job finishes, whatever the
         # outcome (#38). Taken now so a file uploaded during a long import survives it.
         uploaded = fb_file_handler.snapshot_uploads(username)
-        xml_path, zip_path, _ = fb_file_handler.get_xml_data_path(username)
+        xml_path, zip_path, _ = fb_file_handler.get_xml_data_path(username, xml_name)
         if zip_path:
             # Its contents were never tagged by /sync/map_meta, so staging them
             # would put untagged tracks in the library. No client uploads one.

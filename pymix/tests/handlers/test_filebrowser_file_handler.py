@@ -1,6 +1,10 @@
+import logging
+import os
 import zipfile
 from pathlib import Path
 from unittest import mock
+
+import pytest
 
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.model.subboxtrack import SubBoxTrack
@@ -139,6 +143,71 @@ def test_the_rekordbox_audio_zip_is_still_found_beside_a_crate_zip(tmp_path):
     _, zip_path, _ = _handler(tmp_path).get_xml_data_path('demoadmin')
 
     assert zip_path is not None and zip_path.name == 'music.zip'
+
+
+def _xml(path: Path, mtime: float) -> Path:
+    path.write_text('<DJ_PLAYLISTS/>')
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def test_with_two_xmls_and_no_name_the_newest_is_taken_and_warned_about(tmp_path, caplog):
+    # #192: it used to be whichever rglob yielded last, which is arbitrary.
+    uploads = _uploads(tmp_path)
+    # 'z' so the newer file is not also the one a name sort would put last.
+    older = _xml(uploads / 'z_old_attempt.xml', 1_000_000)
+    newer = _xml(uploads / 'a_this_run.xml', 2_000_000)
+
+    with caplog.at_level(logging.WARNING):
+        xml_path, _, _ = _handler(tmp_path).get_xml_data_path('demoadmin')
+
+    assert xml_path == newer
+    warning = next(r for r in caplog.records if r.levelno == logging.WARNING)
+    assert str(older) in warning.getMessage() and str(newer) in warning.getMessage()
+
+
+def test_a_single_xml_is_taken_without_a_warning(tmp_path, caplog):
+    uploads = _uploads(tmp_path)
+    only = _xml(uploads / 'rekordbox.xml', 1_000_000)
+
+    with caplog.at_level(logging.WARNING):
+        xml_path, _, _ = _handler(tmp_path).get_xml_data_path('demoadmin')
+
+    assert xml_path == only
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_a_named_xml_is_used_even_when_it_is_not_the_newest(tmp_path):
+    uploads = _uploads(tmp_path)
+    named = _xml(uploads / 'this_run.xml', 1_000_000)
+    _xml(uploads / 'leftover.xml', 2_000_000)
+
+    xml_path, _, _ = _handler(tmp_path).get_xml_data_path('demoadmin', 'this_run.xml')
+
+    assert xml_path == named
+
+
+def test_a_named_xml_that_is_missing_is_an_error(tmp_path):
+    uploads = _uploads(tmp_path)
+    _xml(uploads / 'leftover.xml', 1_000_000)
+
+    with pytest.raises(FileNotFoundError, match='this_run.xml'):
+        _handler(tmp_path).get_xml_data_path('demoadmin', 'this_run.xml')
+
+
+@pytest.mark.parametrize('xml_name', ['../other/uploads/x.xml', 'sub/x.xml', '..', '.', ''])
+def test_a_named_xml_must_be_a_bare_file_name(tmp_path, xml_name):
+    _xml(_uploads(tmp_path) / 'x.xml', 1_000_000)
+
+    with pytest.raises(ValueError):
+        _handler(tmp_path).get_xml_data_path('demoadmin', xml_name)
+
+
+def test_no_xml_is_an_error(tmp_path):
+    _uploads(tmp_path)
+
+    with pytest.raises(FileNotFoundError):
+        _handler(tmp_path).get_xml_data_path('demoadmin')
 
 
 def test_the_serato_scan_finds_the_crate_zip_and_the_staged_audio(tmp_path):
