@@ -131,12 +131,13 @@ def _job_db(db):
     return job_db
 
 
-async def _rb_import(db, handler, controller, playlist_names=None):
+async def _rb_import(db, handler, controller, playlist_names=None, xml_name=None):
     job_db = _job_db(db)
     attempt = db.get_upload_attempt('dj')
     size = handler.get_size_of_import('dj', attempt)
     await rb_import_export.run_import_task(
         controller, 'dj', 'job-1', job_db, handler, size['n_tracks'], USER, playlist_names, attempt,
+        xml_name,
     )
     _, outcome = job_db.job_completed.call_args.args
     return size, outcome
@@ -162,6 +163,36 @@ async def test_leftovers_from_an_abandoned_upload_are_not_imported(db, handler, 
     for leftover in leftovers:
         assert leftover not in record['audio_files']
     assert outcome.verdict is Verdict.SUCCESS
+
+
+@pytest.mark.anyio
+async def test_the_import_uses_the_xml_it_names_beside_a_leftover_one(db, handler, uploads):
+    # The #192 shape: an earlier attempt uploaded its XML and stopped before it
+    # started a job, so its XML was never cleared.
+    (uploads / 'sep_2026_rev3.xml').write_text('<DJ_PLAYLISTS/>')
+    (uploads / 'this_run.xml').write_text('<DJ_PLAYLISTS/>')
+    await _map_meta(db, handler)
+    record = {}
+
+    _, outcome = await _rb_import(db, handler, _controller_that_imports(record), xml_name='this_run.xml')
+
+    assert record['xml_path'] == uploads / 'this_run.xml'
+    assert outcome.verdict is Verdict.SUCCESS
+    assert list(uploads.iterdir()) == [], 'both XMLs go, so the next attempt starts clean'
+
+
+@pytest.mark.anyio
+async def test_an_import_naming_an_xml_that_is_not_there_fails_rather_than_guessing(db, handler, uploads):
+    (uploads / 'leftover.xml').write_text('<DJ_PLAYLISTS/>')
+    await _map_meta(db, handler)
+    controller = mock.Mock()
+    controller.create_subsonic_playlists_from_xml = mock.AsyncMock()
+
+    _, outcome = await _rb_import(db, handler, controller, xml_name='this_run.xml')
+
+    assert outcome.verdict is Verdict.FAILURE
+    assert 'this_run.xml' in outcome.reason
+    controller.create_subsonic_playlists_from_xml.assert_not_called()
 
 
 @pytest.mark.anyio

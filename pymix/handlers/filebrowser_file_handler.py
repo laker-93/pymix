@@ -374,11 +374,24 @@ class FileBrowserFileHandler:
 
 
 
-    def get_xml_data_path(self, user: str) -> tuple[Path, Optional[Path], Optional[Path]]:
+    def get_xml_data_path(
+            self, user: str, xml_name: Optional[str] = None,
+    ) -> tuple[Path, Optional[Path], Optional[Path]]:
+        """
+        The Rekordbox XML to import from ``uploads/{user}``, plus any audio zip and
+        audio found beside it.
+
+        ``xml_name`` is the file the client says it uploaded for this import, and
+        exactly that file is used. Without it -- a client that predates it -- and
+        with more than one XML in the directory, the newest is taken and every
+        candidate is logged at WARNING. It used to be whichever ``rglob`` yielded
+        last, which is arbitrary (#192). A second XML is usually one uploaded by an
+        attempt that stopped before it started a job, and so never cleared (#38).
+        """
         src_path = Path(
             self._filebrowser_data_path_uploads.format(user=user)
         )
-        xml_path = None
+        xml_paths = []
         zip_path = None
         audio_path = None
         counters = {
@@ -387,24 +400,55 @@ class FileBrowserFileHandler:
             "n_audio": 0,
             "n_skipped_files": 0
         }
+        # No early exit once an XML is found: every XML has to be seen before one
+        # can be chosen.
         for f in src_path.rglob('*'):
             if f.is_file():
                 counters["n_file"] += 1
                 guessed_mime = mimetypes.guess_type(str(f))[0]
                 if guessed_mime in ('application/xml', 'text/xml'):
-                    xml_path = f
+                    xml_paths.append(f)
                     counters["n_xml"] += 1
                 elif is_audio_zip(f):
                     zip_path = f
                 elif detect_audio_type(f) is not None:
                     audio_path = src_path
                     counters["n_audio"] += 1
-            if zip_path and xml_path:
-                break
 
         logger.info(f'parsed {counters} from {src_path}')
-        assert xml_path
+        if xml_name is not None:
+            xml_path = self._named_xml(src_path, xml_name)
+        else:
+            xml_path = self._newest_xml(user, xml_paths)
         return xml_path, zip_path, audio_path
+
+    @staticmethod
+    def _named_xml(src_path: Path, xml_name: str) -> Path:
+        # The client uploads the XML to the top of uploads/ under its own basename,
+        # so anything with a directory in it is not a name this client sent.
+        if Path(xml_name).name != xml_name or xml_name in ('', '.', '..'):
+            raise ValueError(f'{xml_name!r} is not a file name')
+        xml_path = src_path / xml_name
+        if not xml_path.is_file():
+            raise FileNotFoundError(
+                f'the Rekordbox XML this import names, {xml_name}, is not in your uploads. '
+                f'Upload it again.'
+            )
+        return xml_path
+
+    @staticmethod
+    def _newest_xml(user: str, xml_paths: list[Path]) -> Path:
+        if not xml_paths:
+            raise FileNotFoundError('no Rekordbox XML was found in your uploads. Upload it again.')
+        # By name as well, so two files with the same mtime still give one answer.
+        xml_path = max(xml_paths, key=lambda f: (f.stat().st_mtime, f.name))
+        if len(xml_paths) > 1:
+            logger.warning(
+                'user %s has %s XMLs in uploads and the import named none of them; '
+                'taking the newest, %s. Candidates: %s',
+                user, len(xml_paths), xml_path, sorted(str(f) for f in xml_paths),
+            )
+        return xml_path
 
     def uploads_dir(self, user: str) -> Path:
         return Path(self._filebrowser_data_path_uploads.format(user=user))
