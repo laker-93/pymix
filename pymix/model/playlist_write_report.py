@@ -46,7 +46,7 @@ class PlaylistWriteReport:
         if self.unmatched:
             parts.append(f"{_names(self.unmatched)} not updated: none of its tracks matched your library")
         for name, before, after in self.shortened[:_MAX_NAMES]:
-            parts.append(f"`{name}` now has {after} tracks, down from {before}")
+            parts.append(f"`{name}` now has {after} track{'' if after == 1 else 's'}, down from {before}")
         if len(self.shortened) > _MAX_NAMES:
             parts.append(f"{len(self.shortened) - _MAX_NAMES} more playlists are shorter")
         if self.failed:

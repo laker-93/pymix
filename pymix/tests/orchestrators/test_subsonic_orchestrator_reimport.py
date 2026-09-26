@@ -99,10 +99,10 @@ async def test_an_unfinished_scan_leaves_existing_playlists_alone_but_still_crea
 
 @pytest.mark.anyio
 async def test_an_update_that_makes_a_playlist_shorter_says_so(client):
-    report = await _write(client, [_existing('Deep', 'pl-1', n=10)], [_incoming('Deep', 's1', None, 's3')])
+    report = await _write(client, [_existing('Deep', 'pl-1', n=10)], [_incoming('Deep', 's1', None)])
 
-    assert report.updated == ['Deep'] and report.shortened == [('Deep', 10, 2)]
-    assert report.warning() == "`Deep` now has 2 tracks, down from 10."
+    assert report.updated == ['Deep'] and report.shortened == [('Deep', 10, 1)]
+    assert report.warning() == "`Deep` now has 1 track, down from 10."
 
 
 @pytest.mark.anyio
