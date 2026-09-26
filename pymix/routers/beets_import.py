@@ -11,6 +11,7 @@ from pymix.controllers.db_controller import DbController
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.routers.auth import require_uploader, require_username
+from pymix.services import metrics
 from pymix.services.automatch_service import AutomatchService
 from pymix.services.import_progress import (
     failure_reason,
@@ -93,6 +94,7 @@ async def beets_import(
     total_n_tracks_for_import = size['n_tracks']
     exceeded, _1, _2 =  db_controller.user_library_size_exceeded(username, size_import_bytes)
     if exceeded:
+        metrics.observe_quota_refusal('beets')
         return {
             'success': False,
             'job_id': job_id,

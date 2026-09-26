@@ -51,7 +51,7 @@ All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 |---|---|
 | GET `/metrics` | Prometheus exposition for pymix itself. Scraped by vmagent on the droplet — see `../subbox-workspace/docs/monitoring.md`. |
 
-What it exposes, in five groups:
+What it exposes, in six groups:
 
 - **Traffic** — request rate and latency by route template, plus
   `pymix_http_requests_in_flight` (the saturation signal a duration histogram cannot
@@ -75,6 +75,15 @@ What it exposes, in five groups:
   persists until restart. These are *API* activity only: playback goes straight from
   the client to the user's Navidrome and never touches pymix, so listening shows up on
   the Navidrome side of the dashboard, not here.
+- **Storage quota** (#183) — `pymix_user_storage_used_bytes{username}` and
+  `pymix_user_storage_limit_bytes{username}`, sampled from `user_table` (the
+  `bytes_used` counter, so staging is excluded, and a never-measured user's usage is
+  absent rather than 0); `pymix_storage_quota_refusals_total{path}` (`watch`,
+  `rekordbox`, `serato`, `beets`, `storage_check`); and
+  `pymix_user_library_drift_bytes{username}`, the signed gap between the disk and the
+  counter at each reconcile, with `pymix_library_reconcile_last_completed_timestamp_seconds`
+  saying how fresh that is. Large or growing drift means a write path is bypassing the
+  quota recorders (`docs/workflows.md` § Storage quota).
 
 Authenticated with `Authorization: Bearer $PYMIX_METRICS_TOKEN`, and **it has to be**:
 pymix is published at `pymix.sub-box.net`, so unlike the per-user Navidrome `/metrics`

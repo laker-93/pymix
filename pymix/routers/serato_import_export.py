@@ -14,6 +14,7 @@ from pymix.model.serato_export import SeratoExportRequest, SeratoExportResponse
 from pymix.model.original_track_meta import UploadAttempt
 from pymix.model.serato_import import SeratoImportRequest
 from pymix.routers.auth import require_reader, require_uploader
+from pymix.services import metrics
 from pymix.services.import_progress import failure_reason
 
 router = APIRouter()
@@ -45,6 +46,7 @@ async def serato_import(
     total_n_tracks_for_import = size['n_tracks']
     exceeded, _1, _2 =  db_controller.user_library_size_exceeded(username, size_import_bytes)
     if exceeded:
+        metrics.observe_quota_refusal('serato')
         return {
             'success': False,
             'imported_tracks': 0,

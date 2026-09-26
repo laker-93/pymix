@@ -1010,6 +1010,15 @@ class DbController:
         with self._session_factory() as session:
             return [row.username for row in session.query(UserRow.username).all()]
 
+    def storage_usage_by_user(self) -> list[tuple[str, Optional[int], int]]:
+        """(username, bytes_used, max_library_size) for every user, for the metrics
+        scrape. bytes_used is as stored -- None for a user never measured."""
+        with self._session_factory() as session:
+            rows = session.query(
+                UserRow.username, UserRow.bytes_used, UserRow.max_library_size
+            ).order_by(UserRow.username).all()
+        return [(r.username, r.bytes_used, r.max_library_size) for r in rows]
+
     def library_path(self, username: str) -> Path:
         return Path(f'{self._serving_music_path_base}/{username}')
 
@@ -1042,6 +1051,10 @@ class DbController:
             previous = row.bytes_used
             row.bytes_used = total
             session.commit()
+        if previous is not None:
+            # Zero drift is recorded too, so the gauge shows a reconcile that found the
+            # counter right rather than keeping the last non-zero figure forever.
+            metrics.observe_library_drift(username, total - previous)
         if previous is not None and previous != total:
             logger.info(
                 f'library bytes for {username} reconciled: counter {previous} -> walked {total} '

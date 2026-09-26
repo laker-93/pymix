@@ -285,6 +285,69 @@ beets_write_lock_wait_seconds = Histogram(
     registry=REGISTRY,
 )
 
+# ---------------------------------------------------------------------------
+# Storage quota (#183)
+# ---------------------------------------------------------------------------
+#
+# Usage and limit per user are sampled by PymixStateCollector from user_table. These
+# two are the parts a sample cannot give: how often somebody actually hit the cap, and
+# whether the bytes_used counter can be trusted.
+
+# Every place an import is checked against the quota. `watch` matters most: a refused
+# watch pass is otherwise one ERROR log line, and the user just sees files sitting in
+# watch/ with nothing to say why. `storage_check` is the client's pre-flight, so it
+# counts a refusal the user was shown rather than one that stopped an import.
+QUOTA_REFUSAL_PATHS = ("watch", "rekordbox", "serato", "beets", "storage_check")
+
+storage_quota_refusals_total = Counter(
+    "pymix_storage_quota_refusals_total",
+    "Imports (or the client's pre-flight check) refused because they would take a "
+    "user over their storage limit, by where the check ran.",
+    ["path"],
+    registry=REGISTRY,
+)
+for _path in QUOTA_REFUSAL_PATHS:
+    storage_quota_refusals_total.labels(path=_path)
+
+# Signed: positive means the disk held more than the counter said. Per user, on the
+# same bounded-by-config argument as the engagement series above, because "which
+# user" is what the next question always is. A drift that is large, or that grows
+# reconcile after reconcile, means some path is adding or removing library files
+# without going through DbController.record_staged_import / record_removals.
+user_library_drift_bytes = Gauge(
+    "pymix_user_library_drift_bytes",
+    "Walked library size minus the bytes_used counter, at the user's last reconcile. "
+    "Small and steady is in-place writes (art, tags); large or growing is a write path "
+    "that bypasses the quota recorders.",
+    ["username"],
+    registry=REGISTRY,
+)
+
+library_reconcile_last_completed_timestamp_seconds = Gauge(
+    "pymix_library_reconcile_last_completed_timestamp_seconds",
+    "Unix time the library usage reconcile loop last finished a pass over every user. "
+    "The drift gauge is only as fresh as this.",
+    registry=REGISTRY,
+)
+
+
+def observe_quota_refusal(path: str) -> None:
+    """Record one refusal. An unknown `path` is dropped, as for invite outcomes: the
+    label set stays the one declared above."""
+    if path not in QUOTA_REFUSAL_PATHS:
+        logger.error("metrics: refusing unknown quota refusal path %r", path)
+        return
+    storage_quota_refusals_total.labels(path=path).inc()
+
+
+def observe_library_drift(username: str, drift: int) -> None:
+    user_library_drift_bytes.labels(username=username).set(drift)
+
+
+def library_reconcile_completed() -> None:
+    library_reconcile_last_completed_timestamp_seconds.set(time.time())
+
+
 # job_id -> (kind, start time). In-process, because JobRow carries no timestamp: there
 # is nowhere in the database to read a duration from, and adding a column would need a
 # migration for a number only the metrics want. The cost of keeping it here is that a
@@ -432,6 +495,7 @@ class PymixStateCollector:
         yield from self._invite_metrics()
         yield from self._job_metrics()
         yield from self._wishlist_metrics()
+        yield from self._storage_metrics()
         yield from self._memory_metrics()
 
     def _user_metrics(self):
@@ -577,6 +641,38 @@ class PymixStateCollector:
         for status, count in sorted(items.items()):
             gauge.add_metric([status], count)
         yield gauge
+
+    def _storage_metrics(self):
+        """Each user's library against their limit (#183).
+
+        Read from user_table, never from the disk: this runs on every scrape, and not
+        walking libraries on a hot path is what #183 was for. So `used` is the
+        bytes_used counter alone -- the library, without the staging residue the quota
+        check also charges. A user whose counter has never been measured is absent
+        rather than 0, which would read as an empty library.
+        """
+        try:
+            rows = self._db.storage_usage_by_user()
+        except Exception:
+            logger.exception("metrics: could not read storage usage")
+            return
+        used = GaugeMetricFamily(
+            "pymix_user_storage_used_bytes",
+            "Bytes in each user's library, per the bytes_used counter. Excludes staging, "
+            "which the quota check also counts.",
+            labels=["username"],
+        )
+        limit = GaugeMetricFamily(
+            "pymix_user_storage_limit_bytes",
+            "Each user's storage limit (user_table.max_library_size).",
+            labels=["username"],
+        )
+        for username, bytes_used, max_library_size in rows:
+            if bytes_used is not None:
+                used.add_metric([username], bytes_used)
+            limit.add_metric([username], max_library_size)
+        yield used
+        yield limit
 
     def _memory_metrics(self):
         """The numbers `handlers/mem_watch_handler` already logs, as metrics.

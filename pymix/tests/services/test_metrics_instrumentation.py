@@ -347,3 +347,93 @@ async def test_a_broken_signup_is_counted_as_an_error_exactly_once():
     # branch must not fire behind it.
     assert _value("pymix_user_signups_total", outcome="error") == 1
     assert _value("pymix_user_signups_total", outcome="rejected") == 0
+
+
+# --- Storage quota (#183) ----------------------------------------------------------
+
+def _add_user(db_controller, username, max_library_size, bytes_used=None):
+    from pymix.model.db_tables import UserRow
+    with db_controller._session_factory() as session:
+        session.add(UserRow(
+            username=username, password="pw", email=f"{username}@example.com",
+            user_id=f"id-{username}", beets_port=1, subsonic_port=2,
+            max_library_size=max_library_size, bytes_used=bytes_used,
+        ))
+        session.commit()
+
+
+def test_each_users_usage_and_limit_are_scraped_from_the_counter(db_controller):
+    _add_user(db_controller, "alice", 1000, bytes_used=900)
+    _add_user(db_controller, "bob", 2000, bytes_used=0)
+    metrics.register_state_collector(db_controller, max_number_of_users=10, environment="test")
+
+    assert _value("pymix_user_storage_used_bytes", username="alice") == 900
+    assert _value("pymix_user_storage_limit_bytes", username="alice") == 1000
+    # 0 is a measured empty library, and is emitted as such.
+    assert metrics.REGISTRY.get_sample_value(
+        "pymix_user_storage_used_bytes", {"username": "bob"}
+    ) == 0
+
+
+def test_an_unmeasured_users_usage_is_absent_not_zero(db_controller):
+    """NULL is 'never measured'. As 0 it would read as an empty library, and a user
+    near their cap would look like one with all of it free."""
+    _add_user(db_controller, "carol", 1000, bytes_used=None)
+    metrics.register_state_collector(db_controller, max_number_of_users=10, environment="test")
+
+    assert metrics.REGISTRY.get_sample_value(
+        "pymix_user_storage_used_bytes", {"username": "carol"}
+    ) is None
+    assert _value("pymix_user_storage_limit_bytes", username="carol") == 1000
+
+
+def test_scraping_storage_never_walks_the_disk(db_controller):
+    """The scrape runs every interval; #183 was about taking library walks off hot
+    paths, and this must not put one back."""
+    _add_user(db_controller, "alice", 1000, bytes_used=None)
+    metrics.register_state_collector(db_controller, max_number_of_users=10, environment="test")
+
+    with mock.patch.object(db_controller, "_tree_bytes") as walk:
+        generate_latest(metrics.REGISTRY)
+
+    walk.assert_not_called()
+
+
+def test_every_quota_refusal_path_exists_at_zero_before_anything_happens():
+    body = generate_latest(metrics.REGISTRY).decode()
+    for path in metrics.QUOTA_REFUSAL_PATHS:
+        assert f'pymix_storage_quota_refusals_total{{path="{path}"}}' in body
+
+
+def test_a_quota_refusal_is_counted_by_path_and_unknown_paths_are_dropped():
+    before = _value("pymix_storage_quota_refusals_total", path="serato")
+
+    metrics.observe_quota_refusal("serato")
+    metrics.observe_quota_refusal("somewhere-new")
+
+    assert _value("pymix_storage_quota_refusals_total", path="serato") - before == 1
+    assert "somewhere-new" not in generate_latest(metrics.REGISTRY).decode()
+
+
+@pytest.mark.anyio
+async def test_the_reconcile_loop_stamps_each_completed_pass():
+    from pymix.handlers import library_usage_reconcile_handler as handler
+
+    db_controller = mock.Mock()
+    db_controller.get_usernames.return_value = ["alice"]
+    beets_exec = mock.MagicMock()
+
+    class _Stop(Exception):
+        pass
+
+    async def stop(_):
+        raise _Stop
+
+    with mock.patch.object(handler.anyio, "sleep", stop):
+        with pytest.raises(_Stop):
+            await handler.library_usage_reconcile_loop(db_controller, beets_exec, 60)
+
+    db_controller.reconcile_library_bytes.assert_called_once_with("alice")
+    assert abs(
+        _value("pymix_library_reconcile_last_completed_timestamp_seconds") - time.time()
+    ) < 60

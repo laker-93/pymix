@@ -14,6 +14,7 @@ import pytest
 from watchfiles import Change
 
 import pymix.handlers.filebrowser_file_handler as fbh
+from pymix.services import metrics
 
 DEBOUNCE_SECONDS = 15
 
@@ -39,6 +40,12 @@ def _settled_file(path, n_bytes):
     an_hour_ago = time.time() - 3600
     os.utime(path, (an_hour_ago, an_hour_ago))
     return path
+
+
+def _watch_refusals() -> float:
+    return metrics.REGISTRY.get_sample_value(
+        'pymix_storage_quota_refusals_total', {'path': 'watch'}
+    )
 
 
 async def _run_poller(tmp_path, monkeypatch, db_controller, script):
@@ -67,6 +74,7 @@ async def test_an_over_quota_user_is_imported_again_once_they_have_room(tmp_path
     db_controller.user_library_size_exceeded.side_effect = [(True, 1000, 950), (False, 1000, 100)]
 
     second = _settled_file(tmp_path / 'dj' / 'watch' / 'b.mp3', 50)
+    refusals_before = _watch_refusals()
     sent = await _run_poller(tmp_path, monkeypatch, db_controller, [
         (0, {(Change.added, str(first))}),
         (DEBOUNCE_SECONDS, set()),             # debounce passes: over quota, dropped
@@ -79,6 +87,8 @@ async def test_an_over_quota_user_is_imported_again_once_they_have_room(tmp_path
     # The second pass is charged for everything waiting in watch/, including the
     # file the dropped pass left there -- that is what the import would stage.
     assert db_controller.user_library_size_exceeded.call_args_list[1].args == ('dj', 150)
+    # The dropped pass is the one refusal: otherwise it is a single log line.
+    assert _watch_refusals() - refusals_before == 1
 
 
 @pytest.mark.anyio
@@ -110,6 +120,7 @@ async def test_a_failing_check_skips_the_pass_and_keeps_the_poller_alive(tmp_pat
         return False, 1000, 0
 
     db_controller.user_library_size_exceeded.side_effect = check
+    refusals_before = _watch_refusals()
 
     sent = await _run_poller(tmp_path, monkeypatch, db_controller, [
         (0, {(Change.added, str(stray)), (Change.added, str(real))}),
@@ -117,3 +128,5 @@ async def test_a_failing_check_skips_the_pass_and_keeps_the_poller_alive(tmp_pat
     ])
 
     assert sent == ['dj']
+    # A check that raised is a skipped pass, not the user hitting their cap.
+    assert _watch_refusals() == refusals_before

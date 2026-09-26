@@ -17,6 +17,7 @@ from watchfiles import awatch, Change
 from pymix.controllers.db_controller import DbController
 from pymix.model.original_track_meta import OriginalTracks, OriginalTrackMeta, UploadAttempt
 from pymix.model.subboxtrack import SubBoxTrack
+from pymix.services import metrics
 from pymix.services.import_progress import failure_reason
 from pymix.utils.tag_subbox_id import get_subbox_id, tag_subbox_id
 from pymix.utils.utility import AUDIO_EXTENSIONS, detect_audio_type, detect_audio_type_with_reason
@@ -206,6 +207,7 @@ async def poll_watchdir(user_root: Path, watch_subdir: str, send_stream, db_cont
                     exceeded = True
                 else:
                     if exceeded:
+                        metrics.observe_quota_refusal('watch')
                         logger.error(
                             f'watch: library size exceeded for user {user} '
                             f'({used_bytes} used + {n_bytes} pending > {max_bytes}), not importing'

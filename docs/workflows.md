@@ -146,6 +146,9 @@ routers and the watch poller — reads that; none walks the library.
   A NULL counter (every user before migration 021) is walked on first read.
 - Any new path that adds or removes library files must go through one of the two
   recorders, or the quota drifts until the next reconcile.
+- **Metrics** (`docs/api.md` § Metrics): per-user usage against limit, refusals by
+  path, and the drift each reconcile found. Drift is how a path that skips the
+  recorders shows up, short of waiting for a user to report a wrong figure.
 
 ## 6. Sync (`/sync/plan`, `/sync`, `/sync/tracks`, `/sync/playlists`)
 Client tells the server which tracks/playlists it has; server computes what's

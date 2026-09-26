@@ -224,6 +224,8 @@ async def storage_check(
             exceeded, max_storage_bytes, current_usage_bytes = db_controller.user_library_size_exceeded(username, uploadSizeBytes)
             remaining_bytes = max(0, max_storage_bytes - current_usage_bytes)
             reason = 'storage limit exceeded' if exceeded else 'ok'
+            if exceeded:
+                metrics.observe_quota_refusal('storage_check')
             success = True
     except Exception as ex:
         logger.error('error occurred performing storage check', exc_info=True)

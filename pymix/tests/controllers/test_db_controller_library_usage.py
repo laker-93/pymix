@@ -14,6 +14,7 @@ from sqlalchemy.pool import StaticPool
 
 from pymix.controllers.db_controller import DbController
 from pymix.model.db_tables import Base, UserRow
+from pymix.services import metrics
 
 MAX_BYTES = 1000
 
@@ -61,6 +62,12 @@ def _write(path: Path, n_bytes: int) -> Path:
 def _stored(db_controller) -> int | None:
     with db_controller._session_factory() as session:
         return session.query(UserRow).filter(UserRow.username == 'dj').one().bytes_used
+
+
+def _drift(username: str) -> float | None:
+    return metrics.REGISTRY.get_sample_value(
+        'pymix_user_library_drift_bytes', {'username': username}
+    )
 
 
 def test_an_unmeasured_user_is_walked_once_and_the_figure_stored(db_controller, roots):
@@ -165,6 +172,45 @@ def test_reconcile_replaces_a_drifted_counter(db_controller, roots):
 
     assert db_controller.reconcile_library_bytes('dj') == 300
     assert _stored(db_controller) == 300
+    # Signed, disk minus counter: the counter had 5000 the disk did not.
+    assert _drift('dj') == -5000
+
+
+def test_a_reconcile_that_finds_the_counter_right_records_zero_drift(db_controller, roots):
+    """Not the previous figure: a gauge left at the last non-zero drift would keep
+    reporting a problem the reconcile had just shown was gone."""
+    library_base, _ = roots
+    _write(library_base / 'dj' / 'a.mp3', 300)
+    db_controller.reconcile_library_bytes('dj')
+    db_controller.add_library_bytes('dj', 7)
+    db_controller.reconcile_library_bytes('dj')
+    assert _drift('dj') == -7
+
+    db_controller.reconcile_library_bytes('dj')
+
+    assert _drift('dj') == 0
+
+
+def test_the_first_measurement_is_not_drift(db_controller, roots):
+    """A NULL counter was never a claim about the disk, so its first walk -- every
+    user's, right after migration 021 -- has nothing to have drifted from."""
+    library_base, _ = roots
+    metrics.user_library_drift_bytes.clear()
+    _write(library_base / 'dj' / 'a.mp3', 300)
+
+    db_controller.reconcile_library_bytes('dj')
+
+    assert _drift('dj') is None
+
+
+def test_storage_usage_is_read_per_user_as_stored(db_controller, roots):
+    library_base, _ = roots
+    assert db_controller.storage_usage_by_user() == [('dj', None, MAX_BYTES)]
+
+    _write(library_base / 'dj' / 'a.mp3', 300)
+    db_controller.reconcile_library_bytes('dj')
+
+    assert db_controller.storage_usage_by_user() == [('dj', 300, MAX_BYTES)]
 
 
 def test_a_file_vanishing_mid_walk_is_skipped(db_controller, roots, monkeypatch):

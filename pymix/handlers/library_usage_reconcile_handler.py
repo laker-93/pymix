@@ -4,6 +4,7 @@ import anyio
 
 from pymix.clients.beets_exec import BeetsExec
 from pymix.controllers.db_controller import DbController
+from pymix.services import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -39,4 +40,5 @@ async def library_usage_reconcile_loop(
                 n_failed += 1
                 logger.exception(f'library usage reconcile: failed for user {username}')
         logger.info(f'library usage reconcile: walked {len(usernames) - n_failed}/{len(usernames)} user(s)')
+        metrics.library_reconcile_completed()
         await anyio.sleep(interval_s)
