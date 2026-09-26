@@ -21,6 +21,10 @@ from pymix.utils.tag_subbox_id import get_subbox_id
 from pymix.utils.utility import add_url_params
 
 logger = logging.getLogger(__name__)
+
+# Song ids per playlist write. Navidrome refuses a request with more than 10,000
+# query parameters, so a longer playlist is written in chunks (#203).
+PLAYLIST_WRITE_CHUNK = 1000
 # The per-item match diagnostics below are silenced during the background wishlist
 # reconcile sweep via quiet_logging.suppress_match_logging(); errors still surface.
 make_logger_suppressible(logger)
@@ -237,7 +241,9 @@ class SubsonicClient(BaseAPIClient):
                 comment=playlist.get('comment', ''),
                 last_updated=playlist['changed'],
                 duration_s=playlist['duration'],
-                subsonic_id=playlist['id']
+                subsonic_id=playlist['id'],
+                owner=playlist.get('owner'),
+                readonly=bool(playlist.get('readonly', False)),
             ) for playlist in resp_playlists
         ]
 
@@ -668,21 +674,60 @@ class SubsonicClient(BaseAPIClient):
         return response['subsonic-response']['status'] == 'ok'
 
     async def create_playlist(self, user: dict, name: str, tracks: List[SubBoxTrack]) -> bool:
+        return await self._write_playlist(user, [('name', name)], tracks)
+
+    async def replace_playlist(self, user: dict, playlist_id: str, tracks: List[SubBoxTrack]) -> bool:
+        """
+        Rewrite an existing playlist's entries in place, keeping its id, name, comment
+        and public flag: Subsonic `createPlaylist` with `playlistId` (#203, measured on
+        Navidrome 0.60.3 as design-playlists-and-undo §15 Q7).
+
+        Two things it can't do, both measured. With no song ids it returns ok and
+        changes nothing, so it can't empty a playlist. And it silently drops any entry
+        whose track is missing (in the trash): those memberships are gone.
+        """
+        return await self._write_playlist(user, [('playlistId', playlist_id)], tracks)
+
+    async def _write_playlist(self, user: dict, target: list, tracks: List[SubBoxTrack]) -> bool:
+        """
+        `createPlaylist` with the first chunk of song ids, then `updatePlaylist
+        songIdToAdd` for the rest, in order.
+
+        One request can't carry them all: Navidrome (Go's net/url) refuses a request
+        with more than 10,000 query parameters, GET or form POST alike, so a playlist of
+        ~10,000 tracks failed outright. Tracks that matched nothing have no id and are
+        left out.
+        """
         username = user['username']
         password = user['password']
         port = 4533 # since we're inside the same docker network, can call the private port
-        params = [('name', name)]
-        song_id_params = [("songId", song_id) for song_id in map(lambda t:t.sub_track_id, tracks)]
-        params.extend(song_id_params)
         base_path = self._host.format(user=username, port=port)
+        song_ids = [t.sub_track_id for t in tracks if t.sub_track_id is not None]
+        chunks = [song_ids[i:i + PLAYLIST_WRITE_CHUNK] for i in range(0, len(song_ids), PLAYLIST_WRITE_CHUNK)] or [[]]
+
         url = self._subsonic_format_url(
             username,
             password,
             f"{base_path}/rest/createPlaylist",
-            params=params
+            params=[*target, *(("songId", song_id) for song_id in chunks[0])],
         )
         response = await self.get(url)
-        return response['subsonic-response']['status'] == 'ok'
+        if response['subsonic-response']['status'] != 'ok':
+            logger.error(f"createPlaylist failed for {username}: {response['subsonic-response'].get('error')}")
+            return False
+        playlist_id = response['subsonic-response']['playlist']['id']
+        for chunk in chunks[1:]:
+            url = self._subsonic_format_url(
+                username,
+                password,
+                f"{base_path}/rest/updatePlaylist",
+                params=[('playlistId', playlist_id), *(("songIdToAdd", song_id) for song_id in chunk)],
+            )
+            response = await self.get(url)
+            if response['subsonic-response']['status'] != 'ok':
+                logger.error(f"updatePlaylist failed for {username}: {response['subsonic-response'].get('error')}")
+                return False
+        return True
 
     async def set_rating(self, user: dict, tracks: List[SubBoxTrack]):
         """

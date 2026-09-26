@@ -4,6 +4,7 @@ import os
 from typing import List, Set, AsyncIterator, Optional
 
 from pymix.clients.subsonic_client import SubsonicClient
+from pymix.model.playlist_write_report import PlaylistWriteReport
 from pymix.model.subboxplaylist import SubBoxPlaylist
 from pymix.model.subboxtrack import SubBoxTrack
 from pymix.services.track_matcher import TrackMatcher
@@ -144,21 +145,70 @@ class SubsonicOrchestrator:
         )
         return False
 
-    async def create_playlists(self, user: dict, subbox_playlists: List[SubBoxPlaylist]):
+    async def create_playlists(
+        self, user: dict, subbox_playlists: List[SubBoxPlaylist], *, scan_finished: bool
+    ) -> PlaylistWriteReport:
         """
-        Given list of subbox playlists (e.g. formed from parsing XML), create the playlist structure in navidrome.
-        If a playlist already exists, it will be deleted and recreated.
+        Write an import's playlists to Navidrome: create each one the user doesn't
+        have, and update the ones they do in place (#203).
+
+        A playlist is matched by name among the user's own playlists, never another
+        user's public one, and never a smart one: an incoming playlist with a smart
+        playlist's name is created beside it (design-playlists-and-undo §4.5).
+
+        A match keeps its Navidrome id, name, comment and public flag, and only its
+        entries are rewritten. This used to delete and recreate it, which threw away
+        the user's edits in subbox and changed the id that stars, the client's cache
+        and open tabs all hold.
+
+        ``scan_finished`` is whether the import saw Navidrome's scan finish. If it
+        didn't, tracks it hadn't indexed yet matched nothing, and a rewrite would drop
+        them from a playlist the user built up, with no undo. So matched playlists are
+        left as they are and named in the report; new ones are still created.
         """
-        all_playlists = await self._subsonic_client.get_playlists(user)
-        existing_playlist_map = dict()
-        if all_playlists:
-            for playlist in all_playlists:
-                existing_playlist_map[playlist.name] = playlist
+        username = user['username']
+        report = PlaylistWriteReport()
+        existing = await self._subsonic_client.get_playlists(user) or []
+        owned = {}
+        for playlist in existing:
+            if playlist.owner != username or playlist.readonly:
+                continue
+            if playlist.name in owned:
+                logger.warning(
+                    f"{username} has more than one playlist named {playlist.name!r}; "
+                    f"a re-import updates the first, {owned[playlist.name].subsonic_id}"
+                )
+                continue
+            owned[playlist.name] = playlist
+
         for playlist in subbox_playlists:
-            if playlist.name in existing_playlist_map:
-                # delete the existing playlist
-                await self._subsonic_client.delete_playlist(user, existing_playlist_map[playlist.name].subsonic_id)
-            await self._subsonic_client.create_playlist(user, playlist.name, playlist.tracks)
+            # Popped: a second incoming playlist of the same name (Rekordbox allows
+            # sibling duplicates) is created beside it, not written over the first.
+            match = owned.pop(playlist.name, None)
+            if match is None:
+                if await self._subsonic_client.create_playlist(user, playlist.name, playlist.tracks):
+                    report.created.append(playlist.name)
+                else:
+                    report.failed.append(playlist.name)
+                continue
+            n_after = sum(1 for t in playlist.tracks or [] if t.sub_track_id is not None)
+            if not scan_finished:
+                report.held_back.append(playlist.name)
+            elif n_after == 0:
+                report.unmatched.append(playlist.name)
+            elif await self._subsonic_client.replace_playlist(user, match.subsonic_id, playlist.tracks):
+                report.updated.append(playlist.name)
+                if match.n_of_songs is not None and n_after < match.n_of_songs:
+                    report.shortened.append((playlist.name, match.n_of_songs, n_after))
+            else:
+                report.failed.append(playlist.name)
+
+        logger.info(
+            f"playlists for {username}: {len(report.created)} created, {len(report.updated)} updated in place, "
+            f"{len(report.held_back)} held back (scan unfinished), {len(report.unmatched)} left (no tracks matched), "
+            f"{len(report.failed)} failed"
+        )
+        return report
 
     async def set_ratings(self, user: dict, tracks: List[SubBoxTrack]):
         """

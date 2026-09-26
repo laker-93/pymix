@@ -21,6 +21,7 @@ from pymix.controllers.db_controller import DbController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.handlers.rb_backup_file_handler import RBBackupFileHandler
 from pymix.model import beatgrid
+from pymix.model.playlist_write_report import PlaylistWriteReport
 from pymix.model.subboxplaylist import SubBoxPlaylist
 from pymix.orchestrators.rekordbox_xml_orchestrator import RekordboxXMLOrchestrator
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
@@ -833,7 +834,9 @@ class RekordboxXMLController:
             playlist_names: Optional[List[List[str]]] = None,
             progress=None,
             audio_files: Optional[List[Path]] = None,
-    ):
+    ) -> Optional[PlaylistWriteReport]:
+        """Returns what the import did to the user's playlists, for the job's
+        warnings, or None if it selected no playlists."""
         username = user['username']
         # parsed fresh per call and threaded explicitly through the rest of this request -
         # never stored on the (singleton) orchestrator, so concurrent users' imports can't
@@ -851,8 +854,9 @@ class RekordboxXMLController:
         # must trigger a navidrome scan so the tracks will be queryable when creating and moving in to playlists in the
         # next step -- and wait for it to actually finish, not a fixed guess at how
         # long that takes (see SubsonicOrchestrator.scan_and_wait).
-        await self._subsonic_orchestrator.scan_and_wait(user)
-        await self._set_data_from_xml(user, rekordbox_xml, playlist_names, progress)
+        # If the wait gave up, playlists the user already has are left alone (#203).
+        scan_finished = await self._subsonic_orchestrator.scan_and_wait(user)
+        return await self._set_data_from_xml(user, rekordbox_xml, playlist_names, progress, scan_finished=scan_finished)
         # uploads/ is cleared by the router once the job finishes, whatever the
         # outcome (#38). Clearing it only on success here let a failed attempt's
         # files be imported by the next one.
@@ -923,7 +927,7 @@ class RekordboxXMLController:
                     failures[str(subbox_id)] = failure_reason(ex)
         return failures
 
-    async def _set_data_from_xml(self, user: dict, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None, progress=None):
+    async def _set_data_from_xml(self, user: dict, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None, progress=None, scan_finished: bool = True) -> Optional[PlaylistWriteReport]:
         # todo make this logic more similar to serato_controller where subbox_id is used for look up
         # One matcher for the whole job: the playlist pass, the rated pass and the
         # metadata loop below all resolve the same XML tracks against Navidrome, so
@@ -933,9 +937,10 @@ class RekordboxXMLController:
         # Both passes work from the same playlists, so they are built once here
         # rather than once per pass (#191).
         subbox_playlists = await self._build_playlists_from_xml(rekordbox_xml, playlist_names)
-        await self._create_playlists_from_xml(user, rekordbox_xml, playlist_names, matcher, subbox_playlists)
+        report = await self._create_playlists_from_xml(user, rekordbox_xml, playlist_names, matcher, subbox_playlists, scan_finished=scan_finished)
         await self._set_metadata_from_xml(user, rekordbox_xml, playlist_names, progress, matcher, subbox_playlists)
         matcher.log_stats("rekordbox import")
+        return report
 
     async def _set_metadata_from_xml(self, user, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None, progress=None, matcher: Optional[TrackMatcher] = None, subbox_playlists: Optional[List[SubBoxPlaylist]] = None):
         progress = reporter_or_null(progress)
@@ -1063,14 +1068,14 @@ class RekordboxXMLController:
                 progress.ok()
 
 
-    async def _create_playlists_from_xml(self, user: dict, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None, matcher: Optional[TrackMatcher] = None, subbox_playlists: Optional[List[SubBoxPlaylist]] = None):
+    async def _create_playlists_from_xml(self, user: dict, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None, matcher: Optional[TrackMatcher] = None, subbox_playlists: Optional[List[SubBoxPlaylist]] = None, scan_finished: bool = True) -> Optional[PlaylistWriteReport]:
         # 4. create internal subbox playlist and tracks as below
         if subbox_playlists is None:
             subbox_playlists = await self._build_playlists_from_xml(rekordbox_xml, playlist_names)
 
         if not subbox_playlists:
             logger.info("No playlists selected from XML for import.")
-            return
+            return None
 
         # Persist playlist path_components in DB for lossless export reconstruction
         self._db_controller.save_playlist_paths(
@@ -1083,8 +1088,8 @@ class RekordboxXMLController:
         # this sets the subsonic id found from querying navidrome. This can then be used to create the playlist and place
         # the track in the playlist
         res = await self._subsonic_orchestrator.update_tracks_with_subid(user, subbox_playlists=subbox_playlists, matcher=matcher)
-        # 8. create the playlists
-        await self._subsonic_orchestrator.create_playlists(user, subbox_playlists)
+        # 8. create the playlists, or update in place the ones the user already has
+        return await self._subsonic_orchestrator.create_playlists(user, subbox_playlists, scan_finished=scan_finished)
 
     async def get_healthcheck(self) -> dict:
         return {

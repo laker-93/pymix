@@ -222,10 +222,10 @@ class SeratoController:
         if zip_path or audio_path:
             await anyio.to_thread.run_sync(self._import_to_beets, username, zip_path, audio_path, audio_files)
         # must trigger a navidrome scan so the tracks will be queryable when creating and moving in to playlists in the
-        # next step
-        await self._subsonic_orchestrator.scan(user)
-        await anyio.sleep(2)
-        report = await self._set_data_from_crates(user, serato_crate_path, identities)
+        # next step, and wait for it to finish rather than a flat 2s guess. Whether it
+        # finished also decides whether playlists the user already has are updated (#203).
+        scan_finished = await self._subsonic_orchestrator.scan_and_wait(user)
+        report = await self._set_data_from_crates(user, serato_crate_path, identities, scan_finished=scan_finished)
         # Resolve any open wishlist items whose track is now in the user's Navidrome.
         try:
             await self._wishlist_reconcile_service.reconcile_user(user)
@@ -240,8 +240,9 @@ class SeratoController:
         user: dict,
         serato_crate_path: Path,
         identities: Optional[Dict[str, str]] = None,
+        scan_finished: bool = True,
     ) -> CrateImportReport:
-        subbox_playlists, report = await self._create_subsonic_playlists(user, serato_crate_path, identities)
+        subbox_playlists, report = await self._create_subsonic_playlists(user, serato_crate_path, identities, scan_finished=scan_finished)
         await self._set_metadata(user, subbox_playlists)
         return report
 
@@ -250,6 +251,7 @@ class SeratoController:
         user: dict,
         serato_crate_path: Path,
         identities: Optional[Dict[str, str]] = None,
+        scan_finished: bool = True,
     ) -> tuple[List[SubBoxPlaylist], CrateImportReport]:
 
         # 4. create internal subbox playlist and tracks as below
@@ -261,8 +263,10 @@ class SeratoController:
         # this sets the subsonic id found from querying navidrome. This can then be used to create the playlist and place
         # the track in the playlist
         await self._subsonic_orchestrator.update_tracks_with_subid(user, subbox_playlists)
-        # 8. create the playlists
-        await self._subsonic_orchestrator.create_playlists(user, subbox_playlists)
+        # 8. create the playlists, or update in place the ones the user already has
+        report.playlists = await self._subsonic_orchestrator.create_playlists(
+            user, subbox_playlists, scan_finished=scan_finished
+        )
         return subbox_playlists, report
 
     @staticmethod
