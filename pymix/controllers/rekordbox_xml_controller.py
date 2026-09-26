@@ -663,8 +663,6 @@ class RekordboxXMLController:
         # track count rather than reported from here (#51).
         progress = reporter_or_null(progress)
 
-        self._file_browser_file_handler.stage_for_import(username, public, watch)
-
         # Debug: log SUBBOX_ID tags on staged files before beets import
         #staging_dir = Path(self._file_browser_file_handler._beets_data_path.format(user=username))
         #self._log_subbox_id_tags(staging_dir, 'PRE-BEETS')
@@ -677,6 +675,11 @@ class RekordboxXMLController:
         # future automatch sweep or a concurrent watch-cycle for the same user
         # must not interleave between these steps (#73).
         with self._beets_exec.write_lock(f"beets{username}"):
+            # Staged under the lock: staging is shared by every import for the user,
+            # and one job staging while another's beets import runs had its files
+            # counted as never landed (#183) -- and deleted by the other job's
+            # clean-up, since beets had already listed the directory without them.
+            self._file_browser_file_handler.stage_for_import(username, public, watch)
             try:
                 # detach to avoid returning potentially large stdout from the docker logs.
                 # Instead logs are streamed incrementally. What leaves staging while it
@@ -781,18 +784,19 @@ class RekordboxXMLController:
         """
         # See _consume_from_filebrowser on why the audio phase isn't reported here.
         progress = reporter_or_null(progress)
-        if zip_path:
-            self._rb_backup_file_handler.restore_track_meta_and_stage_for_import(username, zip_path, rekordbox_xml)
-        if audio_path:
-            self._rb_backup_file_handler.stage_for_import(username, audio_path, audio_files)
         # 1. invoke beets import on the audio files to import
         # set a custom field of the username that uploaded the track. This allows to query tracks that a username has uploaded.
         # group-albums to allow importing correctly tracks with different album tags.
         beets_command = f"beet import -A --group-albums --set user={username} --set automatch_state=pending /downloads"
         logger.info(f'running beet import command {beets_command}')
         # One lock for the whole job (import -> duplicates -> subbox_id map): see
-        # the matching comment in _consume_from_filebrowser (#73).
+        # the matching comment in _consume_from_filebrowser (#73). Staging is under
+        # it too, for the reason given there (#183).
         with self._beets_exec.write_lock(f"beets{username}"):
+            if zip_path:
+                self._rb_backup_file_handler.restore_track_meta_and_stage_for_import(username, zip_path, rekordbox_xml)
+            if audio_path:
+                self._rb_backup_file_handler.stage_for_import(username, audio_path, audio_files)
             try:
                 # detach to avoid returning potentially large stdout from the docker logs.
                 # Instead logs are streamed incrementally. The quota counter moves by

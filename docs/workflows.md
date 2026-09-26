@@ -132,7 +132,11 @@ of the user's staging dir (`/private-staged/<user>`, so a failed import's residu
 counts). Every check — `/user/storage_check`, `/user/library_size`, the three import
 routers and the watch poller — reads that; none walks the library.
 - **Imports** wrap `beet import` in `DbController.record_staged_import`: what left
-  staging while beets ran is what landed, and the counter moves by it.
+  staging while beets ran is what landed, and the counter moves by it. That only
+  holds if nothing else writes to staging meanwhile, so every import **stages under
+  the user's beets write lock**, not before taking it. Staged outside it, a second
+  job's files arrived mid-import, weren't imported (beets had already listed the
+  dir), were counted as never landed, and were deleted by the first job's clean-up.
 - **Deletes** (`beet rm -df`, `beet duplicates -d`) list the files first under the
   same beets write lock and wrap the delete in `record_removals`, which subtracts
   only the files that are actually gone afterwards.
