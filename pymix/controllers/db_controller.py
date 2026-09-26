@@ -2,10 +2,11 @@ import json
 import uuid
 import logging
 import datetime
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Dict, Union
+from typing import Optional, Dict, Iterable, Iterator, Union
 
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
@@ -121,10 +122,19 @@ def _metric_outcome(verdict) -> Optional[str]:
 
 
 class DbController:
-    def __init__(self, session_factory: sessionmaker, app_env: str, max_library_size: int):
+    def __init__(
+            self,
+            session_factory: sessionmaker,
+            app_env: str,
+            max_library_size: int,
+            serving_music_path_base: str = '/private-music',
+            staging_path: str = '/private-staged/{user}/',
+    ):
         self._session_factory = session_factory
         self._app_env = app_env
         self._max_library_size = max_library_size
+        self._serving_music_path_base = serving_music_path_base.removesuffix('/')
+        self._staging_path = staging_path
 
     def add_subbox_beet_map(self, username: str, subbox_id: str, beet_id: int) -> dict:
         try:
@@ -987,15 +997,139 @@ class DbController:
             counts.update({status: count for status, count in rows})
             return counts
 
-    def user_library_size_exceeded(self, username: str, size_import: int) -> tuple[bool, int, int]:
-        total_size = 0
-        for file in Path(f'/private-music/{username}').rglob('*'):
+    # --- storage quota (#183) -------------------------------------------------
+    #
+    # A user's usage is their library plus their staging directory. The library is
+    # a counter in user_table.bytes_used, moved by the paths that change it
+    # (record_staged_import, record_removals) and corrected by
+    # reconcile_library_bytes. Staging is walked live: it only holds one import's
+    # audio plus what a failed import left behind, and counting that residue is the
+    # point -- it is disk the quota used to miss.
+
+    def get_usernames(self) -> list[str]:
+        with self._session_factory() as session:
+            return [row.username for row in session.query(UserRow.username).all()]
+
+    def storage_usage_by_user(self) -> list[tuple[str, Optional[int], int]]:
+        """(username, bytes_used, max_library_size) for every user, for the metrics
+        scrape. bytes_used is as stored -- None for a user never measured."""
+        with self._session_factory() as session:
+            rows = session.query(
+                UserRow.username, UserRow.bytes_used, UserRow.max_library_size
+            ).order_by(UserRow.username).all()
+        return [(r.username, r.bytes_used, r.max_library_size) for r in rows]
+
+    def library_path(self, username: str) -> Path:
+        return Path(f'{self._serving_music_path_base}/{username}')
+
+    def staging_dir(self, username: str) -> Path:
+        return Path(self._staging_path.format(user=username))
+
+    @staticmethod
+    def _tree_bytes(root: Path) -> int:
+        """Sum of every file's size under ``root``. A file removed mid-walk -- routine
+        while beets moves files out of staging -- is skipped, never raised."""
+        total = 0
+        for file in root.rglob('*'):
             try:
-                total_size += file.stat().st_size
-            except FileNotFoundError:
-                # file disappeared between rglob and stat
-                logger.error(f"Missing during scan: {file} for user {username}")
+                if file.is_file():
+                    total += file.stat().st_size
+            except OSError:
                 continue
+        return total
+
+    def staged_bytes(self, username: str) -> int:
+        return self._tree_bytes(self.staging_dir(username))
+
+    def reconcile_library_bytes(self, username: str) -> int:
+        """Walk the user's library once and store its size, replacing whatever the
+        counter had drifted to. O(library): only the lazy first measurement and the
+        periodic reconcile loop call it, never a request's hot path."""
+        total = self._tree_bytes(self.library_path(username))
+        with self._session_factory() as session:
+            row = session.query(UserRow).filter(UserRow.username == username).one()
+            previous = row.bytes_used
+            row.bytes_used = total
+            session.commit()
+        if previous is not None:
+            # Zero drift is recorded too, so the gauge shows a reconcile that found the
+            # counter right rather than keeping the last non-zero figure forever.
+            metrics.observe_library_drift(username, total - previous)
+        if previous is not None and previous != total:
+            logger.info(
+                f'library bytes for {username} reconciled: counter {previous} -> walked {total} '
+                f'(drift {total - previous:+d})'
+            )
+        return total
+
+    def add_library_bytes(self, username: str, delta: int) -> None:
+        """Move the counter by ``delta`` in one UPDATE, so two writers never lose one
+        another's change. A NULL counter stays NULL: the next read measures it."""
+        if not delta:
+            return
+        moved = UserRow.bytes_used + delta
+        with self._session_factory() as session:
+            session.query(UserRow).filter(
+                UserRow.username == username, UserRow.bytes_used.isnot(None)
+            ).update(
+                # Floored at 0: a delete the counter never saw arrive (drift) must not
+                # take it negative and hand the user free space.
+                {UserRow.bytes_used: case((moved < 0, 0), else_=moved)},
+                synchronize_session=False,
+            )
+            session.commit()
+
+    def library_bytes(self, username: str) -> int:
+        with self._session_factory() as session:
+            row = session.query(UserRow.bytes_used).filter(UserRow.username == username).one()
+        if row.bytes_used is None:
+            return self.reconcile_library_bytes(username)
+        return row.bytes_used
+
+    def usage_bytes(self, username: str) -> int:
+        """What counts against the quota: the library plus everything staged."""
+        return self.library_bytes(username) + self.staged_bytes(username)
+
+    @contextmanager
+    def record_staged_import(self, username: str) -> Iterator[None]:
+        """Wrap a `beet import` of the user's staging directory. What left staging
+        while it ran is what beets moved into the library, and the counter moves by
+        that. Measured whether the import raised or not: a failed import can still
+        have landed some of its files."""
+        before = self.staged_bytes(username)
+        try:
+            yield
+        finally:
+            try:
+                landed = before - self.staged_bytes(username)
+                if landed > 0:
+                    self.add_library_bytes(username, landed)
+            except Exception:
+                logger.exception(f'failed to record imported bytes for {username}')
+
+    @contextmanager
+    def record_removals(self, username: str, paths: Iterable[Path]) -> Iterator[None]:
+        """Wrap a delete of ``paths`` from the user's library. Each one that existed
+        before and is gone after comes off the counter -- so a delete that partly
+        failed is charged only for what it actually removed."""
+        sizes: Dict[Path, int] = {}
+        for path in paths:
+            try:
+                sizes[path] = path.stat().st_size
+            except OSError:
+                continue
+        try:
+            yield
+        finally:
+            try:
+                removed = sum(size for path, size in sizes.items() if not path.exists())
+                if removed > 0:
+                    self.add_library_bytes(username, -removed)
+            except Exception:
+                logger.exception(f'failed to record removed bytes for {username}')
+
+    def user_library_size_exceeded(self, username: str, size_import: int) -> tuple[bool, int, int]:
+        total_size = self.usage_bytes(username)
         user = self.get_user(username)
         max_storage_bytes = int(user['max_library_size'])
         if int(total_size + size_import) > max_storage_bytes:

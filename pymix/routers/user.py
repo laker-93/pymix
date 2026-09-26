@@ -1,6 +1,5 @@
 import logging
 from http import HTTPStatus
-from pathlib import Path
 from typing import Optional
 
 from dependency_injector.wiring import Provide, inject
@@ -158,8 +157,15 @@ async def library_size(
 @inject
 async def library_size(
         username: str = Depends(require_username),
+        db_controller: DbController = Depends(Provide[Container.db_controller]),
 ) -> dict:
-    total_size = sum(file.stat().st_size for file in Path(f'/private-music/{username}').rglob('*'))
+    # The same figure storage_check answers with (library counter + staging), not
+    # a second walk of its own (#183).
+    try:
+        total_size = db_controller.usage_bytes(username)
+    except Exception as ex:
+        logger.error('error occurred reading library size', exc_info=True)
+        return {'success': False, 'total_size_bytes': 0, 'reason': repr(ex)}
     return {
         'success': True,
         'total_size_bytes': total_size,
@@ -218,6 +224,8 @@ async def storage_check(
             exceeded, max_storage_bytes, current_usage_bytes = db_controller.user_library_size_exceeded(username, uploadSizeBytes)
             remaining_bytes = max(0, max_storage_bytes - current_usage_bytes)
             reason = 'storage limit exceeded' if exceeded else 'ok'
+            if exceeded:
+                metrics.observe_quota_refusal('storage_check')
             success = True
     except Exception as ex:
         logger.error('error occurred performing storage check', exc_info=True)

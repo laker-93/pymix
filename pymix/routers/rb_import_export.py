@@ -15,6 +15,7 @@ from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.routers.auth import require_reader, require_uploader
 from pymix.routers.beets_import import BeetsImportRequest
 from pymix.model.original_track_meta import UploadAttempt
+from pymix.services import metrics
 from pymix.services.import_progress import failure_reason, ImportProgressReporter
 from pymix.services.job_outcome import with_warning
 
@@ -55,6 +56,7 @@ async def rekordbox_import(
     total_n_tracks_for_import = size['n_tracks']
     exceeded, _1, _2 =  db_controller.user_library_size_exceeded(username, size_import_bytes)
     if exceeded:
+        metrics.observe_quota_refusal('rekordbox')
         return {
             'success': False,
             'job_id': job_id,

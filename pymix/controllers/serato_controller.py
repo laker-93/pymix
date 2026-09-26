@@ -165,11 +165,6 @@ class SeratoController:
         beets should import in to the directory navidrome is working off.
         Users can use APIs after import to correct any mistakes from the beets quiet import.
         """
-        if zip_path:
-            self._serato_backup_file_handler.stage_for_import(username, zip_path)
-        if audio_path:
-            # todo: move from rb handler as logic is generic to serato and rb
-            self._rb_backup_file_handler.stage_for_import(username, audio_path, audio_files)
         # 1. invoke beets import on the audio files to import
 
         # can set to interactive with tty to pipe docker stdin input/output to terminal for user feedback.
@@ -180,12 +175,20 @@ class SeratoController:
         # One lock for the whole job (import -> duplicates -> subbox_id map),
         # shared with RekordboxXMLController via the same injected BeetsExec
         # singleton so a serato and a rekordbox import for the same user's
-        # beets container can't interleave either (#73).
+        # beets container can't interleave either (#73). Staging is under it too:
+        # see RekordboxXMLController._consume_from_filebrowser (#183).
         with self._beets_exec.write_lock(f"beets{username}"):
+            if zip_path:
+                self._serato_backup_file_handler.stage_for_import(username, zip_path)
+            if audio_path:
+                # todo: move from rb handler as logic is generic to serato and rb
+                self._rb_backup_file_handler.stage_for_import(username, audio_path, audio_files)
             try:
-                log_iter = self._beets_exec.execute(f"beets{username}", beets_command, stream=True)
-                for log_type, log in log_iter:
-                    logger.info(f'{log_type}: {log.decode()}')
+                # The quota counter moves by what beets takes out of staging (#183).
+                with self._db_controller.record_staged_import(username):
+                    log_iter = self._beets_exec.execute(f"beets{username}", beets_command, stream=True)
+                    for log_type, log in log_iter:
+                        logger.info(f'{log_type}: {log.decode()}')
             except Exception:
                 logger.exception('beets import failed')
                 raise
