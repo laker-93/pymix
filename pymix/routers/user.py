@@ -187,6 +187,7 @@ async def storage_check(
     current_usage_bytes = 0
     max_storage_bytes = 0
     remaining_bytes = 0
+    trash_bytes = 0
 
     if uploadSizeBytes < 0:
         return {
@@ -223,6 +224,8 @@ async def storage_check(
             username = user['username']
             exceeded, max_storage_bytes, current_usage_bytes = db_controller.user_library_size_exceeded(username, uploadSizeBytes)
             remaining_bytes = max(0, max_storage_bytes - current_usage_bytes)
+            # Deleted tracks still count until the trash is purged (#200). A DB read.
+            trash_bytes = db_controller.trash_bytes(username)
             reason = 'storage limit exceeded' if exceeded else 'ok'
             if exceeded:
                 metrics.observe_quota_refusal('storage_check')
@@ -234,6 +237,10 @@ async def storage_check(
     return {
         'allowed': not exceeded,
         'currentUsageBytes': current_usage_bytes,
+        # Additive (#200): the part of currentUsageBytes that is deleted tracks
+        # waiting in the trash, and the rest. currentUsageBytes stays the total.
+        'trashBytes': trash_bytes,
+        'libraryBytes': max(0, current_usage_bytes - trash_bytes),
         'maxStorageBytes': max_storage_bytes,
         'remainingBytes': remaining_bytes,
         'reason': reason,
