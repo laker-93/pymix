@@ -127,7 +127,8 @@ on `/user/create`:
 ## External services & data sources
 
 - **Navidrome** = the Subsonic API implementation. pymix uses standard Subsonic
-  endpoints: `getPlaylists`, `getPlaylist`, `search2/search3`, `createPlaylist`,
+  endpoints: `getPlaylists`, `getPlaylist`, `search2/search3`, `createPlaylist`
+  (also with `playlistId`, to rewrite a playlist's entries in place), `updatePlaylist`,
   `deletePlaylist`, `setRating`, `startScan`, plus Navidrome's `/auth/createAdmin`.
   Auth uses the Subsonic token+salt scheme (`SubsonicClient._calculate_token`).
   **Requires Navidrome's "report real path" option** so pymix can map a Subsonic
