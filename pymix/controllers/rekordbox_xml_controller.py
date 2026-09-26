@@ -185,54 +185,6 @@ class RekordboxXMLController:
             )
         return Path(lines[0] if lines else result.strip())
 
-    @staticmethod
-    def _subbox_id_or_query(subbox_ids: List[str]) -> List[str]:
-        """Build a beets query that matches any of the given subbox_ids exactly."""
-        return or_query("subbox_id", subbox_ids, exact=True)
-
-    async def get_present_subbox_ids(
-        self, username: str, subbox_ids: List[str], public: bool
-    ) -> set:
-        """
-        Return the subset of ``subbox_ids`` that beets currently has an item for.
-        A single ``beet list`` OR-query over all ids — one docker exec regardless of
-        how many ids are requested. Used to (a) skip beets for ids already absent
-        (idempotent delete) and (b) verify which ids a removal actually removed.
-        """
-        if not subbox_ids:
-            return set()
-        return await anyio.to_thread.run_sync(self._get_present_subbox_ids, username, subbox_ids, public)
-
-    def _get_present_subbox_ids(self, username: str, subbox_ids: List[str], public: bool) -> set:
-        container_name = "beets" if public else f"beets{username}"
-        beets_command = ["beet", "list", "-f", "$subbox_id", *self._subbox_id_or_query(subbox_ids)]
-        result = self._beets_exec.execute(container_name, beets_command)
-        found = {line.strip() for line in result.splitlines() if line.strip()}
-        # Intersect with the requested set so a partial-tag match can never widen it.
-        return found & set(subbox_ids)
-
-    async def remove_tracks(self, username: str, subbox_ids: List[str], public: bool):
-        """
-        Remove every given subbox_id (and its file on disk) in a single
-        ``beet rm -df`` OR-query — one docker exec instead of one per id. Raises
-        the underlying DockerException if beets exits non-zero; callers should
-        verify the actual end state with :meth:`get_present_subbox_ids` rather than
-        trusting success/failure of the whole batch.
-        """
-        if not subbox_ids:
-            return
-        await anyio.to_thread.run_sync(self._remove_tracks, username, subbox_ids, public)
-
-    def _remove_tracks(self, username: str, subbox_ids: List[str], public: bool):
-        container_name = "beets" if public else f"beets{username}"
-        query = self._subbox_id_or_query(subbox_ids)
-        beets_command = ["beet", "rm", "-df", *query]
-        with self._beets_exec.write_lock(container_name):
-            list_paths = functools.partial(self._item_paths_for_removal, container_name, query)
-            with self._recording_removals(username, public, list_paths):
-                result = self._beets_exec.execute(container_name, beets_command)
-        logger.info(f"got result {result} from running beets command {beets_command} on container {container_name}")
-
     def _recording_removals(self, username: str, public: bool, list_paths):
         """
         Take what a beets delete removes off the user's quota counter (#183).
@@ -252,14 +204,6 @@ class RekordboxXMLController:
             logger.exception(f'could not list files before a delete for {username}; the quota counter will drift until reconciled')
             paths = []
         return self._db_controller.record_removals(username, paths)
-
-    def _item_paths_for_removal(self, container_name: str, query: List[str], username: str) -> List[Path]:
-        result = self._beets_exec.execute(container_name, ["beet", "list", "-p", *query])
-        library = self._db_controller.library_path(username)
-        return [
-            library / line.strip().removeprefix('/music').lstrip('/')
-            for line in result.splitlines() if line.strip()
-        ]
 
     def _duplicate_paths_for_removal(self, username: str) -> List[Path]:
         records = self._fetch_duplicate_paths(username, public=False)

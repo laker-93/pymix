@@ -6,6 +6,7 @@ from dependency_injector import containers, providers
 from pymix.clients.beets_client import BeetsClient
 from pymix.clients.beets_exec import BeetsExec
 from pymix.clients.navidrome_client import NavidromeClient
+from pymix.clients.navidrome_native_client import NavidromeNativeClient
 from pymix.clients.subsonic_client import SubsonicClient
 from pymix.controllers.db_controller import DbController
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
@@ -29,6 +30,7 @@ from pymix.services.sheet_sync_service import SheetSyncService
 from pymix.services.wishlist_reconcile_service import WishlistReconcileService
 from pymix.services.wishlist_resolve_service import WishlistResolveService
 from pymix.services.youtube_match_service import YoutubeMatchService
+from pymix.services.trash import TrashService, trash_setting
 
 
 class Container(containers.DeclarativeContainer):
@@ -57,6 +59,13 @@ class Container(containers.DeclarativeContainer):
         host=config.containers.subsonic.host,
         session=aiohttp_session,
         app_env=config.app_env
+    )
+
+    # Singleton: it caches each user's JWT, and Navidrome rate-limits logins.
+    navidrome_native_client = providers.Singleton(
+        NavidromeNativeClient,
+        host=config.containers.subsonic.host,
+        session=aiohttp_session,
     )
 
     rekordbox_xml_factory = providers.Factory(
@@ -150,6 +159,14 @@ class Container(containers.DeclarativeContainer):
         config.local_user_music_stem,
         config.containers.subsonic.serving_music_path_base,
         beets_exec,
+    )
+
+    trash_service = providers.Singleton(
+        TrashService,
+        db_controller,
+        beets_exec,
+        navidrome_native_client,
+        retention_s=providers.Callable(trash_setting, config, 'retention_s'),
     )
 
     automatch_service = providers.Singleton(

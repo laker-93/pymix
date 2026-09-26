@@ -14,6 +14,7 @@ from pymix.model.db_tables import (
     UserRow, SessionRow, SubboxBeetsMapRow, LibraryRow,
     MetaHistoryRow, UserJobRow, JobRow, OriginalTrackMetaRow, UserTokenRow,
     PlaylistPathRow, WishlistRow, InviteRequestRow, UploadAttemptRow,
+    TrashBatchRow, TrashItemRow, TrashReaperRunRow,
 )
 from pymix.model.invite_request import DJ_SOFTWARE_OPTIONS, INVITE_REQUEST_STATUSES, InviteRequestStatus
 from pymix.model.original_track_meta import OriginalTracks, UploadAttempt
@@ -107,6 +108,12 @@ def _derive_artist_title_update(row: WishlistRow, updates: dict) -> dict:
 
 
 logger = logging.getLogger(__name__)
+
+# Item states in which the trash still holds the thing on disk (#200). `pending` is
+# the window between a delete's snapshot and its verify.
+_TRASH_STATES_ON_DISK = ('pending', 'restorable', 'expired', 'restoring')
+# States the reaper may purge from. `restoring` is not one: a restore owns the item.
+_TRASH_STATES_PURGEABLE = ('restorable', 'expired')
 
 
 def _row_to_dict(row, exclude=('id',)):
@@ -1022,6 +1029,15 @@ class DbController:
     def library_path(self, username: str) -> Path:
         return Path(f'{self._serving_music_path_base}/{username}')
 
+    def trash_dir(self, username: str) -> Path:
+        """Where a user's deleted files wait for the reaper (#200).
+
+        In the same volume as the library, so moving a file here is a rename and not a
+        copy, but outside the user's directory, which Navidrome indexes and beets
+        owns. The underscore is what keeps it from colliding with a username: those
+        are lowercase-alphanumeric once sanitised."""
+        return Path(f'{self._serving_music_path_base}/_trash/{username}')
+
     def staging_dir(self, username: str) -> Path:
         return Path(self._staging_path.format(user=username))
 
@@ -1044,8 +1060,12 @@ class DbController:
     def reconcile_library_bytes(self, username: str) -> int:
         """Walk the user's library once and store its size, replacing whatever the
         counter had drifted to. O(library): only the lazy first measurement and the
-        periodic reconcile loop call it, never a request's hot path."""
-        total = self._tree_bytes(self.library_path(username))
+        periodic reconcile loop call it, never a request's hot path.
+
+        The trash is walked too. A deleted track's bytes are still on disk until the
+        reaper purges them, so they still count (#200); leaving the trash out would
+        have the first reconcile after a delete quietly hand them back."""
+        total = self._tree_bytes(self.library_path(username)) + self._tree_bytes(self.trash_dir(username))
         with self._session_factory() as session:
             row = session.query(UserRow).filter(UserRow.username == username).one()
             previous = row.bytes_used
@@ -1139,6 +1159,201 @@ class DbController:
             return True, max_storage_bytes, total_size
         else:
             return False, max_storage_bytes, total_size
+
+    # --- trash (#200) ---------------------------------------------------------
+    # A delete snapshots what it is about to remove into a batch before touching
+    # anything, then moves it aside. The batch has no state column: its verdict is
+    # computed from its items' states (pymix.services.trash.batch_state).
+
+    def snapshot_track_rows(self, username: str, subbox_ids: Iterable[str]) -> Dict[str, dict]:
+        """The three pymix rows DELETE /track removes, per subbox_id, as plain
+        dicts a restore can write back. Missing rows are None: an uploaded track
+        has no library_table row, for one."""
+        user_id = self.get_user(username)['user_id']
+        ids = list(subbox_ids)
+        snapshot = {i: {'subbox_beets_map': None, 'library': None, 'original_track_meta': None} for i in ids}
+        tables = (
+            ('subbox_beets_map', SubboxBeetsMapRow),
+            ('library', LibraryRow),
+            ('original_track_meta', OriginalTrackMetaRow),
+        )
+        with self._session_factory() as session:
+            for key, table in tables:
+                for row in session.query(table).filter(
+                    table.user_id == user_id, table.subbox_id.in_(ids)
+                ).all():
+                    snapshot[row.subbox_id][key] = json.loads(json.dumps(_row_to_dict(row), default=str))
+        return snapshot
+
+    def create_trash_batch(
+            self, username: str, kind: str, label: str, retention_s: float, items: list[dict]
+    ) -> str:
+        """Write a batch and all its items in one transaction, and return the
+        batch id. Each item dict holds TrashItemRow's columns (without the ids,
+        which this fills in)."""
+        user_id = self.get_user(username)['user_id']
+        batch_id = uuid.uuid4().hex
+        now = datetime.datetime.now().timestamp()
+        with self._session_factory() as session:
+            session.add(TrashBatchRow(
+                batch_id=batch_id, user_id=user_id, kind=kind, label=label,
+                bytes=sum(item.get('size') or 0 for item in items),
+                created_at=now, expires_at=now + retention_s,
+            ))
+            for item in items:
+                session.add(TrashItemRow(
+                    batch_id=batch_id, user_id=user_id, kind=kind, updated_at=now, **item
+                ))
+            session.commit()
+        return batch_id
+
+    def update_trash_items(self, batch_id: str, updates: Dict[int, dict]) -> None:
+        """Apply ``{item_id: {column: value}}`` to one batch's items, then set the
+        batch's bytes to what its items still hold on disk."""
+        now = datetime.datetime.now().timestamp()
+        with self._session_factory() as session:
+            items = session.query(TrashItemRow).filter(TrashItemRow.batch_id == batch_id).all()
+            for item in items:
+                for column, value in updates.get(item.id, {}).items():
+                    setattr(item, column, value)
+                if item.id in updates:
+                    item.updated_at = now
+            batch = session.query(TrashBatchRow).filter(TrashBatchRow.batch_id == batch_id).one()
+            batch.bytes = sum(item.size or 0 for item in items if item.state in _TRASH_STATES_ON_DISK)
+            session.commit()
+
+    def drop_trash_items(self, batch_id: str, item_ids: Iterable[int]) -> None:
+        """Forget items the trash never ended up holding -- a delete that was rolled
+        back -- and the batch too if that leaves it empty."""
+        ids = list(item_ids)
+        with self._session_factory() as session:
+            if ids:
+                session.query(TrashItemRow).filter(
+                    TrashItemRow.batch_id == batch_id, TrashItemRow.id.in_(ids)
+                ).delete(synchronize_session=False)
+            remaining = session.query(TrashItemRow).filter(TrashItemRow.batch_id == batch_id).all()
+            batch = session.query(TrashBatchRow).filter(TrashBatchRow.batch_id == batch_id).one()
+            if remaining:
+                batch.bytes = sum(item.size or 0 for item in remaining if item.state in _TRASH_STATES_ON_DISK)
+            else:
+                session.delete(batch)
+            session.commit()
+
+    def get_trash_batch(self, batch_id: str, username: Optional[str] = None) -> Optional[dict]:
+        """A batch with its items, or None. Given a username, only that user's."""
+        with self._session_factory() as session:
+            query = session.query(TrashBatchRow).filter(TrashBatchRow.batch_id == batch_id)
+            if username is not None:
+                query = query.filter(TrashBatchRow.user_id == self.get_user(username)['user_id'])
+            batch = query.first()
+            if batch is None:
+                return None
+            items = session.query(TrashItemRow).filter(
+                TrashItemRow.batch_id == batch_id
+            ).order_by(TrashItemRow.id).all()
+            return self._trash_batch_dict(session, batch, items)
+
+    def get_trash_batches(self, username: str) -> list[dict]:
+        """Every batch the user has, newest first, each with its items."""
+        user_id = self.get_user(username)['user_id']
+        with self._session_factory() as session:
+            batches = session.query(TrashBatchRow).filter(
+                TrashBatchRow.user_id == user_id
+            ).order_by(TrashBatchRow.created_at.desc()).all()
+            items_by_batch: Dict[str, list] = {b.batch_id: [] for b in batches}
+            if batches:
+                for item in session.query(TrashItemRow).filter(
+                    TrashItemRow.batch_id.in_(list(items_by_batch))
+                ).order_by(TrashItemRow.id).all():
+                    items_by_batch[item.batch_id].append(item)
+            return [self._trash_batch_dict(session, b, items_by_batch[b.batch_id]) for b in batches]
+
+    def _trash_batch_dict(self, session, batch: TrashBatchRow, items: list) -> dict:
+        username = session.query(UserRow.username).filter(UserRow.user_id == batch.user_id).scalar()
+        result = _row_to_dict(batch)
+        result['username'] = username
+        result['items'] = [_row_to_dict(item) | {'id': item.id} for item in items]
+        return result
+
+    def expired_trash_batch_ids(self, now: float) -> list[str]:
+        """Batches past their expiry that still hold something to purge."""
+        with self._session_factory() as session:
+            rows = session.query(TrashBatchRow.batch_id).join(
+                TrashItemRow, TrashItemRow.batch_id == TrashBatchRow.batch_id
+            ).filter(
+                TrashBatchRow.expires_at <= now,
+                TrashItemRow.state.in_(_TRASH_STATES_PURGEABLE),
+            ).distinct().all()
+        return [row.batch_id for row in rows]
+
+    def stale_pending_trash_batch_ids(self, older_than: float) -> list[str]:
+        """Batches with an item a delete started on and never finished: pymix died
+        between the snapshot and the verify."""
+        with self._session_factory() as session:
+            rows = session.query(TrashItemRow.batch_id).filter(
+                TrashItemRow.state == 'pending', TrashItemRow.updated_at <= older_than,
+            ).distinct().all()
+        return [row.batch_id for row in rows]
+
+    def trash_bytes(self, username: str) -> int:
+        """What the user's trash holds on disk, from the batches: no walk."""
+        user_id = self.get_user(username)['user_id']
+        with self._session_factory() as session:
+            total = session.query(func.coalesce(func.sum(TrashBatchRow.bytes), 0)).filter(
+                TrashBatchRow.user_id == user_id
+            ).scalar()
+        return int(total or 0)
+
+    def trash_usage_by_user(self) -> list[tuple[str, int, Dict[str, int]]]:
+        """(username, bytes held, {kind: items held}) for every user with anything
+        in the trash, for the metrics scrape."""
+        with self._session_factory() as session:
+            names = dict(session.query(UserRow.user_id, UserRow.username).all())
+            held_bytes = dict(session.query(
+                TrashBatchRow.user_id, func.sum(TrashBatchRow.bytes)
+            ).group_by(TrashBatchRow.user_id).all())
+            counts: Dict[str, Dict[str, int]] = {}
+            for user_id, kind, n in session.query(
+                TrashItemRow.user_id, TrashItemRow.kind, func.count(TrashItemRow.id)
+            ).filter(TrashItemRow.state.in_(_TRASH_STATES_ON_DISK)).group_by(
+                TrashItemRow.user_id, TrashItemRow.kind
+            ).all():
+                counts.setdefault(user_id, {})[kind] = n
+        users = set(held_bytes) | set(counts)
+        return sorted(
+            (names.get(u, u), int(held_bytes.get(u) or 0), counts.get(u, {})) for u in users
+        )
+
+    def trash_held_tracks(self, username: str) -> list[dict]:
+        """The media_file ids and paths of every track the user's trash still holds,
+        so the reaper's sweep of missing Navidrome rows leaves them alone."""
+        user_id = self.get_user(username)['user_id']
+        with self._session_factory() as session:
+            rows = session.query(
+                TrashItemRow.media_file_id, TrashItemRow.relative_path, TrashItemRow.subbox_id
+            ).filter(
+                TrashItemRow.user_id == user_id,
+                TrashItemRow.kind == 'track',
+                TrashItemRow.state.in_(_TRASH_STATES_ON_DISK),
+            ).all()
+        return [
+            {'media_file_id': r.media_file_id, 'relative_path': r.relative_path, 'subbox_id': r.subbox_id}
+            for r in rows
+        ]
+
+    def record_trash_reaper_run(
+            self, started_at: float, n_batches_purged: int, n_missing_swept: int, errors: list[str]
+    ) -> None:
+        with self._session_factory() as session:
+            session.add(TrashReaperRunRow(
+                started_at=started_at,
+                finished_at=datetime.datetime.now().timestamp(),
+                n_batches_purged=n_batches_purged,
+                n_missing_swept=n_missing_swept,
+                n_failures=len(errors),
+                errors='\n'.join(errors) if errors else None,
+            ))
+            session.commit()
 
     def save_playlist_paths(self, username: str, playlists: list[dict]):
         """Store display_name -> path_components mappings for a user's playlists."""

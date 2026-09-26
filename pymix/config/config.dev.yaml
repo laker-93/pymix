@@ -113,3 +113,12 @@ wishlist:
   # cookies are needed. Uncomment (and drop a cookies.txt at the path) only to
   # reproduce the prod cookie flow. See config.prod.yaml for details.
   # ytdlp_cookies_path: /subbox/secrets/ytdlp-cookies.txt
+
+trash:
+  # How long a deleted track stays restorable before the reaper destroys it (#200).
+  # 7 days is a placeholder until a week of real deletes is measured (design §15 Q5).
+  retention_s: 604800
+  reaper_interval_s: 3600
+  # A Navidrome row missing this long that no trash batch holds is purged by the
+  # reaper's sweep (PurgeMissing = "never" leaves them otherwise).
+  sweep_after_s: 86400

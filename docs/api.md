@@ -40,7 +40,7 @@ All endpoints live in `pymix/routers/`. Tags in brackets are the OpenAPI tags.
 | POST `/user/login` | Create/return a session for username+password. Sets cookie. |
 | GET `/user/is_valid_token` | Check a signup token is valid (unused tokens gate registration). A pre-flight check for the signup form only — `/user/create` enforces single use itself, and does not trust that this was called. |
 | GET `/user/library_size` | Bytes counted against the quota: the `bytes_used` library counter + staging (`docs/workflows.md` § Storage quota). |
-| GET `/user/storage_check` | Whether an upload of `uploadSizeBytes` fits in quota; accepts Bearer or cookie. |
+| GET `/user/storage_check` | Whether an upload of `uploadSizeBytes` fits in quota; accepts Bearer or cookie. `currentUsageBytes` is the total; `trashBytes` is the part of it that is deleted tracks awaiting the reaper, and `libraryBytes` the rest (#200). |
 | GET `/user/get_by_username`, GET `/user/get_by_session_id` | Operator lookup helpers. **Admin-gated** (`X-Admin-Token`) — they answer about whoever is *named* in the request, not about the caller, so they cannot authenticate anyone. The password is stripped from the response whoever asks. |
 
 ## Maintenance — `routers/maintenance.py`
@@ -180,7 +180,18 @@ a zip that parses to zero crates, and a zip where nothing at all matched.
 | POST `/tracks/presence` | Given `subbox_ids` (≤1000), return `{id: bool}` of which are already in the user's library. Lets the client skip re-uploading. |
 | POST `/track/metadata/update` | Versioned update of a track's cue/loop metadata (`cuedata` validated against `cue_schema`). `source_app` ∈ {serato, rekordbox}, `change_type` ∈ {upload, edit, sync, merge}. |
 | GET `/track/metadata/{track_id}` | Fetch latest cue/loop metadata for a track. |
-| DELETE `/track` | Delete tracks (by `subbox_id` list) from DB tables + remove from beets. |
+| DELETE `/track` | Delete tracks (by `subbox_id` list) into the user's **trash** (#200): each file is moved to `/private-music/_trash/{user}/{batch_id}/` after a snapshot, `beet rm -f`, then the DB rows. The response carries `trash_batch_id` (null when nothing moved). See `services/trash.py`. |
+
+## Trash — `routers/trash.py`
+Every route is `require_uploader`: `demo` has no trash. Design: `design-playlists-and-undo.md` §8, §12 in `subbox-workspace`.
+
+| Method/Path | Purpose |
+|---|---|
+| GET `/trash` | The user's restorable batches, newest first: `batch_id`, `kind`, `label`, `bytes`, `deleted_at`, `expires_at`, `state` (computed from the items), and each item's `subbox_id`/`relative_path`/`size`/`state`. Plus `trash_bytes`. |
+| DELETE `/trash/{batch_id}` | Purge one batch now. 404 if it isn't the caller's. |
+| DELETE `/trash` | Purge everything restorable. |
+
+Purging a track batch unlinks its files (the quota drops by exactly their size), then purges the tracks' missing rows from Navidrome with `DELETE /api/missing` — Navidrome runs `PurgeMissing = "never"`, so nothing else would. Restore is not built yet (#209).
 
 ## Wishlist — `routers/wishlist.py`
 
