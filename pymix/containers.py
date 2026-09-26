@@ -167,6 +167,7 @@ class Container(containers.DeclarativeContainer):
         beets_exec,
         navidrome_native_client,
         retention_s=providers.Callable(trash_setting, config, 'retention_s'),
+        subsonic_orchestrator=subsonic_orchestrator,
     )
 
     automatch_service = providers.Singleton(

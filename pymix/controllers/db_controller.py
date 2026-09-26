@@ -1287,13 +1287,51 @@ class DbController:
         return [row.batch_id for row in rows]
 
     def stale_pending_trash_batch_ids(self, older_than: float) -> list[str]:
-        """Batches with an item a delete started on and never finished: pymix died
-        between the snapshot and the verify."""
+        """Batches with an item a delete or a restore started on and never
+        finished: pymix died partway through."""
         with self._session_factory() as session:
             rows = session.query(TrashItemRow.batch_id).filter(
-                TrashItemRow.state == 'pending', TrashItemRow.updated_at <= older_than,
+                TrashItemRow.state.in_(('pending', 'restoring')), TrashItemRow.updated_at <= older_than,
             ).distinct().all()
         return [row.batch_id for row in rows]
+
+    def restore_track_rows(self, username: str, subbox_id: str, snapshot: dict, beet_id: int) -> None:
+        """
+        Write back the pymix rows a track delete removed (#209), from its trash
+        snapshot: the beets map under the item's new beets id, and the library and
+        original-track-meta rows, which carry its cues, beat grid and upload record.
+        A row that exists already -- the track's metadata was written again while it
+        was in the trash -- is left as it is.
+        """
+        self.add_subbox_beet_map(username, subbox_id, beet_id)
+        user_id = self.get_user(username)['user_id']
+        with self._session_factory() as session:
+            for key, table in (('library', LibraryRow), ('original_track_meta', OriginalTrackMetaRow)):
+                row = snapshot.get(key)
+                if not row:
+                    continue
+                exists = session.query(table).filter(
+                    table.user_id == user_id, table.subbox_id == subbox_id
+                ).first()
+                if exists is None:
+                    columns = {c.key for c in table.__table__.columns} - {'id'}
+                    session.add(table(**{k: v for k, v in row.items() if k in columns}))
+            session.commit()
+
+    def create_restore_job(self, username: str, n_tracks: int) -> str:
+        """A job row for a trash restore (#209). It reuses the import job's
+        columns: n_tracks_to_import is the tracks it means to restore."""
+        user_id = self.get_user(username)['user_id']
+        job_id = uuid.uuid4().hex
+        self._add_user_job(user_id, job_id)
+        with self._session_factory() as session:
+            session.add(JobRow(
+                job_id=job_id, name='restore', n_tracks_to_import=n_tracks,
+                total_n_imported_tracks=0, in_progress=True,
+            ))
+            session.commit()
+        metrics.job_started(job_id, 'restore')
+        return job_id
 
     def trash_bytes(self, username: str) -> int:
         """What the user's trash holds on disk, from the batches: no walk."""

@@ -348,9 +348,16 @@ trash_purged_total = Counter(
     ["kind"],
     registry=REGISTRY,
 )
+trash_restored_total = Counter(
+    "pymix_trash_restored_total",
+    "Items put back from a trash by a restore, by kind.",
+    ["kind"],
+    registry=REGISTRY,
+)
 for _kind in TRASH_KINDS:
     trash_batches_created_total.labels(kind=_kind)
     trash_purged_total.labels(kind=_kind)
+    trash_restored_total.labels(kind=_kind)
 
 trash_missing_swept_total = Counter(
     "pymix_trash_missing_swept_total",
@@ -380,6 +387,11 @@ def trash_batch_created(kind: str) -> None:
 def trash_purged(kind: str, n: int) -> None:
     if kind in TRASH_KINDS:
         trash_purged_total.labels(kind=kind).inc(n)
+
+
+def trash_restored(kind: str, n: int) -> None:
+    if kind in TRASH_KINDS:
+        trash_restored_total.labels(kind=kind).inc(n)
 
 
 def trash_reaper_completed(n_swept: int, n_failures: int) -> None:

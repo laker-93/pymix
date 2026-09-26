@@ -140,3 +140,68 @@ def test_a_delete_that_could_not_start_touches_no_rows(client, db_controller, tr
     assert body['success'] is False and body['trash_batch_id'] is None
     assert 'beets unreachable' in body['results'][0]['reason']
     db_controller.delete_track.assert_not_called()
+
+
+# --- restore (#209) -----------------------------------------------------------------
+
+def test_restoring_a_batch_starts_a_job(client, db_controller, trash_service):
+    from pymix.services.job_outcome import JobOutcome, Verdict
+    db_controller.get_trash_batch.return_value = _batch('b1', ['restorable', 'purged', 'restorable'])
+    db_controller.get_number_of_jobs.return_value = 0
+    db_controller.create_restore_job.return_value = 'job-7'
+    trash_service.restore_tracks = mock.AsyncMock(return_value=JobOutcome(Verdict.SUCCESS))
+
+    body = _as(client, 'dj').post('/trash/b1/restore').json()
+
+    assert body == {'success': True, 'job_id': 'job-7', 'n_tracks': 2}
+    db_controller.create_restore_job.assert_called_once_with('dj', 2)
+    # The job ran (TestClient runs background tasks) and was completed with its outcome.
+    assert trash_service.restore_tracks.await_args.args[:2] == ('b1', 'dj')
+    db_controller.job_completed.assert_called_once()
+    assert db_controller.job_completed.call_args.args[0] == 'job-7'
+
+
+def test_a_restore_that_raises_still_completes_its_job(client, db_controller, trash_service):
+    db_controller.get_trash_batch.return_value = _batch('b1', ['restorable'])
+    db_controller.get_number_of_jobs.return_value = 0
+    db_controller.create_restore_job.return_value = 'job-8'
+    trash_service.restore_tracks = mock.AsyncMock(side_effect=RuntimeError('beets gone'))
+
+    _as(client, 'dj').post('/trash/b1/restore')
+
+    outcome = db_controller.job_completed.call_args.args[1]
+    assert outcome.result is False and 'beets gone' in outcome.reason
+
+
+@pytest.mark.parametrize('batch, jobs, status', [
+    (None, 0, 404),
+    (_batch('b1', ['restorable'], kind='nodes'), 0, 400),
+    (_batch('b1', ['purged', 'restored']), 0, 409),
+    (_batch('b1', ['restorable']), 1, 409),
+])
+def test_a_restore_that_cannot_start(client, db_controller, trash_service, batch, jobs, status):
+    db_controller.get_trash_batch.return_value = batch
+    db_controller.get_number_of_jobs.return_value = jobs
+
+    assert _as(client, 'dj').post('/trash/b1/restore').status_code == status
+    db_controller.create_restore_job.assert_not_called()
+
+
+def test_restore_progress_reports_the_job(client, db_controller):
+    db_controller.get_job_by_id.return_value = {
+        'name': 'restore', 'in_progress': False, 'result': True, 'reason': None,
+        'warnings': 'Song: came back as a new track', 'phase': 'complete',
+        'phase_n_processed': 1, 'phase_n_total': 1, 'phases': [{'phase': 'checking'}],
+    }
+
+    body = _as(client, 'dj').get('/trash/restore/progress', params={'job_id': 'j'}).json()
+
+    assert body['result'] is True and body['warnings'] == 'Song: came back as a new track'
+    assert body['phases'] == [{'phase': 'checking'}]
+    db_controller.get_job_by_id.assert_called_once_with('dj', 'j')
+
+
+def test_restore_progress_is_only_for_restore_jobs(client, db_controller):
+    db_controller.get_job_by_id.return_value = {'name': 'import', 'in_progress': True}
+
+    assert _as(client, 'dj').get('/trash/restore/progress', params={'job_id': 'j'}).status_code == 404

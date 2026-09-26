@@ -190,8 +190,19 @@ Every route is `require_uploader`: `demo` has no trash. Design: `design-playlist
 | GET `/trash` | The user's restorable batches, newest first: `batch_id`, `kind`, `label`, `bytes`, `deleted_at`, `expires_at`, `state` (computed from the items), and each item's `subbox_id`/`relative_path`/`size`/`state`. Plus `trash_bytes`. |
 | DELETE `/trash/{batch_id}` | Purge one batch now. 404 if it isn't the caller's. |
 | DELETE `/trash` | Purge everything restorable. |
+| POST `/trash/{batch_id}/restore` | Restore a `track` batch (#209). Starts a job, since it waits on a library scan: `{job_id, n_tracks}`. 409 while another job runs, or when nothing in the batch is restorable; 400 for other kinds (#207, #208). |
+| GET `/trash/restore/progress?job_id=` | A restore job's `in_progress`, `result`, `reason`, `warnings`, `phase` and `phases` (`checking`, `restoring_files`). |
 
-Purging a track batch unlinks its files (the quota drops by exactly their size), then purges the tracks' missing rows from Navidrome with `DELETE /api/missing` — Navidrome runs `PurgeMissing = "never"`, so nothing else would. Restore is not built yet (#209).
+Purging a track batch unlinks its files (the quota drops by exactly their size), then purges the tracks' missing rows from Navidrome with `DELETE /api/missing` — Navidrome runs `PurgeMissing = "never"`, so nothing else would.
+
+Restoring one (`TrashService.restore_tracks`):
+- refuses a track already back in beets (uploaded again meanwhile);
+- moves each file back to its exact path and checks its sha256;
+- re-adds it to beets **in place** with a plugin-free script (`utils/beets_items.py`) that only reads the file and writes back every field the item and its album had, rejoining the item's own album by id or recreating it;
+- writes back the pymix rows, which brings back cues and beat grids;
+- scans, and checks each track has its old Navidrome `media_file.id`.
+
+With that id come its star, rating, play count and playlist entries. A track that came back under a new id is named in `warnings` with what it lost. `scripts/trash_restore_roundtrip.py` checks every row of the design's §13 contract against the local dev stack.
 
 ## Wishlist — `routers/wishlist.py`
 
