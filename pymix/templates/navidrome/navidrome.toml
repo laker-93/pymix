@@ -1,3 +1,11 @@
 Tags.subboxid.Aliases = ["subbox_id", "subboxid"]
 Tags.subboxid.Split = ["; ", " / "]
-Scanner.PurgeMissing = "always"
+# "never": a file that leaves the library keeps its media_file row, marked missing,
+# instead of having it purged within seconds. When the file comes back at the same
+# path, the scanner matches it to that row, so it keeps its id, star, rating, play
+# count and every playlist entry at its position. That is what makes a track delete
+# undoable (subbox-workspace docs/design-playlists-and-undo.md §7; measured in #210).
+# Missing rows are hidden from every Subsonic list and from the client's native
+# calls, which send missing=false. Nothing purges them automatically any more: that
+# is pymix's job, through DELETE /api/missing (#200's reaper).
+Scanner.PurgeMissing = "never"
