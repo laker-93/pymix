@@ -29,7 +29,7 @@ class BaseAPIClient:
 
         The class, not `self._host`: the host carries a per-user port, so labelling by
         it would mint a series per user for information the label set already has
-        elsewhere. Bounded at the number of client classes, which is two.
+        elsewhere. Bounded at the number of client classes, which is three.
         """
         return type(self).__name__.replace("Client", "").lower() or "unknown"
 
@@ -98,3 +98,14 @@ class BaseAPIClient:
                 return result
         finally:
             metrics.observe_dependency_request(self._metrics_name, "POST", started_at, ok)
+
+    async def delete(self, url: str, headers=None):
+        started_at = time.monotonic()
+        ok = False
+        try:
+            async with self._session.delete(url, headers=headers) as resp:
+                result = await self._get_response(resp)
+                ok = True
+                return result
+        finally:
+            metrics.observe_dependency_request(self._metrics_name, "DELETE", started_at, ok)
