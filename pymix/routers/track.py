@@ -8,8 +8,8 @@ from pydantic import BaseModel
 
 from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
-from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.routers.auth import require_username, require_uploader
+from pymix.services.trash import TrashService
 
 
 class TrackPresenceRequest(BaseModel):
@@ -216,81 +216,48 @@ async def delete_track(
         req: DeleteTrackRequest = Body(...),
         user: dict = Depends(require_uploader),
         db_controller: DbController = Depends(Provide[Container.db_controller]),
-        rekordbox_xml_controller: RekordboxXMLController = Depends(Provide[Container.rekordbox_xml_controller]),
+        trash_service: TrashService = Depends(Provide[Container.trash_service]),
 ) -> Dict[str, Any]:
     # Deletion is a library write, not just an upload/import one, but it's gated by
     # the same require_uploader dependency: `demo` may browse demoadmin's shared
     # library (via require_reader) but must never be able to remove tracks from it.
     # Only demoadmin (or a real account deleting its own tracks) reaches this point.
     username = user["username"]
-    # Batched, reorder-safe delete. The dangerous state (laker-93/pymix#30) was
-    # committing the DB rows *before* the file/beets removal, so a failed beets
-    # removal orphaned the track — file + Navidrome entry left behind with no pymix
-    # mapping to reconcile from. Here we remove from beets first, verify the actual
-    # end state, and only then delete the DB rows for ids that are confirmed gone.
-    # Every beets step is a single OR-query, so the whole request is ~2-3 docker
-    # execs regardless of how many ids were selected (was one `beet rm` per id).
+    # A delete moves the tracks into the user's trash (#200): the file is kept, at
+    # /private-music/_trash/{user}/{batch}/, until the reaper purges it, so a
+    # mistaken delete can be undone. The ordering that fixed laker-93/pymix#30 holds:
+    # the pymix rows are deleted only for ids beets is verified to no longer have,
+    # so a failed removal never orphans a track. Every beets step is a single
+    # OR-query, so a request is a handful of docker execs however many ids it names.
     ids = list(dict.fromkeys(req.ids))  # de-dup, preserve order
     if not ids:
-        return {"username": username, "success": True, "results": []}
+        return {"username": username, "success": True, "results": [], "trash_batch_id": None}
 
-    removal_reason = ""
-
-    # 1️⃣ Which ids does beets actually have? Ids already absent are treated as
-    #    "already in the desired end state" — an idempotent success, not a failure
-    #    (this is the stale/desync case that used to false-report a failure).
     try:
-        present = await rekordbox_xml_controller.get_present_subbox_ids(
-            username=username, subbox_ids=ids, public=False
-        )
+        outcome = await trash_service.trash_tracks(username, ids)
     except Exception as ex:
-        # Can't even determine beets state — refuse to touch the DB so nothing is
-        # orphaned. Fail the whole batch; the client shows an error and can retry.
-        reason = f"Error querying beets state for user {username}: {repr(ex)}"
+        # beets could not be read, or the snapshot could not be taken. Nothing has
+        # been touched; fail the whole request and let the client retry.
+        reason = f"Error deleting tracks for user {username}: {repr(ex)}"
         logger.error(reason, exc_info=True)
         return {
             "username": username,
             "success": False,
             "results": [{"subbox_id": i, "reason": reason, "success": False} for i in ids],
+            "trash_batch_id": None,
         }
 
-    # 2️⃣ Remove the present ids from beets + disk in one batched command.
-    if present:
-        try:
-            await rekordbox_xml_controller.remove_tracks(
-                username=username, subbox_ids=sorted(present), public=False
-            )
-        except Exception as ex:
-            # Don't trust the batch's success/failure — a batched rm can partially
-            # succeed. Record the reason and fall through to verify the real state.
-            removal_reason = f"Error removing tracks for user {username}: {repr(ex)}"
-            logger.error(removal_reason, exc_info=True)
-
-    # 3️⃣ Verify: re-query beets. Anything still present was NOT removed.
-    try:
-        still_present = await rekordbox_xml_controller.get_present_subbox_ids(
-            username=username, subbox_ids=sorted(present), public=False
-        )
-    except Exception as ex:
-        # Verification failed — be conservative and leave every present id's DB rows
-        # intact (treat them all as not-removed) so nothing is orphaned.
-        logger.error(
-            f"Error verifying beets removal for user {username}: {repr(ex)}", exc_info=True
-        )
-        still_present = set(present)
-
-    # 4️⃣ An id is "gone" if beets no longer has it (absent-at-start OR just removed).
-    #    Delete DB rows only for those; leave rows for still-present ids so a retry
-    #    can finish the job (no orphan).
+    # An id is "gone" if beets no longer has it: absent to begin with (an idempotent
+    # success, not the stale-desync failure it used to report) or just trashed.
+    # Delete DB rows only for those; a still-present id keeps its rows, so a retry
+    # can finish the job.
     all_success = True
     results = []
     for subbox_id in ids:
-        if subbox_id in still_present:
+        if subbox_id in outcome.not_removed:
             all_success = False
-            reason = removal_reason or (
-                f"Track {subbox_id} still present in beets after removal for user {username}"
-            )
-            logger.warning(reason)
+            reason = outcome.not_removed[subbox_id]
+            logger.warning(f"{username}: {reason}")
             results.append({"subbox_id": subbox_id, "reason": reason, "success": False})
             continue
         try:
@@ -305,5 +272,7 @@ async def delete_track(
     return {
         "username": username,
         "success": all_success,
-        "results": results
+        "results": results,
+        # Additive: what the batch is called in GET /trash. None when nothing moved.
+        "trash_batch_id": outcome.batch_id,
     }

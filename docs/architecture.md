@@ -43,7 +43,7 @@ list AND add its module to the `wire(...)` list in `create_container`.
 
 ## Lifespan / background loops
 
-`registration.lifespan` starts **six** long-lived anyio tasks in one task group. The
+`registration.lifespan` starts **eight** long-lived anyio tasks in one task group. The
 first two are connected by a memory object stream and form the watch-dir import path:
 
 - `poll_watchdir` (in `handlers/filebrowser_file_handler.py`) — watches
@@ -54,8 +54,9 @@ first two are connected by a memory object stream and form the watch-dir import 
   wrapped in a job row.
 
 That is the "drop files in a folder and they auto-import" path, distinct from the
-explicit `/rekordbox/import` endpoint. The other four poll on their own intervals
-(configured under `google_sheets` / `wishlist` / `memory_watch` in `config.*.yaml`):
+explicit `/rekordbox/import` endpoint. The other six poll on their own intervals
+(configured under `google_sheets` / `wishlist` / `library_usage` / `trash` / `memory_watch`
+in `config.*.yaml`):
 
 - `sheet_sync_loop` (`services/sheet_sync_service.py`) — pulls wishlist rows from each
   user's attached Google Sheet.
@@ -63,6 +64,15 @@ explicit `/rekordbox/import` endpoint. The other four poll on their own interval
   wishlist items to `available` once the track shows up in the user's library.
 - `wishlist_resolve_loop` (`services/wishlist_resolve_service.py`) — resolves pending
   free-text items to a canonical MusicBrainz match before anything searches for them.
+- `library_usage_reconcile_loop` (`handlers/library_usage_reconcile_handler.py`) — daily,
+  re-walks each user's library **and trash** and corrects the quota's `bytes_used`
+  counter (#183, #200).
+- `trash_reaper_loop` (`handlers/trash_reaper_handler.py`) — hourly: settles deletes a
+  crash left `pending`, purges trash batches past `trash.retention_s` through
+  `TrashService.purge_batch`, then sweeps each user's Navidrome for rows missing longer
+  than `trash.sweep_after_s` that no batch holds (with `PurgeMissing = "never"`, files that
+  leave by other paths, like `beet duplicates -d`, would otherwise leave rows forever).
+  Every pass writes a `trash_reaper_run_table` row (#200).
 - `mem_watch_loop` (`handlers/mem_watch_handler.py`) — logs one RSS/allocator/cgroup
   sample per interval, escalating to WARNING past `warn_fraction` of the container's
   memory limit. It exists because the kernel SIGKILLs at that limit with no warning and
