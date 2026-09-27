@@ -42,8 +42,12 @@ class SeratoController:
         wishlist_reconcile_service: WishlistReconcileService,
         serving_music_path_base: str,
         beets_exec: BeetsExec,
+        playlist_tree_controller=None,
     ):
         self._subsonic_orchestrator = subsonic_orchestrator
+        # Writes an import's playlists and, for a `live` user, their tree (#202).
+        # Without it, playlists are written as for a `none` user.
+        self._playlist_tree = playlist_tree_controller
         self._serato_crate_orchestrator = serato_crate_orchestrator
         self._serato_backup_file_handler = serato_backup_file_handler
         self._file_browser_file_handler = file_browser_file_handler
@@ -264,9 +268,13 @@ class SeratoController:
         # the track in the playlist
         await self._subsonic_orchestrator.update_tracks_with_subid(user, subbox_playlists)
         # 8. create the playlists, or update in place the ones the user already has
-        report.playlists = await self._subsonic_orchestrator.create_playlists(
-            user, subbox_playlists, scan_finished=scan_finished
-        )
+        if self._playlist_tree is not None:
+            report.playlists = await self._playlist_tree.import_playlists(
+                user, subbox_playlists, origin='serato', scan_finished=scan_finished)
+        else:
+            report.playlists = await self._subsonic_orchestrator.create_playlists(
+                user, subbox_playlists, scan_finished=scan_finished
+            )
         return subbox_playlists, report
 
     @staticmethod

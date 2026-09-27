@@ -104,8 +104,13 @@ class RekordboxXMLController:
             local_user_music_stem: str,
             serving_music_path_base: str,
             beets_exec: BeetsExec,
+            playlist_tree_controller=None,
     ):
         self._subsonic_orchestrator = subsonic_orchestrator
+        # Writes an import's playlists and, for a `live` user, their tree (#202).
+        # Typed loosely: the tree controller's module imports this one's neighbours.
+        # Without it, playlists are written as for a `none` user.
+        self._playlist_tree = playlist_tree_controller
         self._rekordbox_xml_orchestrator = rekordbox_xml_orchestrator
         self._rb_backup_file_handler = rb_backup_file_handler
         self._file_browser_file_handler = file_browser_file_handler
@@ -1021,11 +1026,14 @@ class RekordboxXMLController:
             logger.info("No playlists selected from XML for import.")
             return None
 
-        # Persist playlist path_components in DB for lossless export reconstruction
-        self._db_controller.save_playlist_paths(
-            user['username'],
-            [{'display_name': p.name, 'path_components': p.path_components} for p in subbox_playlists if p.path_components],
-        )
+        # Persist playlist path_components in DB for lossless export reconstruction.
+        # Only for a `none` user, whose migration to the tree reads them (#205); a
+        # `live` user's paths are in their nodes' source_path (#202).
+        if self._db_controller.playlist_tree_state(user['username']) != 'live':
+            self._db_controller.save_playlist_paths(
+                user['username'],
+                [{'display_name': p.name, 'path_components': p.path_components} for p in subbox_playlists if p.path_components],
+            )
 
         # 5. given the subbox info, create the playlists in navidrome using subsonic api
         # 6. get the tracks from navidrome by using the 'query' api for each track.
@@ -1033,6 +1041,9 @@ class RekordboxXMLController:
         # the track in the playlist
         res = await self._subsonic_orchestrator.update_tracks_with_subid(user, subbox_playlists=subbox_playlists, matcher=matcher)
         # 8. create the playlists, or update in place the ones the user already has
+        if self._playlist_tree is not None:
+            return await self._playlist_tree.import_playlists(
+                user, subbox_playlists, origin='rekordbox', scan_finished=scan_finished)
         return await self._subsonic_orchestrator.create_playlists(user, subbox_playlists, scan_finished=scan_finished)
 
     async def get_healthcheck(self) -> dict:

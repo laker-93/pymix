@@ -2,7 +2,7 @@
 The per-user playlist tree lock (#201, design §4.2).
 
 Two things write a Navidrome playlist and then, separately, the node it belongs to:
-an import and (#204) POST /playlists. A tree read that reconciled in between would
+an import and (#206) POST /playlists. A tree read that reconciled in between would
 adopt the new playlist at the root, and the writer's own node write would then hit
 the unique (user_id, navidrome_playlist_id). So every Navidrome playlist create, the
 node write that goes with it, every node move/delete/restore, and reconciliation

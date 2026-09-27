@@ -177,6 +177,8 @@ class Container(containers.DeclarativeContainer):
         config.local_user_music_stem,
         config.containers.subsonic.serving_music_path_base,
         beets_exec,
+        # writes an import's playlists into a `live` user's tree (#202)
+        playlist_tree_controller=playlist_tree_controller,
     )
 
     trash_service = providers.Singleton(
@@ -218,6 +220,7 @@ class Container(containers.DeclarativeContainer):
         wishlist_reconcile_service,
         config.containers.subsonic.serving_music_path_base,
         beets_exec,
+        playlist_tree_controller=playlist_tree_controller,
     )
 
     beets_client = providers.Singleton(

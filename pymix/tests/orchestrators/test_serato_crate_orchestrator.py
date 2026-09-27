@@ -14,6 +14,7 @@ as a stack trace rather than as "we couldn't match these tracks".
 """
 import shutil
 import zipfile
+from unittest import mock
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -269,6 +270,29 @@ def test_nesting_survives_the_round_trip_into_path_components(orchestrator, tmp_
 
     assert playlists[0].path_components == ['Sets', '2026', 'Warmup']
     assert playlists[0].name == 'Sets / 2026 / Warmup'
+
+
+def test_sibling_crates_are_walked_by_name_not_directory_order(orchestrator, tmp_path, library):
+    """A `live` user's tree takes its sibling order from this walk (#202), and the
+    crates come out of the zip in whatever order the filesystem lists them."""
+    add_library_track(library, 'Artist/Album/deep.mp3')
+    beets_returns(orchestrator, {'sid-1': 'Artist/Album/deep.mp3'})
+
+    def crate(name, *children):
+        c = Crate(name)
+        c.add_track(Track.from_path('/Users/dj/Music/deep.mp3'))
+        for child in children:
+            c.children[child.name] = child
+        return c
+    listed = {'techno': crate('techno'), 'House': crate('House', crate('warmup'), crate('Deep'))}
+    zip_path = write_crate_zip(tmp_path, crate('unused'))
+
+    with mock.patch.object(orchestrator._crate_builder, 'parse_crates_from_root_path', return_value=listed):
+        playlists, _ = orchestrator.get_subbox_playlists_from_crates(
+            USER, zip_path, manifest(('/Users/dj/Music/deep.mp3', 'sid-1'))
+        )
+
+    assert [p.name for p in playlists] == ['House', 'House / Deep', 'House / warmup', 'techno']
 
 
 def test_parsing_leaves_no_crates_beside_the_zip(orchestrator, tmp_path, library):

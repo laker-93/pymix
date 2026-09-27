@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from typing import List, Set, AsyncIterator, Optional
+from typing import AsyncIterator, Callable, List, Optional, Set
 
 from pymix.clients.subsonic_client import SubsonicClient
 from pymix.model.playlist_write_report import PlaylistSnapshot, PlaylistWriteReport
@@ -218,41 +218,69 @@ class SubsonicOrchestrator:
             # sibling duplicates) is created beside it, not written over the first.
             match = owned.pop(playlist.name, None)
             if match is None:
-                # Under the tree lock, so a tree read can't adopt it mid-write (#201).
-                async with self._tree_locks.hold(username):
-                    created = await self._subsonic_client.create_playlist(user, playlist.name, playlist.tracks)
-                if created:
-                    report.created.append(playlist.name)
-                else:
-                    report.failed.append(playlist.name)
-                continue
-            n_after = sum(1 for t in playlist.tracks or [] if t.sub_track_id is not None)
-            if not scan_finished:
-                report.held_back.append(playlist.name)
-            elif n_after == 0:
-                report.unmatched.append(playlist.name)
+                await self.create_playlist(user, playlist, report)
             else:
-                snapshot = await self._snapshot(user, match)
-                async with self._tree_locks.hold(username):
-                    replaced = await self._subsonic_client.replace_playlist(user, match.subsonic_id, playlist.tracks)
-                if replaced:
-                    report.updated.append(playlist.name)
-                    if match.n_of_songs is not None and n_after < match.n_of_songs:
-                        report.shortened.append((playlist.name, match.n_of_songs, n_after))
-                    if snapshot is None:
-                        report.not_undoable.append(playlist.name)
-                    else:
-                        snapshot.after = await self._entry_ids(user, match.subsonic_id)
-                        report.replaced.append(snapshot)
-                else:
-                    report.failed.append(playlist.name)
+                await self.update_playlist(user, playlist, match, report, scan_finished=scan_finished)
+        self.log_report(username, report)
+        return report
 
+    async def create_playlist(
+        self, user: dict, playlist: SubBoxPlaylist, report: PlaylistWriteReport, *,
+        name: Optional[str] = None, then: Optional[Callable[[str], None]] = None,
+    ) -> Optional[str]:
+        """
+        Create one of an import's playlists in Navidrome, called ``name`` (its joined
+        name if None), and record it in ``report`` under ``playlist.name``.
+
+        Under the tree lock, so a tree read can't adopt it mid-write (#201). ``then``
+        is called with the new id while the lock is still held: the tree's node write
+        (#202), so the playlist is never visible without its node.
+        """
+        async with self._tree_locks.hold(user['username']):
+            playlist_id = await self._subsonic_client.create_playlist(user, name or playlist.name, playlist.tracks)
+            if playlist_id and then is not None:
+                then(playlist_id)
+        if playlist_id:
+            report.created.append(playlist.name)
+        else:
+            report.failed.append(playlist.name)
+        return playlist_id
+
+    async def update_playlist(
+        self, user: dict, playlist: SubBoxPlaylist, match: SubBoxPlaylist, report: PlaylistWriteReport, *,
+        scan_finished: bool,
+    ) -> None:
+        """Replace the entries of ``match``, the user's playlist an incoming one
+        matched, in place (#203), keeping a snapshot for the undo (#208)."""
+        n_after = sum(1 for t in playlist.tracks or [] if t.sub_track_id is not None)
+        if not scan_finished:
+            report.held_back.append(playlist.name)
+            return
+        if n_after == 0:
+            report.unmatched.append(playlist.name)
+            return
+        snapshot = await self._snapshot(user, match)
+        async with self._tree_locks.hold(user['username']):
+            replaced = await self._subsonic_client.replace_playlist(user, match.subsonic_id, playlist.tracks)
+        if not replaced:
+            report.failed.append(playlist.name)
+            return
+        report.updated.append(playlist.name)
+        if match.n_of_songs is not None and n_after < match.n_of_songs:
+            report.shortened.append((playlist.name, match.n_of_songs, n_after))
+        if snapshot is None:
+            report.not_undoable.append(playlist.name)
+        else:
+            snapshot.after = await self._entry_ids(user, match.subsonic_id)
+            report.replaced.append(snapshot)
+
+    @staticmethod
+    def log_report(username: str, report: PlaylistWriteReport) -> None:
         logger.info(
             f"playlists for {username}: {len(report.created)} created, {len(report.updated)} updated in place, "
             f"{len(report.held_back)} held back (scan unfinished), {len(report.unmatched)} left (no tracks matched), "
             f"{len(report.failed)} failed"
         )
-        return report
 
     async def _snapshot(self, user: dict, playlist: SubBoxPlaylist) -> Optional[PlaylistSnapshot]:
         """The playlist's entries as they are, for the undo, or None if they can't be

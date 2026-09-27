@@ -27,6 +27,13 @@ from pymix.model.subboxtrack import SubBoxTrack
 logger = logging.getLogger(__name__)
 
 
+def _by_name(crates) -> List[Crate]:
+    """Sibling crates in the order Serato lists them by default: by name, ignoring
+    case. They are parsed in directory order, which the filesystem decides, and a
+    `live` user's tree takes its sibling order from the order they're walked (#202)."""
+    return sorted(crates, key=lambda crate: (crate.name.casefold(), crate.name))
+
+
 class SeratoCrateOrchestrator:
     # Which formats the server can read Serato's cues out of is pyserato's
     # answer, not a list kept here. It reads MP3 and FLAC and raises
@@ -267,7 +274,7 @@ class SeratoCrateOrchestrator:
                     )
                 )
         if crate.children:
-            for child in crate.children.values():
+            for child in _by_name(crate.children.values()):
                 self._build_subbox_playlists(user, child, components, subbox_playlists, identities, report)
 
     def get_subbox_playlists_from_crates(
@@ -310,7 +317,7 @@ class SeratoCrateOrchestrator:
                 f'the root of the zip, not inside a folder.'
             )
 
-        for top_level_crate in crates.values():
+        for top_level_crate in _by_name(crates.values()):
             self._build_subbox_playlists(user, top_level_crate, [], subbox_playlists, by_path, report)
 
         report.playlists_built = len(subbox_playlists)
