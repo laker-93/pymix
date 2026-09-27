@@ -379,6 +379,20 @@ trash_reaper_last_completed_timestamp_seconds = Gauge(
 )
 
 
+playlist_nodes_orphaned_total = Counter(
+    "pymix_playlist_nodes_orphaned_total",
+    "Playlist tree nodes whose Navidrome playlist was deleted outside pymix (an old "
+    "client, a direct Subsonic call), found by a tree read's reconciliation (#201). "
+    "A live one is dropped; a trashed one can no longer be restored. Once every client "
+    "deletes through pymix, this should stay flat.",
+    registry=REGISTRY,
+)
+
+
+def playlist_nodes_orphaned(n: int) -> None:
+    playlist_nodes_orphaned_total.inc(n)
+
+
 def trash_batch_created(kind: str) -> None:
     if kind in TRASH_KINDS:
         trash_batches_created_total.labels(kind=kind).inc()

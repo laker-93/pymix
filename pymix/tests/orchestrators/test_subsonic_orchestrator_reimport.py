@@ -271,7 +271,7 @@ async def test_a_long_playlist_is_written_in_chunks_in_order(subsonic, monkeypat
     # Navidrome refuses a request with more than 10,000 query parameters.
     monkeypatch.setattr('pymix.clients.subsonic_client.PLAYLIST_WRITE_CHUNK', 2)
 
-    assert await subsonic.create_playlist(USER, 'Big', _songs(5)) is True
+    assert await subsonic.create_playlist(USER, 'Big', _songs(5)) == 'pl-9'
 
     assert _calls(subsonic.get) == [
         ('createPlaylist.view', [('name', 'Big'), ('songId', 's0'), ('songId', 's1')]),

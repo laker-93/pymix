@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Boolean, Float, BigInteger, JSON, Enum
+from sqlalchemy import Column, String, Integer, Boolean, Float, BigInteger, JSON, Enum, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import declarative_base
 
 from pymix.model.invite_request import InviteRequestStatus
@@ -20,6 +20,10 @@ class UserRow(Base):
     # Bytes in the user's library, maintained by imports and deletes (#183).
     # NULL until first measured; see migration 021.
     bytes_used = Column(BigInteger, nullable=True)
+    # Whether the user has a playlist tree (#201, design §4.4): 'none' or 'live'.
+    # Only the #205 migration and its rollback change it; nothing is inferred from
+    # whether nodes exist. While 'none', nothing writes nodes for the user.
+    playlist_tree_state = Column(String, nullable=False, default='none', server_default='none')
     wishlist_sheet_id = Column(String, nullable=True)
     wishlist_sheet_status = Column(String, nullable=True)
     wishlist_sheet_error = Column(String, nullable=True)
@@ -307,3 +311,45 @@ class TrashReaperRunRow(Base):
     n_failures = Column(Integer, nullable=False, default=0)
     # One line per failure, "<user>: <what>". Null on a clean pass.
     errors = Column(String, nullable=True)
+
+
+class PlaylistNodeRow(Base):
+    """
+    A playlist or folder in a user's playlist tree (#201, design §1, §4.1): an
+    identity pymix mints and never reuses, as `subbox_id` is for a track.
+
+    A playlist's **name is not here**: it lives only in Navidrome, and a rename is
+    still the client's own call to Navidrome. A folder has no Navidrome row, so its
+    name is. `pymix.controllers.playlist_tree_controller` holds the invariants.
+    """
+    __tablename__ = 'playlist_node_table'
+    __table_args__ = (UniqueConstraint('user_id', 'navidrome_playlist_id'),)
+    node_id = Column(String, primary_key=True)
+    user_id = Column(String, nullable=False, index=True)
+    # Null at the root.
+    parent_id = Column(String, ForeignKey('playlist_node_table.node_id'), nullable=True)
+    # Dense 0..n-1 among the parent's live children. A trashed node keeps its old
+    # position, so a restore can put it back there.
+    position = Column(Integer, nullable=False)
+    # 'folder' | 'playlist'. A playlist may have children (a Serato crate with its
+    # own tracks and sub-crates).
+    kind = Column(String, nullable=False)
+    # Folders only.
+    name = Column(String, nullable=True)
+    # Playlists only, and kept while trashed: a trashed playlist is hidden, not
+    # deleted, until its batch is purged.
+    navidrome_playlist_id = Column(String, nullable=True)
+    # The node's full path in Rekordbox/Serato at import, e.g. ["House", "Deep"].
+    # Written once; a move or rename in subbox never changes it. Null for a node made
+    # in subbox. What a re-import matches on (#202). A JSON list rather than a
+    # Postgres text[], so the SQLite the tests run on holds it too.
+    source_path = Column(JSON, nullable=True)
+    # 'rekordbox' | 'serato' | 'subbox' | 'migrated'.
+    origin = Column(String, nullable=False)
+    # The joined name the playlist had before #205 migrated it. Dropped with
+    # playlist_path_table.
+    migrated_from_name = Column(String, nullable=True)
+    # Non-null: soft-deleted, i.e. hidden (#207).
+    trash_batch_id = Column(String, ForeignKey('trash_batch_table.batch_id'), nullable=True)
+    created_at = Column(Float, nullable=False)
+    updated_at = Column(Float, nullable=False)

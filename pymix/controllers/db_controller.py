@@ -14,7 +14,7 @@ from pymix.model.db_tables import (
     UserRow, SessionRow, SubboxBeetsMapRow, LibraryRow,
     MetaHistoryRow, UserJobRow, JobRow, OriginalTrackMetaRow, UserTokenRow,
     PlaylistPathRow, WishlistRow, InviteRequestRow, UploadAttemptRow,
-    TrashBatchRow, TrashItemRow, TrashReaperRunRow,
+    TrashBatchRow, TrashItemRow, TrashReaperRunRow, PlaylistNodeRow,
 )
 from pymix.model.invite_request import DJ_SOFTWARE_OPTIONS, INVITE_REQUEST_STATUSES, InviteRequestStatus
 from pymix.model.original_track_meta import OriginalTracks, UploadAttempt
@@ -851,6 +851,34 @@ class DbController:
             results = session.query(UserRow).filter(UserRow.username == username).all()
             assert len(results) == 1, f'found {len(results)} users with username {username}'
             return _row_to_dict(results[0])
+
+    def playlist_tree_state(self, username: str) -> str:
+        """'none' or 'live' (#201, design §4.4)."""
+        with self._session_factory() as session:
+            return session.query(UserRow.playlist_tree_state).filter(UserRow.username == username).scalar() or 'none'
+
+    def set_playlist_tree_state(self, username: str, state: str) -> None:
+        """Only #205's migration pass and its rollback call this."""
+        assert state in ('none', 'live'), state
+        with self._session_factory() as session:
+            session.query(UserRow).filter(UserRow.username == username).update({'playlist_tree_state': state})
+            session.commit()
+
+    def hidden_playlist_ids(self, username: str) -> set:
+        """
+        The Navidrome ids of the user's trashed playlists (#207): hidden, not
+        deleted, so every pymix listing leaves them out. Empty for a 'none' user,
+        who has no nodes.
+        """
+        with self._session_factory() as session:
+            rows = session.query(PlaylistNodeRow.navidrome_playlist_id).join(
+                UserRow, UserRow.user_id == PlaylistNodeRow.user_id,
+            ).filter(
+                UserRow.username == username,
+                PlaylistNodeRow.trash_batch_id.isnot(None),
+                PlaylistNodeRow.navidrome_playlist_id.isnot(None),
+            ).all()
+        return {row.navidrome_playlist_id for row in rows}
 
     def update_user_wishlist_sheet_id(self, username: str, sheet_id: str) -> dict:
         with self._session_factory() as session:
