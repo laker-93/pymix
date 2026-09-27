@@ -323,6 +323,39 @@ class SubsonicOrchestrator:
         POST /playlists (#206), holds the tree lock across this and the node write."""
         return await self._subsonic_client.create_playlist_from_ids(user, name, song_ids)
 
+    async def entry_counts(self, user: dict, playlist_ids: List[str]) -> dict:
+        """
+        {playlist id: how many entries it has whose track still exists}, for a
+        playlist delete to record and its restore to compare (#207, §8.2). None for
+        a playlist that couldn't be read.
+
+        Counted through the native API, which lists an entry whose track is in the
+        trash and drops one whose track was purged. getPlaylists' songCount can't do
+        this: Navidrome stores it and refreshes it only when the playlist itself is
+        written, so a purged track never lowers it.
+        """
+        if self._native is None or not playlist_ids:
+            return {playlist_id: None for playlist_id in playlist_ids}
+        semaphore = asyncio.Semaphore(SUBSONIC_PLAYLIST_FETCH_CONCURRENCY)
+
+        async def count(playlist_id: str) -> Optional[int]:
+            async with semaphore:
+                try:
+                    return len(await self._native.playlist_tracks(user, playlist_id))
+                except Exception:
+                    logger.warning(f"could not count the entries of playlist {playlist_id}", exc_info=True)
+                    return None
+        return dict(zip(playlist_ids, await asyncio.gather(*(count(p) for p in playlist_ids))))
+
+    async def remove_playlist(self, user: dict, playlist_id: str) -> None:
+        """deletePlaylist, for the purge of a playlist in the trash (#207). Unlocked:
+        the caller holds the tree lock. The answer isn't trusted either way ("not
+        found" counts as done); the caller lists the playlists again to see."""
+        try:
+            await self._subsonic_client.delete_playlist(user, playlist_id)
+        except Exception:
+            logger.warning(f"deletePlaylist {playlist_id} for {user['username']} failed", exc_info=True)
+
     async def set_playlist_entries(self, user: dict, playlist_id: str, song_ids: List[str]) -> bool:
         return await self._subsonic_client.set_playlist_entries(user, playlist_id, song_ids)
 

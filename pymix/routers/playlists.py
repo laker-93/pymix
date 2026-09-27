@@ -2,11 +2,11 @@
 The playlist tree's routes (#201, #206; design-playlists-and-undo §4, §10).
 
 These are the structural verbs: read the tree, create a folder, create a playlist
-inside one, and rename (folders), move and reorder a node. The content verbs (rename
-a playlist, add, reorder or remove its tracks) stay client -> Navidrome: the tree is
-keyed by Navidrome id, not by name, so they don't disturb it. Delete and restore
-arrive with #207. The migration into the tree is an admin route (#205,
-`routers/admin.py`).
+inside one, rename (folders), move and reorder a node, and delete (#207). The
+content verbs (rename a playlist, add, reorder or remove its tracks) stay client ->
+Navidrome: the tree is keyed by Navidrome id, not by name, so they don't disturb it.
+A delete's restore is `POST /trash/{id}/restore` (`routers/trash.py`). The migration
+into the tree is an admin route (#205, `routers/admin.py`).
 
 Every route is `require_uploader` (demo gets 403) and answers 409
 `tree_not_enabled` for a user whose tree state is 'none'.
@@ -63,6 +63,10 @@ class CreatePlaylistRequest(BaseModel):
     name: str
     parent_id: Optional[str] = None
     song_ids: List[str] = []
+
+
+class DeleteNodesRequest(BaseModel):
+    node_ids: List[str] = Field(min_length=1)
 
 
 class UpdateNodeRequest(BaseModel):
@@ -151,3 +155,26 @@ async def update_node(
         user, node_id, name=request.name,
         parent_id=request.parent_id if 'parent_id' in fields else UNCHANGED,
         position=request.position))
+
+
+@router.post("/playlists/nodes/delete", tags=["playlists"])
+@inject
+async def delete_nodes(
+        request: DeleteNodesRequest,
+        user: dict = Depends(require_uploader),
+        tree: PlaylistTreeController = Depends(Provide[Container.playlist_tree_controller]),
+) -> Dict[str, Any]:
+    """
+    Delete playlists and folders, each with everything under it, into one trash
+    batch: `{trash_batch_id, label, deleted: {node_ids, folders, playlists}}`.
+
+    Synchronous, and it can't partly fail: one transaction. Nothing is deleted from
+    Navidrome. The playlists are hidden, with their ids and entries, and
+    `GET /playlists/tree` lists them in `hidden_playlist_ids` until the batch is
+    restored (`POST /trash/{trash_batch_id}/restore`) or purged. 404, and nothing
+    deleted, if any id isn't one of the user's live nodes.
+
+    demo (403) and a user without a tree (409) delete through Navidrome directly,
+    as before, with no undo.
+    """
+    return await _tree_write(tree.delete_nodes(user, request.node_ids))

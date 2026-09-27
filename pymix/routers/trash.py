@@ -6,6 +6,9 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
+from pymix.controllers.playlist_tree_controller import (
+    NodeNotFound, NothingToRestore, PlaylistTreeController, TreeNotEnabled,
+)
 from pymix.routers.auth import require_uploader
 from pymix.services.import_progress import ImportProgressReporter, failure_reason
 from pymix.services.trash import ItemState, TrashKind, TrashService, batch_state
@@ -31,6 +34,9 @@ def _summary(batch: dict) -> Dict[str, Any]:
                 'state': i['state'],
                 # A re-import's replaced playlist (#208): which one.
                 'playlist_name': (i.get('snapshot') or {}).get('name') if batch['kind'] == TrashKind.PLAYLIST_ENTRIES.value else None,
+                # A deleted playlist or folder (#207): which node.
+                'node': {k: (i.get('snapshot') or {}).get(k) for k in ('node_id', 'kind', 'name')}
+                if batch['kind'] == TrashKind.NODES.value else None,
             }
             for i in batch['items']
         ],
@@ -100,6 +106,7 @@ async def restore_trash_batch(
         user: dict = Depends(require_uploader),
         db_controller: DbController = Depends(Provide[Container.db_controller]),
         trash_service: TrashService = Depends(Provide[Container.trash_service]),
+        tree: PlaylistTreeController = Depends(Provide[Container.playlist_tree_controller]),
 ) -> Dict[str, Any]:
     """
     Put a batch back.
@@ -113,14 +120,28 @@ async def restore_trash_batch(
     which. An entry whose track can't be found any more is listed in
     `not_restored`, never dropped silently.
 
-    `nodes` batches arrive with #207.
+    A **nodes** batch (#207), a playlist/folder delete, restores synchronously:
+    every node back where it was, the playlists with the same Navidrome ids.
+    `moved` names a node whose parent was deleted separately, and says where it
+    went instead; `shrunk`, a playlist a track was purged from while it was in the
+    trash; `lost`, one deleted outside subbox meanwhile. 409 `tree_not_enabled`
+    for a user without a tree.
     """
     username = user['username']
     batch = db_controller.get_trash_batch(batch_id, username)
     if batch is None:
         raise HTTPException(status_code=404, detail=f"no trash batch {batch_id}")
-    if batch['kind'] not in (TrashKind.TRACK.value, TrashKind.PLAYLIST_ENTRIES.value):
-        raise HTTPException(status_code=400, detail=f"cannot restore a {batch['kind']} batch yet")
+    if batch['kind'] == TrashKind.NODES.value:
+        # No job check: it takes the tree lock, which an import's playlist writes
+        # take too, and it writes no playlist.
+        try:
+            return await tree.restore_nodes(user, batch_id)
+        except TreeNotEnabled:
+            raise HTTPException(status_code=409, detail='tree_not_enabled')
+        except NodeNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except NothingToRestore:
+            raise HTTPException(status_code=409, detail="nothing in this batch can be restored")
     n_restorable = sum(1 for i in batch['items'] if i['state'] == ItemState.RESTORABLE.value)
     if n_restorable == 0:
         raise HTTPException(status_code=409, detail="nothing in this batch can be restored")

@@ -28,10 +28,11 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 from pymix.controllers.db_controller import DbController
-from pymix.model.db_tables import PlaylistNodeRow, TrashItemRow, UserRow
+from pymix.model.db_tables import PlaylistNodeRow, TrashBatchRow, TrashItemRow, UserRow
 from pymix.model.playlist_write_report import PlaylistWriteReport
 from pymix.model.subboxplaylist import SubBoxPlaylist
 from pymix.services import metrics
+from pymix.services.trash import TRASH_DEFAULTS, ItemState, TrashKind
 from pymix.services.tree_lock import TreeLocks
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,10 @@ class PlaylistNotCreated(Exception):
     """Navidrome refused to create the playlist: nothing was written."""
 
 
+class NothingToRestore(Exception):
+    """The batch holds nothing restorable any more: the routes answer 409."""
+
+
 @dataclass
 class ReconcileOutcome:
     # Navidrome playlist ids given a node at the root.
@@ -83,11 +88,14 @@ def _now() -> float:
 
 
 class PlaylistTreeController:
-    def __init__(self, session_factory, db_controller: DbController, subsonic_orchestrator, tree_locks: TreeLocks):
+    def __init__(self, session_factory, db_controller: DbController, subsonic_orchestrator, tree_locks: TreeLocks,
+                 retention_s: float = TRASH_DEFAULTS['retention_s']):
         self._sessions = session_factory
         self._db = db_controller
         self._subsonic = subsonic_orchestrator
         self._locks = tree_locks
+        # How long a playlist/folder delete stays in the trash (#207).
+        self._retention_s = retention_s
 
     # --- reads -------------------------------------------------------------------
 
@@ -360,6 +368,299 @@ class PlaylistTreeController:
             trashed.parent_id = node.parent_id
         session.flush()
         session.delete(node)
+
+    # --- delete, restore, purge (#207, §8.2) ---------------------------------------
+
+    async def delete_nodes(self, user: dict, node_ids: List[str]) -> dict:
+        """
+        POST /playlists/nodes/delete: put the nodes and all their live descendants
+        in one trash batch, in one transaction, and close up the positions they
+        leave. Returns {trash_batch_id, label, deleted}.
+
+        Nothing is deleted from Navidrome: a trashed playlist is only hidden, with
+        its id, name and entries, until the batch is purged. The one Navidrome
+        call, besides reconciling, reads each playlist's entry count, so the
+        restore can say how many of its tracks were purged in between. A count
+        that can't be read is recorded as unknown and doesn't stop the delete.
+
+        Every id must be one of the user's live nodes, or nothing is deleted (404).
+        """
+        username = user['username']
+        requested = list(dict.fromkeys(node_ids))
+        if not requested:
+            raise TreeInvariantError("no nodes to delete")
+        async with self._locks.hold(username):
+            user_id = self._require_live(username)
+            owned = await self._subsonic.owned_playlists(user)
+            self._reconcile(user_id, username, owned)
+            playlists = {p.subsonic_id: p for p in owned}
+            with self._sessions() as session:
+                for node_id in requested:
+                    self._live(session, user_id, node_id)
+                doomed = self._subtrees(self._live_nodes(session, user_id), requested)
+                counted = [n.navidrome_playlist_id for n in doomed
+                           if n.kind == PLAYLIST and not playlists[n.navidrome_playlist_id].readonly]
+            counts = await self._subsonic.entry_counts(user, counted)
+
+            with self._sessions() as session:
+                rows = {n.node_id: session.get(PlaylistNodeRow, n.node_id) for n in doomed}
+                label = self._delete_label(rows, playlists)
+                now = _now()
+                batch_id = uuid.uuid4().hex
+                session.add(TrashBatchRow(batch_id=batch_id, user_id=user_id, kind=TrashKind.NODES.value,
+                                          label=label, bytes=0, created_at=now,
+                                          expires_at=now + self._retention_s))
+                for row in rows.values():
+                    session.add(TrashItemRow(
+                        batch_id=batch_id, user_id=user_id, kind=TrashKind.NODES.value,
+                        state=ItemState.RESTORABLE.value, updated_at=now,
+                        snapshot=self._trash_snapshot(session, row, playlists, counts),
+                    ))
+                parents = {row.parent_id for row in rows.values() if row.parent_id not in rows}
+                for row in rows.values():
+                    row.trash_batch_id = batch_id
+                    row.updated_at = now
+                session.flush()
+                for parent_id in parents:
+                    for position, sibling in enumerate(self._siblings(session, user_id, parent_id)):
+                        sibling.position = position
+                session.commit()
+        metrics.trash_batch_created(TrashKind.NODES.value)
+        n_playlists = sum(1 for n in doomed if n.kind == PLAYLIST)
+        logger.info(f"{username} deleted {label!r}: {len(doomed)} node(s) hidden in trash batch {batch_id}")
+        return {
+            'trash_batch_id': batch_id,
+            'label': label,
+            'deleted': {
+                'node_ids': [n.node_id for n in doomed],
+                'folders': len(doomed) - n_playlists,
+                'playlists': n_playlists,
+            },
+        }
+
+    def _subtrees(self, live: List[PlaylistNodeRow], node_ids: List[str]) -> List[PlaylistNodeRow]:
+        """The nodes and every live node under them, once each, in tree order."""
+        wanted = set(node_ids)
+        by_id = {n.node_id: n for n in live}
+        out = []
+        for node in self._tree_order(live):
+            ancestor = node.node_id
+            while ancestor is not None and ancestor not in wanted:
+                ancestor = by_id[ancestor].parent_id
+            if ancestor is not None:
+                out.append(node)
+        return out
+
+    @staticmethod
+    def _delete_label(rows: Dict[str, PlaylistNodeRow], playlists: dict) -> str:
+        """What the toast and the Trash screen call the delete: "Folder House ·
+        6 playlists", "Playlist Deep", or "2 folders · 5 playlists"."""
+        def plural(n, word):
+            return f"{n} {word}" + ("" if n == 1 else "s")
+        tops = [r for r in rows.values() if r.parent_id not in rows]
+        n_playlists = sum(1 for r in rows.values() if r.kind == PLAYLIST)
+        if len(tops) == 1:
+            [top] = tops
+            name = top.name if top.kind == FOLDER else playlists[top.navidrome_playlist_id].name
+            under = n_playlists - (top.kind == PLAYLIST)
+            return f"{top.kind.capitalize()} {name}" + (f" · {plural(under, 'playlist')}" if under else "")
+        n_folders = len(rows) - n_playlists
+        return " · ".join(p for p in (n_folders and plural(n_folders, 'folder'),
+                                      n_playlists and plural(n_playlists, 'playlist')) if p)
+
+    @staticmethod
+    def _trash_snapshot(session, row: PlaylistNodeRow, playlists: dict, counts: dict) -> dict:
+        """A node's trash item: which node, its name, and for a playlist its
+        Navidrome id and entry count, and its parent. Its position is on the node,
+        which keeps it while trashed. The parent's name is for the restore to say
+        where it would have gone, if that parent is gone by then."""
+        def name_of(node):
+            if node is None:
+                return None
+            return node.name if node.kind == FOLDER else getattr(
+                playlists.get(node.navidrome_playlist_id), 'name', None)
+        playlist = playlists.get(row.navidrome_playlist_id)
+        return {
+            'node_id': row.node_id,
+            'kind': row.kind,
+            'name': name_of(row),
+            'navidrome_playlist_id': row.navidrome_playlist_id,
+            'smart': bool(playlist and playlist.readonly),
+            'n_entries': counts.get(row.navidrome_playlist_id),
+            # Where it was. The node's own parent_id can change while it's trashed:
+            # a purge of its parent moves it up (purge_nodes).
+            'parent_id': row.parent_id,
+            'parent_name': name_of(session.get(PlaylistNodeRow, row.parent_id) if row.parent_id else None),
+        }
+
+    async def restore_nodes(self, user: dict, batch_id: str) -> dict:
+        """
+        POST /trash/{id}/restore for a `nodes` batch: synchronous, under the lock,
+        in one transaction. Parents go back before their children. Each node goes
+        back at its old position, clamped, under its parent if that is live (or
+        was put back earlier in this restore). If the parent is gone -- in another
+        batch, or purged -- it goes to the end of its nearest live ancestor, or the
+        root, and `moved` says so.
+
+        The playlists come back with the same Navidrome ids. `shrunk` names each one
+        with fewer entries than when it was deleted: a track in it was purged while
+        it was hidden. `lost` names each one something outside pymix deleted from
+        Navidrome while it was hidden: it can't come back.
+        """
+        username = user['username']
+        async with self._locks.hold(username):
+            user_id = self._require_live(username)
+            owned = await self._subsonic.owned_playlists(user)
+            self._reconcile(user_id, username, owned)
+            playlists = {p.subsonic_id: p for p in owned}
+            with self._sessions() as session:
+                batch = session.query(TrashBatchRow).filter(
+                    TrashBatchRow.batch_id == batch_id, TrashBatchRow.user_id == user_id,
+                    TrashBatchRow.kind == TrashKind.NODES.value).first()
+                if batch is None:
+                    raise NodeNotFound(f"no playlist trash batch {batch_id}")
+                all_items = session.query(TrashItemRow).filter(TrashItemRow.batch_id == batch_id).all()
+                items = [i for i in all_items if i.state == ItemState.RESTORABLE.value]
+                if not items:
+                    raise NothingToRestore(batch_id)
+                now = _now()
+                nodes = {}
+                for item in items:
+                    node = session.get(PlaylistNodeRow, item.snapshot['node_id'])
+                    if node is None or node.trash_batch_id != batch_id:
+                        item.state, item.error, item.updated_at = ItemState.LOST.value, 'its node is gone', now
+                        continue
+                    nodes[node.node_id] = (node, item)
+
+                restored, moved = [], []
+                for node in self._parents_first([n for n, _ in nodes.values()]):
+                    item = nodes[node.node_id][1]
+                    snapshot = item.snapshot
+                    target = node.parent_id
+                    while target is not None:
+                        parent = session.get(PlaylistNodeRow, target)
+                        if parent.trash_batch_id is None:
+                            break
+                        target = parent.parent_id
+                    is_moved = target != snapshot.get('parent_id', node.parent_id)
+                    node.position = self._open_gap(session, user_id, target, None if is_moved else node.position,
+                                                   exclude=node.node_id)
+                    node.parent_id = target
+                    node.trash_batch_id = None
+                    node.updated_at = now
+                    session.flush()
+                    item.state, item.error, item.updated_at = ItemState.RESTORED.value, None, now
+                    name = node.name if node.kind == FOLDER else getattr(
+                        playlists.get(node.navidrome_playlist_id), 'name', snapshot.get('name'))
+                    restored.append(self._node_body(node, name))
+                    if is_moved:
+                        to = None if target is None else session.get(PlaylistNodeRow, target)
+                        to_name = None if to is None else (
+                            to.name if to.kind == FOLDER else getattr(playlists.get(to.navidrome_playlist_id), 'name', None))
+                        gone = snapshot.get('parent_name') or 'its folder'
+                        moved.append({
+                            'node_id': node.node_id, 'name': name, 'parent_id': target, 'parent_name': to_name,
+                            'message': f"{name} restored to {to_name or 'the top level'}: "
+                                       f"{gone} was deleted separately.",
+                        })
+                lost = [{'node_id': i.snapshot.get('node_id'), 'name': i.snapshot.get('name'),
+                         'message': f"{i.snapshot.get('name')} was deleted outside subbox while it was in the trash, "
+                                    f"and can't be restored."}
+                        for i in all_items if i.state == ItemState.LOST.value]
+                # A smart playlist has no count (delete_nodes): its rules change its tracks.
+                recorded = {n.navidrome_playlist_id: item.snapshot['n_entries'] for n, item in nodes.values()
+                            if item.snapshot.get('n_entries') is not None}
+                session.commit()
+
+            # Counted after the commit: a count that fails can't stop the restore.
+            counts = await self._subsonic.entry_counts(user, sorted(recorded))
+        shrunk = []
+        for body in restored:
+            before, now_n = recorded.get(body['navidrome_playlist_id']), counts.get(body['navidrome_playlist_id'])
+            if before is not None and now_n is not None and now_n < before:
+                n = before - now_n
+                shrunk.append({
+                    'node_id': body['node_id'], 'name': body['name'], 'n_tracks_lost': n,
+                    'message': f"{n} track{'' if n == 1 else 's'} in {body['name']} "
+                               f"{'was' if n == 1 else 'were'} permanently deleted while it was in the trash.",
+                })
+        if restored:
+            metrics.trash_restored(TrashKind.NODES.value, len(restored))
+        logger.info(f"{username} restored trash batch {batch_id}: {len(restored)} node(s), "
+                    f"{len(moved)} moved, {len(shrunk)} shrunk, {len(lost)} lost")
+        return {'success': not lost, 'batch_id': batch_id, 'restored': restored, 'moved': moved,
+                'shrunk': shrunk, 'lost': lost}
+
+    @staticmethod
+    def _parents_first(nodes: List[PlaylistNodeRow]):
+        """The batch's nodes, each after its parent if that is in the batch, and
+        siblings by their old position: so each goes back into the gap it left."""
+        ids = {n.node_id for n in nodes}
+        children: Dict[Optional[str], List[PlaylistNodeRow]] = {}
+        for node in nodes:
+            children.setdefault(node.parent_id if node.parent_id in ids else None, []).append(node)
+        level = sorted(children.get(None, []), key=lambda n: n.position)
+        while level:
+            yield from level
+            level = sorted((c for n in level for c in children.get(n.node_id, [])), key=lambda n: n.position)
+
+    async def purge_nodes(self, batch: dict, items: List[dict]) -> Tuple[int, List[str]]:
+        """
+        The purge of a `nodes` batch, from TrashService.purge_batch (the reaper,
+        DELETE /trash/{id}, DELETE /trash): the one place a playlist is deleted
+        from Navidrome. deletePlaylist for each, then the node rows, for every node
+        whose playlist is gone ("not found" counts as gone). Returns (how many
+        items were purged, errors).
+
+        A playlist Navidrome still has afterwards keeps its node and its item
+        `expired`, and the next pass tries again. So does everything, if pymix
+        dies after the deletes and before the rows: reconciliation meanwhile
+        finishes the purge of any node whose playlist it finds gone (`_lose`).
+        """
+        username = batch['username']
+        user = self._db.get_user(username)
+        user_id = user['user_id']
+        async with self._locks.hold(username):
+            targets = [i['snapshot']['navidrome_playlist_id'] for i in items
+                       if i['snapshot'].get('kind') == PLAYLIST]
+            for playlist_id in targets:
+                await self._subsonic.remove_playlist(user, playlist_id)
+            still = {p.subsonic_id for p in await self._subsonic.owned_playlists(user)} & set(targets)
+
+            now = _now()
+            with self._sessions() as session:
+                by_item = {i['id']: session.get(PlaylistNodeRow, i['snapshot']['node_id']) for i in items}
+                gone = {n.node_id: n for n in by_item.values()
+                        if n is not None and n.navidrome_playlist_id not in still}
+                # What else points at a node going: a node trashed in another batch
+                # (still hidden). It moves up to the nearest ancestor that stays.
+                for child in session.query(PlaylistNodeRow).filter(
+                        PlaylistNodeRow.user_id == user_id, PlaylistNodeRow.parent_id.in_(list(gone))).all():
+                    if child.node_id in gone:
+                        continue
+                    ancestor = child.parent_id
+                    while ancestor in gone:
+                        ancestor = gone[ancestor].parent_id
+                    child.parent_id = ancestor
+                for node in gone.values():
+                    node.parent_id = None
+                session.flush()
+                for node in gone.values():
+                    session.delete(node)
+                errors, n_purged = [], 0
+                for item in session.query(TrashItemRow).filter(TrashItemRow.batch_id == batch['batch_id'],
+                                                               TrashItemRow.id.in_(list(by_item))).all():
+                    node = by_item[item.id]
+                    if node is not None and node.node_id not in gone:
+                        item.error = 'Navidrome still has the playlist; the next purge retries'
+                        errors.append(f"{username}: playlist {node.navidrome_playlist_id} was not deleted "
+                                      f"from Navidrome (batch {batch['batch_id']})")
+                    else:
+                        item.state, item.error = ItemState.PURGED.value, None
+                        n_purged += 1
+                    item.updated_at = now
+                session.commit()
+        return n_purged, errors
 
     # --- imports (#202, §5.1, §5.2) -------------------------------------------------
 
@@ -699,7 +1000,8 @@ class PlaylistTreeController:
         | yes              | a trashed one | nothing: it's hidden                     |
         | yes              | no node       | adopt it at the root, origin 'subbox'    |
         | no               | a live node   | drop it, children up; orphaned metric    |
-        | no               | a trashed one | its trash item is lost, the node goes    |
+        | no               | a trashed one | its trash item is lost (or, mid-purge,   |
+        |                  |               | purged), the node goes                   |
         """
         outcome = ReconcileOutcome()
         in_navidrome = [p.subsonic_id for p in playlists]
@@ -714,8 +1016,7 @@ class PlaylistTreeController:
                 if node.trash_batch_id is None:
                     self._drop(session, user_id, node)
                     outcome.dropped.append(node.navidrome_playlist_id)
-                else:
-                    self._lose(session, node)
+                elif self._lose(session, node):
                     outcome.lost.append(node.navidrome_playlist_id)
             for playlist_id in in_navidrome:
                 if playlist_id not in known:
@@ -733,16 +1034,25 @@ class PlaylistTreeController:
             logger.info(f"adopted {len(outcome.adopted)} playlist(s) of {username} at the root of their tree")
         return outcome
 
-    def _lose(self, session, node: PlaylistNodeRow) -> None:
-        """A hidden playlist that something outside pymix deleted, or one the reaper
-        purged and stopped before removing its node. Either way it can't come back:
-        its trash item is `lost`, and the rest of its batch stays restorable."""
+    def _lose(self, session, node: PlaylistNodeRow) -> bool:
+        """A hidden playlist whose Navidrome playlist has gone. If its item is
+        `expired`, a purge deleted it and stopped before removing the node (#207):
+        this finishes the purge. Otherwise something outside pymix deleted it, and
+        it can't come back: its item is `lost`, and the rest of its batch stays
+        restorable. Returns whether it was lost."""
+        lost = False
         for item in session.query(TrashItemRow).filter(TrashItemRow.batch_id == node.trash_batch_id).all():
-            if (item.snapshot or {}).get('node_id') == node.node_id and item.state != 'purged':
-                item.state = 'lost'
+            if (item.snapshot or {}).get('node_id') != node.node_id or item.state == ItemState.PURGED.value:
+                continue
+            if item.state == ItemState.EXPIRED.value:
+                item.state, item.error = ItemState.PURGED.value, None
+            else:
+                item.state = ItemState.LOST.value
                 item.error = 'the playlist was deleted outside pymix while it was in the trash'
-                item.updated_at = _now()
+                lost = True
+            item.updated_at = _now()
         for child in session.query(PlaylistNodeRow).filter(PlaylistNodeRow.parent_id == node.node_id).all():
             child.parent_id = node.parent_id
         session.flush()
         session.delete(node)
+        return lost
