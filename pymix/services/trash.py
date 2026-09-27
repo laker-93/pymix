@@ -182,6 +182,7 @@ class TrashService:
             native_client: NavidromeNativeClient,
             retention_s: float,
             subsonic_orchestrator=None,
+            playlist_tree_controller=None,
     ):
         self._db = db_controller
         self._beets_exec = beets_exec
@@ -190,6 +191,9 @@ class TrashService:
         # For scan_and_wait after a restore. Typed loosely: importing
         # SubsonicOrchestrator here would pull the whole Subsonic client in.
         self._subsonic = subsonic_orchestrator
+        # The purge of a `nodes` batch deletes playlists and node rows (#207).
+        # Loosely typed for the same reason.
+        self._tree = playlist_tree_controller
 
     # --- delete ------------------------------------------------------------------
 
@@ -721,14 +725,14 @@ class TrashService:
         if not items:
             return outcome
         kind = batch['kind']
-        if kind == TrashKind.NODES.value:
-            # `nodes` batches arrive with playlist delete (#207), which adds their purge.
-            outcome.errors.append(f"{batch['username']}: cannot purge a {kind} batch yet")
-            return outcome
         self._db.update_trash_items(batch_id, {i['id']: {'state': ItemState.EXPIRED.value} for i in items})
 
         if kind == TrashKind.TRACK.value:
             await self._purge_tracks(batch, items, outcome)
+        elif kind == TrashKind.NODES.value:
+            # Hidden playlists: deleted from Navidrome only now (#207, §8.2).
+            outcome.n_purged, errors = await self._tree.purge_nodes(batch, items)
+            outcome.errors.extend(errors)
         else:
             # Re-import entries: the rows are the whole of it, nothing on disk and
             # nothing in Navidrome.

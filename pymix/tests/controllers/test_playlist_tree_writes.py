@@ -275,7 +275,7 @@ async def test_a_user_without_a_tree_can_do_none_of_it(tree, navidrome, sessions
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize('write', ['folder', 'playlist', 'update', 'read'])
+@pytest.mark.parametrize('write', ['folder', 'playlist', 'update', 'read', 'delete', 'restore'])
 async def test_the_state_is_read_under_the_tree_lock(tree, navidrome, sessions, db_controller, write):
     # A rollback (#205) sets the user 'none' and deletes their nodes under the lock. A
     # write that checked the state before taking the lock would then write a node for
@@ -289,6 +289,8 @@ async def test_the_state_is_read_under_the_tree_lock(tree, navidrome, sessions, 
         'playlist': lambda: tree.create_playlist(USER, 'x'),
         'update': lambda: tree.update_node(USER, 'any', name='x'),
         'read': lambda: tree.get_tree(USER),
+        'delete': lambda: tree.delete_nodes(USER, ['any']),
+        'restore': lambda: tree.restore_nodes(USER, 'any'),
     }
     async with tree._locks.hold('dj'):
         pending = asyncio.ensure_future(calls[write]())

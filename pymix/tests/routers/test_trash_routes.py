@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from pymix.containers import Container
+from pymix.controllers.playlist_tree_controller import NodeNotFound, NothingToRestore, TreeNotEnabled
 from pymix.routers import auth, track as track_router, trash as trash_router
 from pymix.services.trash import PurgeOutcome, TrashDeleteOutcome
 
@@ -42,10 +43,16 @@ def trash_service():
 
 
 @pytest.fixture
-def client(db_controller, trash_service):
+def tree():
+    return mock.Mock()
+
+
+@pytest.fixture
+def client(db_controller, trash_service, tree):
     container = Container()
     container.db_controller.override(db_controller)
     container.trash_service.override(trash_service)
+    container.playlist_tree_controller.override(tree)
     container.wire(modules=[auth, trash_router, track_router])
     app = FastAPI()
     app.include_router(trash_router.router)
@@ -73,7 +80,8 @@ def test_the_trash_lists_only_what_can_still_be_restored(client, db_controller):
     assert [b['batch_id'] for b in body['batches']] == ['live']
     [batch] = body['batches']
     assert batch['label'] == '2 tracks' and batch['deleted_at'] == 1.0 and batch['expires_at'] == 2.0
-    assert batch['items'][0] == {'subbox_id': 's0', 'relative_path': 'A/0.mp3', 'size': 50, 'state': 'restorable', 'playlist_name': None}
+    assert batch['items'][0] == {'subbox_id': 's0', 'relative_path': 'A/0.mp3', 'size': 50, 'state': 'restorable', 'playlist_name': None,
+                                 'node': None}
     assert body['trash_bytes'] == 100
 
 
@@ -210,7 +218,6 @@ def test_a_reimport_batch_names_its_playlists_in_the_listing(client, db_controll
 
 @pytest.mark.parametrize('batch, jobs, status', [
     (None, 0, 404),
-    (_batch('b1', ['restorable'], kind='nodes'), 0, 400),
     (_batch('b1', ['purged', 'restored']), 0, 409),
     (_batch('b1', ['restorable']), 1, 409),
 ])
@@ -240,3 +247,57 @@ def test_restore_progress_is_only_for_restore_jobs(client, db_controller):
     db_controller.get_job_by_id.return_value = {'name': 'import', 'in_progress': True}
 
     assert _as(client, 'dj').get('/trash/restore/progress', params={'job_id': 'j'}).status_code == 404
+
+
+# --- a playlist/folder delete (#207) ------------------------------------------------
+
+def _nodes_batch():
+    batch = _batch('b1', ['restorable', 'restorable'], kind='nodes')
+    for item, snapshot in zip(batch['items'], [{'node_id': 'f', 'kind': 'folder', 'name': 'House'},
+                                               {'node_id': 'p', 'kind': 'playlist', 'name': 'Deep'}]):
+        item.update(subbox_id=None, relative_path=None, size=None, snapshot=snapshot)
+    return batch
+
+
+def test_a_nodes_batch_names_its_nodes_in_the_listing(client, db_controller):
+    db_controller.get_trash_batches.return_value = [_nodes_batch()]
+
+    [listed] = _as(client, 'dj').get('/trash').json()['batches']
+
+    assert [i['node'] for i in listed['items']] == [
+        {'node_id': 'f', 'kind': 'folder', 'name': 'House'}, {'node_id': 'p', 'kind': 'playlist', 'name': 'Deep'}]
+
+
+def test_a_nodes_batch_restores_synchronously_without_waiting_for_jobs(client, db_controller, tree):
+    db_controller.get_trash_batch.return_value = _nodes_batch()
+    # A playlist restore writes no playlist: an import running is no reason to wait.
+    db_controller.get_number_of_jobs.return_value = 1
+    body = {'success': True, 'batch_id': 'b1', 'restored': [], 'moved': [], 'shrunk': [], 'lost': []}
+    tree.restore_nodes = mock.AsyncMock(return_value=body)
+
+    response = _as(client, 'dj').post('/trash/b1/restore')
+
+    assert response.json() == body
+    tree.restore_nodes.assert_awaited_once_with({'username': 'dj', 'user_id': 'u'}, 'b1')
+    db_controller.create_restore_job.assert_not_called()
+
+
+@pytest.mark.parametrize('error, status, detail', [
+    (TreeNotEnabled('dj'), 409, 'tree_not_enabled'),
+    (NodeNotFound('no playlist trash batch b1'), 404, 'no playlist trash batch b1'),
+    (NothingToRestore('b1'), 409, 'nothing in this batch can be restored'),
+])
+def test_a_nodes_restore_refusal_becomes_its_status(client, db_controller, tree, error, status, detail):
+    db_controller.get_trash_batch.return_value = _nodes_batch()
+    tree.restore_nodes = mock.AsyncMock(side_effect=error)
+
+    response = _as(client, 'dj').post('/trash/b1/restore')
+
+    assert (response.status_code, response.json()) == (status, {'detail': detail})
+
+
+def test_demo_cannot_restore_a_nodes_batch(client, db_controller, tree):
+    tree.restore_nodes = mock.AsyncMock()
+
+    assert _as(client, 'demo').post('/trash/b1/restore').status_code == 403
+    tree.restore_nodes.assert_not_called()

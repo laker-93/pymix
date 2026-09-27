@@ -132,6 +132,7 @@ WRITES = [
     ('create_folder', 'post', '/playlists/folders', {'name': 'x'}),
     ('create_playlist', 'post', '/playlists', {'name': 'x'}),
     ('update_node', 'patch', '/playlists/nodes/n1', {'name': 'x'}),
+    ('delete_nodes', 'post', '/playlists/nodes/delete', {'node_ids': ['n1']}),
 ]
 
 
@@ -158,3 +159,26 @@ def test_demo_cannot_write_a_tree(client, tree, method_name, method, path, body)
 
     assert getattr(client, method)(path, json=body).status_code == 403
     getattr(tree, method_name).assert_not_called()
+
+
+# --- delete (#207) ---------------------------------------------------------------------
+
+def test_delete_nodes(client, tree):
+    body = {'trash_batch_id': 'b1', 'label': 'Folder House · 6 playlists',
+            'deleted': {'node_ids': ['n1', 'n2'], 'folders': 1, 'playlists': 1}}
+    tree.delete_nodes = mock.AsyncMock(return_value=body)
+    client.cookies.set('session_id', 'dj')
+
+    response = client.post('/playlists/nodes/delete', json={'node_ids': ['n1']})
+
+    assert response.json() == body
+    tree.delete_nodes.assert_awaited_once_with({'username': 'dj', 'user_id': 'u'}, ['n1'])
+
+
+@pytest.mark.parametrize('body', [{}, {'node_ids': []}])
+def test_a_delete_of_nothing_is_refused(client, tree, body):
+    tree.delete_nodes = mock.AsyncMock()
+    client.cookies.set('session_id', 'dj')
+
+    assert client.post('/playlists/nodes/delete', json=body).status_code == 422
+    tree.delete_nodes.assert_not_called()

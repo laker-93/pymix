@@ -130,6 +130,8 @@ class Container(containers.DeclarativeContainer):
         db_controller,
         subsonic_orchestrator,
         tree_locks,
+        # how long a playlist/folder delete stays in the trash (#207)
+        retention_s=providers.Callable(trash_setting, config, 'retention_s'),
     )
 
     rekordbox_xml_orchestrator = providers.Singleton(
@@ -189,6 +191,8 @@ class Container(containers.DeclarativeContainer):
         navidrome_native_client,
         retention_s=providers.Callable(trash_setting, config, 'retention_s'),
         subsonic_orchestrator=subsonic_orchestrator,
+        # purges `nodes` batches: hidden playlists and their nodes (#207)
+        playlist_tree_controller=playlist_tree_controller,
     )
 
     automatch_service = providers.Singleton(

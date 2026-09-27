@@ -39,6 +39,12 @@ class FakeNavidrome:
         self.refuse_rename = set()
         self.renamed: list[tuple] = []
         self.on_create = None
+        # #207: tracks in the trash (a missing row, its entries kept and listed by
+        # the native API) and purged (the row gone, so its entries are too).
+        self.missing: set[str] = set()
+        self.purged: set[str] = set()
+        self.refuse_delete: set[str] = set()
+        self.deleted: list[str] = []
         self._next = 0
 
     def add(self, name, owner='dj', readonly=False, songs=('x',)):
@@ -72,6 +78,19 @@ class FakeNavidrome:
 
     async def get_playlist_tracks(self, user, playlist_id):
         return [_track(s) for s in self.entries[playlist_id]]
+
+    async def delete_playlist(self, user, playlist_id):
+        if playlist_id in self.refuse_delete:
+            return False
+        self.deleted.append(playlist_id)
+        # "not found" is Navidrome's error 70: a failed response, not an exception.
+        return self.playlists.pop(playlist_id, None) is not None
+
+    async def playlist_tracks(self, user, playlist_id):
+        """The native API's listing: missing entries in, purged ones out. Unlike
+        getPlaylists' stored songCount, which neither changes."""
+        return [{'mediaFileId': s, 'path': f'{s}.mp3', 'missing': s in self.missing, 'tags': {}}
+                for s in self.entries[playlist_id] if s not in self.purged]
 
     async def rename_playlist(self, user, playlist_id, name):
         if name in self.refuse_rename:
@@ -109,7 +128,8 @@ def navidrome():
 @pytest.fixture
 def tree(sessions, db_controller, navidrome):
     locks = TreeLocks()
-    orchestrator = SubsonicOrchestrator(navidrome, db_controller=db_controller, tree_locks=locks)
+    orchestrator = SubsonicOrchestrator(navidrome, native_client=navidrome, db_controller=db_controller,
+                                        tree_locks=locks)
     return PlaylistTreeController(sessions, db_controller, orchestrator, locks)
 
 

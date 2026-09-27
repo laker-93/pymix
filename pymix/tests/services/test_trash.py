@@ -421,16 +421,23 @@ async def test_another_user_cannot_purge_a_batch(trash, db_controller, beets, na
 
 
 @pytest.mark.anyio
-async def test_a_nodes_batch_is_left_for_playlist_delete_to_purge(trash, db_controller):
+async def test_a_nodes_batch_is_purged_by_the_playlist_tree(db_controller, beets, native):
+    # #207: hidden playlists are deleted from Navidrome by the tree, which also
+    # removes their nodes. The service marks the items expired first, as for any kind.
+    from unittest.mock import AsyncMock, Mock
+    tree = Mock(purge_nodes=AsyncMock(return_value=(1, ['one error'])))
+    trash = TrashService(db_controller, beets, native, retention_s=RETENTION_S, playlist_tree_controller=tree)
     batch_id = db_controller.create_trash_batch('dj', 'nodes', 'Folder House', RETENTION_S, [
-        {'state': ItemState.RESTORABLE.value, 'snapshot': {'node_id': 1}},
+        {'state': ItemState.RESTORABLE.value, 'snapshot': {'node_id': 'n1', 'kind': 'folder'}},
     ])
 
     purge = await trash.purge_batch(batch_id)
 
-    assert purge.errors and purge.n_purged == 0
+    assert (purge.n_purged, purge.errors) == (1, ['one error'])
+    batch, items = tree.purge_nodes.await_args.args
+    assert batch['batch_id'] == batch_id and [i['state'] for i in items] == [ItemState.RESTORABLE.value]
     [item] = db_controller.get_trash_batch(batch_id)['items']
-    assert item['state'] == ItemState.RESTORABLE.value
+    assert item['state'] == ItemState.EXPIRED.value
 
 
 # --- the reaper's other jobs ------------------------------------------------------
