@@ -39,8 +39,22 @@ On any failure the user + session are rolled back.
    playlist write.
 5. `_set_data_from_xml`:
    - `_create_playlists_from_xml` — parse XML playlists → `SubBoxPlaylist`s →
-     persist `path_components` → resolve each track's `sub_track_id` via Subsonic
-     search → `create_playlists` in Navidrome.
+     persist `path_components` (a `none` user only) → resolve each track's
+     `sub_track_id` via Subsonic search → `PlaylistTreeController.import_playlists`,
+     which for a `none` user is `create_playlists` in Navidrome, under joined names.
+   - **A `live` user's import builds their playlist tree (#202).** Each playlist is
+     matched by `source_path`, its full path in the source library, among the
+     user's live playlist nodes, not by name. A match is updated in place (below)
+     wherever it now sits and whatever it's now called, so a playlist the user
+     moved or renamed in subbox isn't duplicated. Anything unmatched is created in
+     Navidrome under its **leaf** name, with a node at the end of the folder its
+     path resolves to: the live node whose `source_path` is the path's prefix,
+     first in tree order, created as a folder (`origin` `rekordbox`/`serato`) where
+     missing. Existing nodes keep their position. Nodes made in subbox, adopted
+     ones included, have no `source_path`, so an import never takes one over. Each
+     create and its node write happen under the user's tree lock, so a tree read
+     can't adopt the playlist at the root in between. A `live` user's import
+     writes nothing to `playlist_path_table`.
    - **A re-import updates in place (#203).** An incoming playlist whose name matches
      one of the user's own playlists (not another user's public one, and not a smart
      one) is rewritten with `createPlaylist` + `playlistId`. That keeps its Navidrome
@@ -111,7 +125,12 @@ round trips per track, which is invisible locally and 12-32 s on a prod RTT (#10
 Import mirrors the Rekordbox flow but reads Serato `.crate` files via `pyserato`
 (`SeratoController` + `SeratoCrateOrchestrator`). Crate folder hierarchy ↔
 `path_components` the same way, waits for the scan and writes playlists the same
-way (re-import in place, §2). The report's playlist warnings follow its own
+way (re-import in place, and a `live` user's tree, §2). For the tree, a crate with
+sub-crates and no tracks of its own (or none that matched) becomes a folder, and a
+crate with its own tracks and sub-crates becomes a playlist with children. Sibling
+crates are walked by name, ignoring case, as Serato lists them by default: they
+come out of the zip in whatever order the filesystem gives. A Serato crate
+`House/Deep` matches a playlist imported from Rekordbox as `House/Deep`. The report's playlist warnings follow its own
 skipped-track warning. It is scoped to the upload attempt and clears
 `uploads/` (crates included) the same way as §2. `all-crates.zip` is extracted
 into a temporary directory, not beside itself: crates extracted into `uploads/`

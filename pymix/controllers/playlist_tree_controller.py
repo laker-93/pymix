@@ -24,10 +24,12 @@ import datetime
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from pymix.controllers.db_controller import DbController
 from pymix.model.db_tables import PlaylistNodeRow, TrashItemRow, UserRow
+from pymix.model.playlist_write_report import PlaylistWriteReport
+from pymix.model.subboxplaylist import SubBoxPlaylist
 from pymix.services import metrics
 from pymix.services.tree_lock import TreeLocks
 
@@ -246,6 +248,103 @@ class PlaylistTreeController:
             trashed.parent_id = node.parent_id
         session.flush()
         session.delete(node)
+
+    # --- imports (#202, §5.1, §5.2) -------------------------------------------------
+
+    async def import_playlists(
+            self, user: dict, playlists: List[SubBoxPlaylist], *, origin: str, scan_finished: bool,
+    ) -> PlaylistWriteReport:
+        """
+        Write a Rekordbox or Serato import's playlists, and for a `live` user, the
+        tree around them.
+
+        A `none` user gets today's import: joined names, matched by name (#203).
+
+        For a `live` user every match is by `source_path`, the playlist's full path
+        in the source library, among their live nodes. A match is updated in place
+        wherever it now sits and whatever it's now called: a playlist the user
+        moved or renamed in subbox is still the same playlist. Anything unmatched
+        is created in Navidrome under its leaf name, with a node under the folders
+        on its path, which are resolved the same way and created where missing.
+        Nodes that already exist keep their position.
+
+        Nodes made in subbox have no `source_path`, so an import never takes over
+        something the user built. `source_path` doesn't say which library it came
+        from: a Serato crate `House/Deep` is the Rekordbox playlist `House/Deep`.
+        """
+        username = user['username']
+        if self._db.playlist_tree_state(username) != 'live':
+            return await self._subsonic.create_playlists(user, playlists, scan_finished=scan_finished)
+        user_id = self._require_live(username)
+        async with self._locks.hold(username):
+            owned = await self._subsonic.owned_playlists(user)
+            self._reconcile(user_id, username, owned)
+            with self._sessions() as session:
+                live = self._tree_order(self._live_nodes(session, user_id))
+        by_id = {p.subsonic_id: p for p in owned}
+        # Writable playlist nodes by source_path, in tree order. A smart playlist is
+        # never written over: an incoming one of the same path is created beside it.
+        matches: Dict[Tuple[str, ...], List[SubBoxPlaylist]] = {}
+        for node in live:
+            playlist = by_id.get(node.navidrome_playlist_id)
+            if node.kind == PLAYLIST and node.source_path and playlist is not None and not playlist.readonly:
+                matches.setdefault(tuple(node.source_path), []).append(playlist)
+
+        report = PlaylistWriteReport()
+        for playlist in playlists:
+            path = tuple(playlist.path_components or [playlist.name])
+            candidates = matches.get(path)
+            if candidates:
+                if len(candidates) > 1:
+                    logger.warning(
+                        f"{username} has {len(candidates)} playlists imported as {' / '.join(path)!r}; "
+                        f"updating the first in tree order, {candidates[0].subsonic_id}"
+                    )
+                # Popped: two incoming playlists with one path (Rekordbox allows
+                # sibling duplicates) update two nodes, not the first one twice.
+                await self._subsonic.update_playlist(
+                    user, playlist, candidates.pop(0), report, scan_finished=scan_finished)
+                continue
+            await self._subsonic.create_playlist(
+                user, playlist, report, name=path[-1],
+                then=lambda playlist_id, path=path: self._place(user_id, playlist_id, path, origin),
+            )
+        self._subsonic.log_report(username, report)
+        return report
+
+    def _place(self, user_id: str, playlist_id: str, path: Tuple[str, ...], origin: str) -> None:
+        """The node for a playlist an import just created, at the end of the folder
+        its path resolves to. Called under the tree lock. If it fails, the playlist
+        has no node, and the next tree read adopts it at the root."""
+        try:
+            with self._sessions() as session:
+                parent_id = self._resolve_parent(session, user_id, path[:-1], origin)
+                self._add(session, user_id, PLAYLIST, parent_id, None, None, playlist_id, list(path), origin)
+                session.commit()
+        except Exception:
+            logger.exception(f"could not add a node for imported playlist {playlist_id} ({' / '.join(path)})")
+
+    def _resolve_parent(self, session, user_id: str, prefix: Tuple[str, ...], origin: str) -> Optional[str]:
+        """The live node whose source_path is ``prefix``, the first in tree order,
+        of either kind (a Serato crate with its own tracks is a playlist with
+        children). Missing, it's created as a folder under the node its own prefix
+        resolves to, and so on up. None is the root."""
+        if not prefix:
+            return None
+        found = [n for n in self._tree_order(self._live_nodes(session, user_id))
+                 if n.source_path and tuple(n.source_path) == prefix]
+        if len(found) > 1:
+            logger.warning(f"{len(found)} nodes were imported as {' / '.join(prefix)!r}; "
+                           f"using the first in tree order, {found[0].node_id}")
+        if found:
+            return found[0].node_id
+        parent_id = self._resolve_parent(session, user_id, prefix[:-1], origin)
+        return self._add(session, user_id, FOLDER, parent_id, None, prefix[-1], None, list(prefix), origin)
+
+    @staticmethod
+    def _live_nodes(session, user_id: str) -> List[PlaylistNodeRow]:
+        return session.query(PlaylistNodeRow).filter(
+            PlaylistNodeRow.user_id == user_id, PlaylistNodeRow.trash_batch_id.is_(None)).all()
 
     # --- reconciliation (§4.2) ------------------------------------------------------
 
