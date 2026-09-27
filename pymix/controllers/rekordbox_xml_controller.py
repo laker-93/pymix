@@ -134,6 +134,31 @@ class RekordboxXMLController:
             self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(rekordbox_xml, user_root, user, track, playlist)
 
 
+    def _write_tree(self, user_root: str, user: dict, rekordbox_xml: RekordboxXml, parent, nodes) -> None:
+        """
+        A `live` user's playlist tree into the XML under `parent` (the XML itself, or
+        a folder node), depth first, siblings in order (#204, design §5.4). A folder
+        is a folder, a playlist a playlist.
+
+        A playlist with children (a Serato crate with its own tracks and sub-crates)
+        has no Rekordbox equivalent. It becomes the playlist, then a folder of the
+        same name holding its children, side by side: what the export by joined name
+        has always written. Unlike a folder holding a same-named playlist (§5.4 as
+        drawn), it comes back whole: a re-import resolves the children's path to the
+        playlist (#202), and the next Serato export writes one crate `X`, not `X/X`.
+        """
+        for node in nodes:
+            if node.playlist is not None:
+                self._add_tracks(user_root, user, rekordbox_xml, node.playlist, parent.add_playlist(node.name))
+            if node.children or node.playlist is None:
+                folder = parent.add_playlist_folder(node.name)
+                self._write_tree(user_root, user, rekordbox_xml, folder, node.children)
+
+    def _add_tracks(self, user_root: str, user: dict, rekordbox_xml: RekordboxXml, subsonic_playlist: SubBoxPlaylist,
+                    playlist) -> None:
+        for track in subsonic_playlist.tracks or []:
+            self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(rekordbox_xml, user_root, user, track, playlist)
+
     # todo this controller is overloaded; this method has nothing to do with rekordbox xml and should live elsewhere.
     async def remove_duplicates(self, username: str, public: bool) -> str:
         return await anyio.to_thread.run_sync(self._remove_duplicates, username, public)
@@ -676,9 +701,15 @@ class RekordboxXMLController:
         # to make a single-playlist export pay for every OTHER playlist's fetch too;
         # see laker-93/pymix#66 follow-up).
         id_set = set(playlist_ids) if playlist_ids else None
-        subsonic_playlists = await self._subsonic_orchestrator.get_subsonic_playlists(user, id_set)
-        if not subsonic_playlists:
-            logger.info(f'no subsonic playlists found for user')
+        tree = await self._playlist_tree.export_tree(user, id_set) if self._playlist_tree else None
+        if tree is not None:
+            # A `live` user (#204): the tree, walked, in the user's own order.
+            self._write_tree(user_root, user, rekordbox_xml, rekordbox_xml, tree)
+            subsonic_playlists = None
+        else:
+            subsonic_playlists = await self._subsonic_orchestrator.get_subsonic_playlists(user, id_set)
+            if not subsonic_playlists:
+                logger.info(f'no subsonic playlists found for user')
 
         if subsonic_playlists:
             if id_set:

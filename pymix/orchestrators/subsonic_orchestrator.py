@@ -65,15 +65,18 @@ class SubsonicOrchestrator:
         playlists = self._visible(user, playlists)
         if playlist_ids is not None:
             playlists = [p for p in playlists if p.subsonic_id in playlist_ids]
+        await self.fetch_tracks(user, playlists)
+        return playlists
 
+    async def fetch_tracks(self, user: dict, playlists: List[SubBoxPlaylist]) -> None:
+        """Fill in each playlist's tracks, concurrently (bounded)."""
         semaphore = asyncio.Semaphore(SUBSONIC_PLAYLIST_FETCH_CONCURRENCY)
 
-        async def fetch_tracks(playlist: SubBoxPlaylist) -> None:
+        async def fetch(playlist: SubBoxPlaylist) -> None:
             async with semaphore:
                 playlist.tracks = await self._subsonic_client.get_playlist_tracks(user, playlist.subsonic_id)
 
-        await asyncio.gather(*(fetch_tracks(p) for p in playlists))
-        return playlists
+        await asyncio.gather(*(fetch(p) for p in playlists))
 
     def _visible(self, user: dict, playlists: List[SubBoxPlaylist]) -> List[SubBoxPlaylist]:
         """

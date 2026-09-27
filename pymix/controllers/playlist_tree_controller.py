@@ -24,7 +24,7 @@ import datetime
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from pymix.controllers.db_controller import DbController
 from pymix.model.db_tables import PlaylistNodeRow, TrashItemRow, UserRow
@@ -56,6 +56,15 @@ class ReconcileOutcome:
     dropped: List[str] = field(default_factory=list)
     # Trashed nodes whose playlist had gone: their trash item is `lost`.
     lost: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ExportNode:
+    """One node of the tree an export writes (#204). `playlist`, with its tracks, is
+    None for a folder, and for a playlist that is only on the path to a selected one."""
+    name: str
+    playlist: Optional[SubBoxPlaylist]
+    children: List['ExportNode'] = field(default_factory=list)
 
 
 def _now() -> float:
@@ -345,6 +354,70 @@ class PlaylistTreeController:
     def _live_nodes(session, user_id: str) -> List[PlaylistNodeRow]:
         return session.query(PlaylistNodeRow).filter(
             PlaylistNodeRow.user_id == user_id, PlaylistNodeRow.trash_batch_id.is_(None)).all()
+
+    # --- exports (#204, §5.4, §5.5) -------------------------------------------------
+
+    async def export_tree(self, user: dict, playlist_ids: Optional[Set[str]] = None) -> Optional[List[ExportNode]]:
+        """
+        The live tree as a Rekordbox or Serato export writes it: roots in order, each
+        playlist with its tracks. None for a `none` user, whose export is unchanged.
+
+        The state is read under the tree lock, because #205's migration holds it
+        while it renames a user's playlists to their leaf names and makes them `live`.
+
+        With `playlist_ids`, only the selected playlists and the nodes on their path.
+        A playlist that is only on the path is exported as a folder, without its own
+        tracks. Trashed nodes, and everything under them, are left out.
+        """
+        username = user['username']
+        async with self._locks.hold(username):
+            with self._sessions() as session:
+                row = session.query(UserRow.user_id, UserRow.playlist_tree_state).filter(
+                    UserRow.username == username).one()
+            if row.playlist_tree_state != 'live':
+                return None
+            owned = await self._subsonic.owned_playlists(user)
+            self._reconcile(row.user_id, username, owned)
+            with self._sessions() as session:
+                # Tree order walks down from the root through live nodes only, so a
+                # live node under a trashed one is never reached.
+                live = self._tree_order(self._live_nodes(session, row.user_id))
+        by_id = {p.subsonic_id: p for p in owned}
+
+        by_node = {n.node_id: n for n in live}
+        if playlist_ids is None:
+            keep = set(by_node)
+        else:
+            keep = set()
+            for node in live:
+                if node.kind == PLAYLIST and node.navidrome_playlist_id in playlist_ids:
+                    node_id = node.node_id
+                    while node_id is not None and node_id not in keep:
+                        keep.add(node_id)
+                        node_id = by_node[node_id].parent_id
+            found = {n.navidrome_playlist_id for n in live if n.node_id in keep}
+            if playlist_ids - found:
+                logger.error(f'export: requested playlist ids not in {username}\'s tree: {playlist_ids - found}')
+
+        roots: List[ExportNode] = []
+        built: Dict[str, ExportNode] = {}
+        playlists: List[SubBoxPlaylist] = []
+        for node in live:
+            if node.node_id not in keep:
+                continue
+            playlist = None
+            if node.kind == PLAYLIST:
+                name = by_id[node.navidrome_playlist_id].name
+                if playlist_ids is None or node.navidrome_playlist_id in playlist_ids:
+                    playlist = by_id[node.navidrome_playlist_id]
+                    playlists.append(playlist)
+            else:
+                name = node.name
+            built[node.node_id] = ExportNode(name, playlist)
+            # Tree order puts a parent before its children.
+            (built[node.parent_id].children if node.parent_id else roots).append(built[node.node_id])
+        await self._subsonic.fetch_tracks(user, playlists)
+        return roots
 
     # --- reconciliation (§4.2) ------------------------------------------------------
 

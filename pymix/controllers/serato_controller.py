@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import anyio
 from pyserato.model.hot_cue_type import HotCueType
@@ -80,6 +80,36 @@ class SeratoController:
             )
             return None
 
+    @classmethod
+    def _tree_crates(cls, nodes, above: Tuple[str, ...] = ()) -> List[Tuple[List[str], SubBoxPlaylist]]:
+        """Every playlist in a `live` user's tree with its path, parents first. A
+        folder is only a path: Serato has no folders, only crates within crates."""
+        located = []
+        for node in nodes:
+            path = above + (node.name,)
+            if node.playlist is not None:
+                located.append((list(path), node.playlist))
+            located.extend(cls._tree_crates(node.children, path))
+        return located
+
+    async def _named_crates(self, user: dict, id_set) -> List[Tuple[List[str], SubBoxPlaylist]]:
+        """A `none` user's playlists with the path their joined names stand for."""
+        subsonic_playlists = await self._subsonic_orchestrator.get_subsonic_playlists(user, id_set)
+        if not subsonic_playlists:
+            return []
+
+        # Sorted so a parent crate is written before its children, same reason the
+        # Rekordbox export sorts: two playlists under one folder must not each
+        # create their own copy of it.
+        subsonic_playlists.sort(key=lambda playlist: playlist.name)
+
+        # The stored components are the lossless form; the display name is a
+        # ' / ' join of them and can't be split back apart safely (a playlist
+        # whose own name contains ' / ' would split into the wrong tree).
+        path_rows = self._db_controller.get_playlist_paths(user['username'])
+        path_map = {row['display_name']: row['path_components'] for row in path_rows}
+        return [(path_map.get(p.name) or p.name.split(' / '), p) for p in subsonic_playlists]
+
     async def get_export_structure(
         self, user: dict, playlist_ids: Optional[List[str]] = None
     ) -> SeratoExportResponse:
@@ -92,21 +122,18 @@ class SeratoController:
         """
         username = user['username']
         id_set = set(playlist_ids) if playlist_ids else None
-        subsonic_playlists = await self._subsonic_orchestrator.get_subsonic_playlists(user, id_set)
-        if not subsonic_playlists:
+        tree = await self._playlist_tree.export_tree(user, id_set) if self._playlist_tree else None
+        if tree is not None:
+            # A `live` user (#204, design §5.5): each playlist's path is its
+            # ancestry in the tree, in tree order, so a parent crate comes before
+            # its children and siblings come in the user's order.
+            located = self._tree_crates(tree)
+        else:
+            located = await self._named_crates(user, id_set)
+        if not located:
             logger.info(f'no subsonic playlists found for user {username}')
             return SeratoExportResponse(success=True, reason='no playlists to export')
-
-        # Sorted so a parent crate is written before its children, same reason the
-        # Rekordbox export sorts: two playlists under one folder must not each
-        # create their own copy of it.
-        subsonic_playlists.sort(key=lambda playlist: playlist.name)
-
-        # The stored components are the lossless form; the display name is a
-        # ' / ' join of them and can't be split back apart safely (a playlist
-        # whose own name contains ' / ' would split into the wrong tree).
-        path_rows = self._db_controller.get_playlist_paths(username)
-        path_map = {row['display_name']: row['path_components'] for row in path_rows}
+        subsonic_playlists = [playlist for _, playlist in located]
 
         subbox_ids = [
             track.subbox_id
@@ -118,8 +145,7 @@ class SeratoController:
 
         crates: List[SeratoExportCrate] = []
         n_tracks = 0
-        for playlist in subsonic_playlists:
-            components = path_map.get(playlist.name) or playlist.name.split(' / ')
+        for components, playlist in located:
             tracks: List[SeratoExportTrack] = []
             for track in playlist.tracks or []:
                 relative_path = self._relative_path_in_export(username, track)
