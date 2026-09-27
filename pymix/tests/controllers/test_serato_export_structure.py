@@ -7,15 +7,16 @@ here pin the two things that replaced it and that nothing else checks:
   * `relative_path` is the track's path *inside the download zip*, so the client
     can find the file it just extracted. Get this wrong and the crates parse
     perfectly and resolve nothing, which is exactly how the old version failed.
-  * the crate tree comes from the stored `path_components`, not from splitting
-    the display name, so a playlist whose own name contains ' / ' doesn't
-    silently become two folders.
+  * the crate tree comes from the playlist tree (#204), never from splitting a
+    name, so a playlist whose own name contains ' / ' doesn't silently become two
+    folders.
 """
 from pathlib import Path
 from unittest import mock
 
 import pytest
 
+from pymix.controllers.playlist_tree_controller import ExportNode
 from pymix.controllers.serato_controller import SeratoController
 from pymix.model.subboxplaylist import SubBoxPlaylist
 from pymix.model.subboxtrack import SubBoxTrack
@@ -45,8 +46,8 @@ def controller():
     fb = mock.MagicMock()
     fb.get_user_music_root.return_value = MUSIC_ROOT
     db = mock.MagicMock()
-    db.get_playlist_paths.return_value = []
     db.get_cuedata_by_subbox_id.return_value = {}
+    tree = mock.MagicMock()
 
     c = SeratoController(
         subsonic_orchestrator=subsonic,
@@ -59,14 +60,20 @@ def controller():
         wishlist_reconcile_service=mock.MagicMock(),
         serving_music_path_base='/private-music',
         beets_exec=mock.MagicMock(),
+        playlist_tree_controller=tree,
     )
-    c.subsonic = subsonic
+    c.tree = tree
     c.db = db
     return c
 
 
+def tree_is(controller, *roots):
+    controller.tree.export_tree = mock.AsyncMock(return_value=list(roots))
+
+
 def playlists_are(controller, *playlists):
-    controller.subsonic.get_subsonic_playlists = mock.AsyncMock(return_value=list(playlists))
+    """Each playlist at the top of the tree."""
+    tree_is(controller, *(ExportNode(p.name, p) for p in playlists))
 
 
 @pytest.mark.anyio
@@ -97,30 +104,15 @@ async def test_a_track_outside_the_music_root_is_left_out_rather_than_guessed_at
 
 
 @pytest.mark.anyio
-async def test_the_crate_tree_comes_from_stored_components_not_the_display_name(controller):
+async def test_the_crate_tree_comes_from_the_playlist_tree_not_the_name(controller):
     """A playlist whose own name contains ' / ' must not split into two folders."""
-    controller.db.get_playlist_paths.return_value = [
-        {'display_name': 'Sets / Ambient / Drone', 'path_components': ['Sets', 'Ambient / Drone']},
-    ]
-    playlists_are(
-        controller,
-        SubBoxPlaylist(name='Sets / Ambient / Drone', tracks=[track('a/b/c.mp3')]),
-    )
+    drone = SubBoxPlaylist(name='Ambient / Drone', tracks=[track('a/b/c.mp3')])
+    tree_is(controller, ExportNode('Sets', None, [ExportNode('Ambient / Drone', drone)]))
 
     response = await controller.get_export_structure(USER)
 
     assert response.crates[0].path_components == ['Sets', 'Ambient / Drone']
-    assert response.crates[0].display_name == 'Sets / Ambient / Drone'
-
-
-@pytest.mark.anyio
-async def test_a_playlist_with_no_stored_components_still_gets_a_tree(controller):
-    """The fallback for playlists made in subbox rather than imported from crates."""
-    playlists_are(controller, SubBoxPlaylist(name='Sets / Ambient', tracks=[track('a/b/c.mp3')]))
-
-    response = await controller.get_export_structure(USER)
-
-    assert response.crates[0].path_components == ['Sets', 'Ambient']
+    assert response.crates[0].display_name == 'Ambient / Drone'
 
 
 @pytest.mark.anyio
@@ -189,7 +181,7 @@ async def test_requested_playlist_ids_scope_the_fetch_itself(controller):
 
     await controller.get_export_structure(USER, playlist_ids=['pl-1', 'pl-2'])
 
-    _, id_set = controller.subsonic.get_subsonic_playlists.call_args[0]
+    _, id_set = controller.tree.export_tree.call_args[0]
     assert id_set == {'pl-1', 'pl-2'}
 
 

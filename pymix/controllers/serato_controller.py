@@ -45,8 +45,8 @@ class SeratoController:
         playlist_tree_controller=None,
     ):
         self._subsonic_orchestrator = subsonic_orchestrator
-        # Writes an import's playlists and, for a `live` user, their tree (#202).
-        # Without it, playlists are written as for a `none` user.
+        # Writes an import's playlists and the tree around them (#202), and walks the
+        # tree for an export (#204).
         self._playlist_tree = playlist_tree_controller
         self._serato_crate_orchestrator = serato_crate_orchestrator
         self._serato_backup_file_handler = serato_backup_file_handler
@@ -82,7 +82,7 @@ class SeratoController:
 
     @classmethod
     def _tree_crates(cls, nodes, above: Tuple[str, ...] = ()) -> List[Tuple[List[str], SubBoxPlaylist]]:
-        """Every playlist in a `live` user's tree with its path, parents first. A
+        """Every playlist in the user's tree with its path, parents first. A
         folder is only a path: Serato has no folders, only crates within crates."""
         located = []
         for node in nodes:
@@ -91,24 +91,6 @@ class SeratoController:
                 located.append((list(path), node.playlist))
             located.extend(cls._tree_crates(node.children, path))
         return located
-
-    async def _named_crates(self, user: dict, id_set) -> List[Tuple[List[str], SubBoxPlaylist]]:
-        """A `none` user's playlists with the path their joined names stand for."""
-        subsonic_playlists = await self._subsonic_orchestrator.get_subsonic_playlists(user, id_set)
-        if not subsonic_playlists:
-            return []
-
-        # Sorted so a parent crate is written before its children, same reason the
-        # Rekordbox export sorts: two playlists under one folder must not each
-        # create their own copy of it.
-        subsonic_playlists.sort(key=lambda playlist: playlist.name)
-
-        # The stored components are the lossless form; the display name is a
-        # ' / ' join of them and can't be split back apart safely (a playlist
-        # whose own name contains ' / ' would split into the wrong tree).
-        path_rows = self._db_controller.get_playlist_paths(user['username'])
-        path_map = {row['display_name']: row['path_components'] for row in path_rows}
-        return [(path_map.get(p.name) or p.name.split(' / '), p) for p in subsonic_playlists]
 
     async def get_export_structure(
         self, user: dict, playlist_ids: Optional[List[str]] = None
@@ -122,14 +104,10 @@ class SeratoController:
         """
         username = user['username']
         id_set = set(playlist_ids) if playlist_ids else None
-        tree = await self._playlist_tree.export_tree(user, id_set) if self._playlist_tree else None
-        if tree is not None:
-            # A `live` user (#204, design §5.5): each playlist's path is its
-            # ancestry in the tree, in tree order, so a parent crate comes before
-            # its children and siblings come in the user's order.
-            located = self._tree_crates(tree)
-        else:
-            located = await self._named_crates(user, id_set)
+        # Each playlist's path is its ancestry in the tree (#204, design §5.5), in
+        # tree order, so a parent crate comes before its children and siblings come
+        # in the user's order.
+        located = self._tree_crates(await self._playlist_tree.export_tree(user, id_set))
         if not located:
             logger.info(f'no subsonic playlists found for user {username}')
             return SeratoExportResponse(success=True, reason='no playlists to export')
@@ -293,14 +271,10 @@ class SeratoController:
         # this sets the subsonic id found from querying navidrome. This can then be used to create the playlist and place
         # the track in the playlist
         await self._subsonic_orchestrator.update_tracks_with_subid(user, subbox_playlists)
-        # 8. create the playlists, or update in place the ones the user already has
-        if self._playlist_tree is not None:
-            report.playlists = await self._playlist_tree.import_playlists(
-                user, subbox_playlists, origin='serato', scan_finished=scan_finished)
-        else:
-            report.playlists = await self._subsonic_orchestrator.create_playlists(
-                user, subbox_playlists, scan_finished=scan_finished
-            )
+        # 8. create the playlists, or update in place the ones the user already has,
+        # and the tree around them
+        report.playlists = await self._playlist_tree.import_playlists(
+            user, subbox_playlists, origin='serato', scan_finished=scan_finished)
         return subbox_playlists, report
 
     @staticmethod

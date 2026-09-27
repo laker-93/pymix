@@ -7,12 +7,12 @@ when").
         --user q2purge --password ...
 
 Local dev stack only (see reimport_in_place_roundtrip.py, whose helpers it uses). It
-needs a user whose `playlist_tree_state` is 'none' and who has no nodes: it switches
-them to 'live' for the run, and back to 'none' at the end, deleting the playlists it
-made and every node. The imports are metadata-only, of tracks already in the library.
+needs a user with a playlist tree and at least four tracks. It works under a root
+folder of its own, and deletes the playlists and nodes it made at the end (TreeRun).
+The imports are metadata-only, of tracks already in the library.
 
-There is no move route yet (#204), so the move is written to the database directly,
-the way the tree controller's move_node would write it.
+The move is written to the database directly, the way the tree controller's
+move_node writes it.
 """
 import argparse
 import json
@@ -36,6 +36,55 @@ def psql(sql):
     out = subprocess.run(['docker', 'exec', 'pymix-postgres', 'psql', '-U', 'pymix', '-d', 'pymix', '-tAc', sql],
                          capture_output=True, text=True, check=True).stdout
     return [line.split('|') for line in out.strip().splitlines() if line]
+
+
+class TreeRun:
+    """
+    A driver's run against a `live` user, and its cleanup. Every user is `live` since
+    #211, so the drivers no longer switch a `none` user on and off: they work inside
+    the user's own tree, under a root folder only the run uses, and the cleanup
+    removes what the run made and nothing else.
+    """
+
+    def __init__(self, stack, username):
+        self.stack = stack
+        [[self.user_id, state]] = psql(
+            f"SELECT user_id, playlist_tree_state FROM user_table WHERE username='{username}'")
+        if state != 'live':
+            sys.exit(f'{username} is {state!r}; the driver needs a user with a playlist tree')
+        self.playlists = self.playlist_ids()
+        self.nodes = {r[0] for r in psql(f"SELECT node_id FROM playlist_node_table WHERE user_id='{self.user_id}'")}
+        self.batches = {r[0] for r in psql(
+            f"SELECT batch_id FROM trash_batch_table WHERE user_id='{self.user_id}' AND kind='nodes'")}
+
+    def playlist_ids(self):
+        return {p['id'] for p in self.stack.subsonic('getPlaylists')['playlists'].get('playlist', [])}
+
+    def cleanup(self):
+        """The run's playlists, its `nodes` trash batches and its nodes, then the
+        user's live siblings renumbered 0..n-1: a run can shift the user's own
+        nodes (a move to the top of the root), and deleting its nodes leaves gaps."""
+        made = sorted(self.playlist_ids() - self.playlists)
+        for playlist_id in made:
+            self.stack.subsonic('deletePlaylist', id=playlist_id)
+        batches = [r[0] for r in psql(f"SELECT batch_id FROM trash_batch_table WHERE user_id='{self.user_id}' "
+                                      f"AND kind='nodes'") if r[0] not in self.batches]
+        for batch_id in batches:
+            psql(f"UPDATE playlist_node_table SET trash_batch_id=NULL WHERE trash_batch_id='{batch_id}'")
+            psql(f"DELETE FROM trash_item_table WHERE batch_id='{batch_id}'")
+            psql(f"DELETE FROM trash_batch_table WHERE batch_id='{batch_id}'")
+        nodes = [r[0] for r in psql(f"SELECT node_id FROM playlist_node_table WHERE user_id='{self.user_id}'")
+                 if r[0] not in self.nodes]
+        if nodes:
+            listed = ', '.join(f"'{n}'" for n in nodes)
+            psql(f"UPDATE playlist_node_table SET parent_id=NULL WHERE node_id IN ({listed})")
+            psql(f"DELETE FROM playlist_node_table WHERE node_id IN ({listed})")
+        psql("UPDATE playlist_node_table n SET position = r.rank - 1 FROM ("
+             "SELECT node_id, row_number() OVER (PARTITION BY parent_id ORDER BY position) AS rank "
+             f"FROM playlist_node_table WHERE user_id='{self.user_id}' AND trash_batch_id IS NULL) r "
+             "WHERE n.node_id = r.node_id AND n.position <> r.rank - 1")
+        print(f'cleaned up: {len(made)} playlists, {len(batches)} playlist trash batches and '
+              f'{len(nodes)} nodes the run made')
 
 
 def write_xml(path, songs, tree):
@@ -130,11 +179,8 @@ def main():
     stack = Stack(args.user, args.password, 'http://localhost:' + published.rsplit(':', 1)[1])
     stack.login()
 
-    [[user_id, state]] = psql(f"SELECT user_id, playlist_tree_state FROM user_table WHERE username='{args.user}'")
-    [[n_nodes]] = psql(f"SELECT count(*) FROM playlist_node_table WHERE user_id='{user_id}'")
-    if state != 'none' or n_nodes != '0':
-        sys.exit(f'{args.user} is {state!r} with {n_nodes} nodes; the driver needs none and 0')
-    before_ids = {p['id'] for p in stack.subsonic('getPlaylists')['playlists'].get('playlist', [])}
+    run = TreeRun(stack, args.user)
+    user_id, before_ids = run.user_id, run.playlists
 
     songs = stack.native('GET', '/api/song?_start=0&_end=50&missing=false')
     if len(songs) < 4:
@@ -157,7 +203,6 @@ def main():
         print(f'rekordbox import {tag}: result={progress["result"]} warnings={progress["warnings"]!r}')
         return progress
 
-    psql(f"UPDATE user_table SET playlist_tree_state='live' WHERE user_id='{user_id}'")
     try:
         # --- a nested Rekordbox import --------------------------------------------------
         source = {root: {'House': {'2024': {'Deep': [a, b], 'Tech': [c]}, 'Warmup': [d]}, 'Loose': [a]}}
@@ -193,7 +238,7 @@ def main():
         entries = stack.entries(deep['navidrome_playlist_id'])
         check('the moved, renamed Deep got the XML entries', entries == [c['id'], a['id']], str(entries))
         check('no duplicate Deep was created', not any(
-            n['name'] == 'Deep' for n in tree_after))
+            n['name'] == 'Deep' and n['node_id'] not in run.nodes for n in tree_after))
         check('Deep kept its name and place', tree_after[0]['node_id'] == deep['node_id']
               and tree_after[0]['name'] == 'Deep (Sunday)' and tree_after[0]['parent_id'] is None)
         check('existing nodes kept their positions', all(
@@ -227,13 +272,7 @@ def main():
                        f"AND source_path::text LIKE '%{crates_root}%'")
         check('the crates\' nodes are serato', origins == [['serato']], str(origins))
     finally:
-        made = [p['id'] for p in stack.subsonic('getPlaylists')['playlists'].get('playlist', [])
-                if p['id'] not in before_ids]
-        for playlist_id in made:
-            stack.subsonic('deletePlaylist', id=playlist_id)
-        psql(f"DELETE FROM playlist_node_table WHERE user_id='{user_id}'")
-        psql(f"UPDATE user_table SET playlist_tree_state='none' WHERE user_id='{user_id}'")
-        print(f'cleaned up: {len(made)} playlists deleted, every node removed, {args.user} back to none')
+        run.cleanup()
 
     print(f'\n{sum(checks)}/{len(checks)} checks passed')
     sys.exit(0 if all(checks) else 1)

@@ -5,11 +5,11 @@ These are the structural verbs: read the tree, create a folder, create a playlis
 inside one, rename (folders), move and reorder a node, and delete (#207). The
 content verbs (rename a playlist, add, reorder or remove its tracks) stay client ->
 Navidrome: the tree is keyed by Navidrome id, not by name, so they don't disturb it.
-A delete's restore is `POST /trash/{id}/restore` (`routers/trash.py`). The migration
-into the tree is an admin route (#205, `routers/admin.py`).
+A delete's restore is `POST /trash/{id}/restore` (`routers/trash.py`).
 
 Every route is `require_uploader` (demo gets 403) and answers 409
-`tree_not_enabled` for a user whose tree state is 'none'.
+`tree_not_enabled` for a user whose tree state is 'none', which since #211 is only
+demo, so in practice never.
 """
 import logging
 from typing import Any, Dict, List, Optional

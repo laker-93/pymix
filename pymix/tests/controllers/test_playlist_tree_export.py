@@ -1,18 +1,19 @@
 """
 #204: a `live` user's Rekordbox and Serato exports walk the playlist tree, so what
 an import built comes back out with the same structure and in the user's own order
-(design-playlists-and-undo §5.4, §5.5). A `none` user's export is unchanged.
+(design-playlists-and-undo §5.4, §5.5). Since #211 the tree is the only way out: a
+user without one is refused.
 
 The tree is built by a real import (#202) over the fake Navidrome; the Rekordbox XML
 is real, minus the audio files each track would need.
 """
-import asyncio
-
 import pytest
 
+from pymix.controllers.playlist_tree_controller import TreeNotEnabled
 from pymix.model.db_tables import PlaylistNodeRow
 from pymix.tests.fixtures.playlist_tree import (  # noqa: F401 (fixtures)
-    USER, _import, _incoming, _node, _playlists, _xml, db_controller, navidrome, rekordbox, serato, sessions, tree,
+    USER, _import, _incoming, _node, _playlists, _xml, db_controller, navidrome, rekordbox, serato, sessions,
+    set_tree_state, tree,
 )
 
 NESTED = [('House', '2024', 'Deep'), ('House', '2024', 'Tech'), ('House', 'Warmup'), ('Loose',)]
@@ -145,34 +146,29 @@ async def test_a_filtered_export_has_the_selected_playlists_and_their_path_only(
 
 
 @pytest.mark.anyio
-async def test_a_none_users_export_is_unchanged(tree, rekordbox, navidrome, db_controller):
-    db_controller.set_playlist_tree_state('dj', 'none')
+async def test_a_user_without_a_tree_is_refused_not_exported_by_joined_name(tree, rekordbox, navidrome, sessions):
+    # Only demo is 'none' since #211, and its reads resolve to demoadmin. The export
+    # by joined name, split on ' / ', is gone with playlist_path_table.
+    set_tree_state(sessions, 'none')
     navidrome.add('House / Deep', songs=('1',))
-    navidrome.add('Loose', songs=('2',))
 
-    assert await tree.export_tree(USER) is None
-    assert await _xml(rekordbox) == [
-        ('House', 'folder', None),
-        ('  Deep', 'playlist', [1]),
-        ('Loose', 'playlist', [2]),
-        ('NOPLAYLIST', 'playlist', []),
-    ]
+    with pytest.raises(TreeNotEnabled):
+        await tree.export_tree(USER)
+    with pytest.raises(TreeNotEnabled):
+        await _xml(rekordbox)
 
 
 @pytest.mark.anyio
-async def test_the_state_is_read_under_the_tree_lock(tree, navidrome, db_controller):
-    # #205's migration holds the lock while it renames a user's playlists and then
-    # makes them `live`. An export that read the state first would take them for a
-    # `none` user and split names that are no longer joined.
-    db_controller.set_playlist_tree_state('dj', 'none')
-    navidrome.add('Deep', songs=('1',))
-    async with tree._locks.hold('dj'):
-        export = asyncio.ensure_future(tree.export_tree(USER))
-        await asyncio.sleep(0)
-        db_controller.set_playlist_tree_state('dj', 'live')
+async def test_a_name_with_a_slash_in_it_is_one_playlist(tree, rekordbox, serato, navidrome):
+    # The tree is the only path now: a name is never split, in either export.
+    navidrome.add('House / Deep', songs=('1',))
 
-    exported = await export
-    assert [n.name for n in exported] == ['Deep']
+    assert await _xml(rekordbox) == [
+        ('House / Deep', 'playlist', [1]),
+        ('NOPLAYLIST', 'playlist', []),
+    ]
+    response = await serato.get_export_structure(USER)
+    assert [c.path_components for c in response.crates] == [['House / Deep']]
 
 
 # --- Serato ---------------------------------------------------------------------------
@@ -220,10 +216,9 @@ async def test_a_filtered_serato_export_has_the_selected_crates_only(tree, serat
 
 
 @pytest.mark.anyio
-async def test_a_none_users_serato_export_still_splits_joined_names(tree, serato, navidrome, db_controller):
-    db_controller.set_playlist_tree_state('dj', 'none')
+async def test_a_user_without_a_tree_gets_no_serato_export(tree, serato, navidrome, sessions):
+    set_tree_state(sessions, 'none')
     navidrome.add('Sets / House', songs=('1',))
 
-    response = await serato.get_export_structure(USER)
-
-    assert [c.path_components for c in response.crates] == [['Sets', 'House']]
+    with pytest.raises(TreeNotEnabled):
+        await serato.get_export_structure(USER)

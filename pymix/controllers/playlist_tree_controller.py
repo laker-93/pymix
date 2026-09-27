@@ -17,9 +17,9 @@ This module holds the invariants (§4.1), in one place:
   - a playlist may have children (a Serato crate with its own tracks and sub-crates).
 
 Every write, and reconciliation, runs under the user's tree lock
-(`pymix.services.tree_lock`). A user whose `playlist_tree_state` is 'none' has no
-nodes, and nothing here writes any for them but the migration (#205), which only
-makes its nodes visible when it sets the state to 'live'.
+(`pymix.services.tree_lock`). Every user is 'live' since #211 but `demo`, whose
+`playlist_tree_state` is 'none': it has no nodes, the tree routes refuse it, and it
+never reaches an import or an export as itself (its reads resolve to demoadmin).
 """
 import datetime
 import logging
@@ -137,11 +137,7 @@ class PlaylistTreeController:
         }
 
     def _require_live(self, username: str) -> str:
-        """The user's id, or TreeNotEnabled. Read with the tree lock held wherever
-        what follows writes nodes or trusts the state: the migration and its
-        rollback (#205) change it under the same lock, so a check made before
-        taking it can be stale by the time the write runs, and write nodes for a
-        user who has just gone back to 'none'."""
+        """The user's id, or TreeNotEnabled."""
         with self._sessions() as session:
             row = session.query(UserRow.user_id, UserRow.playlist_tree_state).filter(
                 UserRow.username == username).one()
@@ -288,8 +284,8 @@ class PlaylistTreeController:
             'navidrome_playlist_id': row.navidrome_playlist_id,
         }
 
-    def _add(self, session, user_id, kind, parent_id, position, name, navidrome_playlist_id, source_path, origin,
-             migrated_from_name=None) -> str:
+    def _add(self, session, user_id, kind, parent_id, position, name, navidrome_playlist_id, source_path,
+             origin) -> str:
         if kind == FOLDER:
             if navidrome_playlist_id is not None:
                 raise TreeInvariantError("a folder has no Navidrome playlist")
@@ -312,7 +308,7 @@ class PlaylistTreeController:
             node_id=node_id, user_id=user_id, parent_id=parent_id,
             position=self._open_gap(session, user_id, parent_id, position),
             kind=kind, name=name, navidrome_playlist_id=navidrome_playlist_id,
-            source_path=source_path, origin=origin, migrated_from_name=migrated_from_name,
+            source_path=source_path, origin=origin,
             created_at=now, updated_at=now,
         ))
         session.flush()
@@ -668,12 +664,10 @@ class PlaylistTreeController:
             self, user: dict, playlists: List[SubBoxPlaylist], *, origin: str, scan_finished: bool,
     ) -> PlaylistWriteReport:
         """
-        Write a Rekordbox or Serato import's playlists, and for a `live` user, the
-        tree around them.
+        Write a Rekordbox or Serato import's playlists, and the tree around them.
+        TreeNotEnabled for a user with no tree.
 
-        A `none` user gets today's import: joined names, matched by name (#203).
-
-        For a `live` user every match is by `source_path`, the playlist's full path
+        Every match is by `source_path`, the playlist's full path
         in the source library, among their live nodes. A match is updated in place
         wherever it now sits and whatever it's now called: a playlist the user
         moved or renamed in subbox is still the same playlist. Anything unmatched
@@ -686,10 +680,8 @@ class PlaylistTreeController:
         from: a Serato crate `House/Deep` is the Rekordbox playlist `House/Deep`.
         """
         username = user['username']
-        if self._db.playlist_tree_state(username) != 'live':
-            return await self._subsonic.create_playlists(user, playlists, scan_finished=scan_finished)
-        user_id = self._require_live(username)
         async with self._locks.hold(username):
+            user_id = self._require_live(username)
             owned = await self._subsonic.owned_playlists(user)
             self._reconcile(user_id, username, owned)
             with self._sessions() as session:
@@ -761,13 +753,10 @@ class PlaylistTreeController:
 
     # --- exports (#204, §5.4, §5.5) -------------------------------------------------
 
-    async def export_tree(self, user: dict, playlist_ids: Optional[Set[str]] = None) -> Optional[List[ExportNode]]:
+    async def export_tree(self, user: dict, playlist_ids: Optional[Set[str]] = None) -> List[ExportNode]:
         """
         The live tree as a Rekordbox or Serato export writes it: roots in order, each
-        playlist with its tracks. None for a `none` user, whose export is unchanged.
-
-        The state is read under the tree lock, because #205's migration holds it
-        while it renames a user's playlists to their leaf names and makes them `live`.
+        playlist with its tracks. TreeNotEnabled for a user with no tree.
 
         With `playlist_ids`, only the selected playlists and the nodes on their path.
         A playlist that is only on the path is exported as a folder, without its own
@@ -775,17 +764,13 @@ class PlaylistTreeController:
         """
         username = user['username']
         async with self._locks.hold(username):
-            with self._sessions() as session:
-                row = session.query(UserRow.user_id, UserRow.playlist_tree_state).filter(
-                    UserRow.username == username).one()
-            if row.playlist_tree_state != 'live':
-                return None
+            user_id = self._require_live(username)
             owned = await self._subsonic.owned_playlists(user)
-            self._reconcile(row.user_id, username, owned)
+            self._reconcile(user_id, username, owned)
             with self._sessions() as session:
                 # Tree order walks down from the root through live nodes only, so a
                 # live node under a trashed one is never reached.
-                live = self._tree_order(self._live_nodes(session, row.user_id))
+                live = self._tree_order(self._live_nodes(session, user_id))
         by_id = {p.subsonic_id: p for p in owned}
 
         by_node = {n.node_id: n for n in live}
@@ -822,171 +807,6 @@ class PlaylistTreeController:
             (built[node.parent_id].children if node.parent_id else roots).append(built[node.node_id])
         await self._subsonic.fetch_tracks(user, playlists)
         return roots
-
-    # --- migration (#205, §6) ------------------------------------------------------
-
-    async def migrate(self, user: dict, *, dry_run: bool = False) -> dict:
-        """
-        Build a `none` user's tree from their joined playlist names, rename each
-        playlist to its leaf, then make them `live`. Idempotent: a `live` user is left
-        alone, and a run that stopped part way is finished by the next one.
-
-        All of it runs under the tree lock, which exports take to read the state
-        (#204): between the renames and the state flip, an export would otherwise
-        see leaf names with no tree.
-
-        A playlist's components are its `playlist_path_table` row, else its name
-        split on ' / ', exactly as both `none` exports read it. A smart playlist is
-        never split or renamed: no import made it. The order is the exports' sort
-        by joined name. A prefix resolves the way an import's does (#202), so a
-        playlist `A` beside `A / B` becomes a playlist with children.
-
-        A stopped run leaves nodes, and maybe some playlists already renamed. Their
-        names from before are on those nodes (`_flat_names`), so they're read back
-        first: rebuilding from the leaf names would put every renamed playlist at
-        the root.
-        """
-        username = user['username']
-        async with self._locks.hold(username):
-            with self._sessions() as session:
-                row = session.query(UserRow.user_id, UserRow.playlist_tree_state).filter(
-                    UserRow.username == username).one()
-            if row.playlist_tree_state == 'live':
-                return {'username': username, 'outcome': 'already_live'}
-            owned = await self._subsonic.owned_playlists(user)
-            with self._sessions() as session:
-                before = self._flat_names(session, row.user_id, owned)
-            paths = {r['display_name']: r['path_components'] for r in self._db.get_playlist_paths(username)}
-            planned = []
-            for playlist in owned:
-                flat = before.get(playlist.subsonic_id, playlist.name)
-                if playlist.readonly:
-                    components = [flat]
-                else:
-                    components = list(paths.get(flat) or flat.split(' / '))
-                planned.append((flat, components, playlist))
-            planned.sort(key=lambda p: p[0])
-            renames = [(flat, components[-1], playlist) for flat, components, playlist in planned
-                       if playlist.name != components[-1]]
-            report = {
-                'username': username,
-                'playlists': len(planned),
-                'renames': len(renames),
-                # §15 Q8: split with nothing to say that's right. A subbox playlist
-                # named "A / B" becomes B in a folder A, as the export already has it.
-                # A review list, not a count of mistakes: only the Rekordbox import
-                # ever wrote path rows, so every nested Serato crate is on it too,
-                # split correctly unless the crate's own name has ' / ' in it.
-                'split_without_path_row': sorted(
-                    flat for flat, components, playlist in planned
-                    if len(components) > 1 and flat not in paths),
-            }
-            if dry_run:
-                return {**report, 'outcome': 'dry_run'}
-
-            with self._sessions() as session:
-                # Anything a stopped run (or rollback) left: its names are in `before`.
-                session.query(PlaylistNodeRow).filter(PlaylistNodeRow.user_id == row.user_id).delete(
-                    synchronize_session=False)
-                session.flush()
-                for flat, components, playlist in planned:
-                    parent_id = self._resolve_parent(session, row.user_id, tuple(components[:-1]), 'migrated')
-                    self._add(session, row.user_id, PLAYLIST, parent_id, None, None, playlist.subsonic_id,
-                              components, 'migrated', migrated_from_name=flat)
-                session.commit()
-
-            failed = []
-            for flat, leaf, playlist in renames:
-                if not await self._subsonic.rename_playlist(user, playlist.subsonic_id, leaf):
-                    failed.append(flat)
-            if failed:
-                # Still `none`: the tree stays invisible and the next run finishes.
-                logger.error(f"migrating {username}: {len(failed)} renames failed; still none: {failed}")
-                return {**report, 'outcome': 'incomplete', 'failed_renames': failed}
-            self._db.set_playlist_tree_state(username, 'live')
-        logger.info(f"migrated {username}: {len(planned)} playlists, {len(renames)} renamed")
-        return {**report, 'outcome': 'migrated'}
-
-    async def rollback(self, user: dict) -> dict:
-        """
-        Undo `migrate`: the state goes back to `none` first, so exports take the old
-        path at once. Then each playlist gets back the name it had (`_flat_names`),
-        and the nodes are deleted. Idempotent, like the migration.
-
-        Refused once anything is in a nodes trash batch (#207): that can't be put
-        back into joined names.
-        """
-        username = user['username']
-        async with self._locks.hold(username):
-            with self._sessions() as session:
-                user_id = session.query(UserRow.user_id).filter(UserRow.username == username).scalar()
-                nodes = session.query(PlaylistNodeRow).filter(PlaylistNodeRow.user_id == user_id).all()
-                if any(n.trash_batch_id is not None for n in nodes):
-                    raise TreeInvariantError(f"{username} has playlists or folders in the trash")
-                if not nodes and self._db.playlist_tree_state(username) == 'none':
-                    return {'username': username, 'outcome': 'already_none'}
-            self._db.set_playlist_tree_state(username, 'none')
-            owned = await self._subsonic.owned_playlists(user)
-            with self._sessions() as session:
-                before = self._flat_names(session, user_id, owned)
-            by_id = {p.subsonic_id: p for p in owned}
-            failed, renamed = [], 0
-            for playlist_id, flat in before.items():
-                if by_id[playlist_id].name == flat:
-                    continue
-                if await self._subsonic.rename_playlist(user, playlist_id, flat):
-                    renamed += 1
-                else:
-                    failed.append(flat)
-            if failed:
-                # The nodes stay, so the next rollback still knows every name.
-                logger.error(f"rolling back {username}: {len(failed)} renames failed: {failed}")
-                return {'username': username, 'outcome': 'incomplete', 'renames': renamed, 'failed_renames': failed}
-            with self._sessions() as session:
-                session.query(PlaylistNodeRow).filter(PlaylistNodeRow.user_id == user_id).delete(
-                    synchronize_session=False)
-                session.commit()
-        logger.info(f"rolled back {username}: {renamed} playlists renamed back")
-        return {'username': username, 'outcome': 'rolled_back', 'renames': renamed}
-
-    async def migrate_all(self, users: List[dict], *, dry_run: bool = False) -> dict:
-        """`migrate` for each user in turn, one failing not stopping the rest. The
-        report ends with how many users are still `none`: the pass is re-run until
-        that's zero."""
-        outcomes = []
-        for user in users:
-            try:
-                outcomes.append(await self.migrate(user, dry_run=dry_run))
-            except Exception as ex:
-                logger.exception(f"migrating {user['username']} failed")
-                outcomes.append({'username': user['username'], 'outcome': 'error', 'error': repr(ex)})
-        return {
-            'users': outcomes,
-            'still_none': sum(self._db.playlist_tree_state(u['username']) == 'none' for u in users),
-        }
-
-    def _flat_names(self, session, user_id: str, playlists: List[SubBoxPlaylist]) -> Dict[str, str]:
-        """
-        For each playlist with a node, the name it has as a `none` user: its
-        `migrated_from_name`, else (made after the migration) its path in the tree,
-        joined. What a rollback renames it back to, and what a re-run of a stopped
-        migration reads instead of a leaf name it already gave it.
-        """
-        names = {p.subsonic_id: p.name for p in playlists}
-        nodes = {n.node_id: n for n in session.query(PlaylistNodeRow).filter(PlaylistNodeRow.user_id == user_id)}
-        flat = {}
-        for node in nodes.values():
-            if node.kind != PLAYLIST or node.navidrome_playlist_id not in names:
-                continue
-            if node.migrated_from_name:
-                flat[node.navidrome_playlist_id] = node.migrated_from_name
-                continue
-            parts, current = [], node
-            while current is not None:
-                parts.append(current.name if current.kind == FOLDER else names.get(current.navidrome_playlist_id, ''))
-                current = nodes.get(current.parent_id)
-            flat[node.navidrome_playlist_id] = ' / '.join(reversed(parts))
-        return flat
 
     # --- reconciliation (§4.2) ------------------------------------------------------
 

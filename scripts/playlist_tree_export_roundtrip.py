@@ -7,9 +7,8 @@ tree, export them again, and check the structure and order came back out (#204's
         --user q2purge --password ...
 
 Local dev stack only, with the same needs and cleanup as
-playlist_tree_import_roundtrip.py, whose helpers it uses: a user whose
-`playlist_tree_state` is 'none' and who has no nodes, switched to 'live' for the run
-and back at the end.
+playlist_tree_import_roundtrip.py, whose helpers it uses: a user with a playlist
+tree and at least four tracks (TreeRun).
 
 The reorder goes through PATCH /playlists/nodes/{id} (#206).
 """
@@ -21,7 +20,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from playlist_tree_import_roundtrip import import_crates, psql, write_xml  # noqa: E402
+from playlist_tree_import_roundtrip import TreeRun, import_crates, write_xml  # noqa: E402
 from reimport_in_place_roundtrip import Stack, run_import  # noqa: E402
 
 from pyrekordbox.rbxml import RekordboxXml  # noqa: E402
@@ -74,11 +73,7 @@ def main():
     stack = Stack(args.user, args.password, 'http://localhost:' + published.rsplit(':', 1)[1])
     stack.login()
 
-    [[user_id, state]] = psql(f"SELECT user_id, playlist_tree_state FROM user_table WHERE username='{args.user}'")
-    [[n_nodes]] = psql(f"SELECT count(*) FROM playlist_node_table WHERE user_id='{user_id}'")
-    if state != 'none' or n_nodes != '0':
-        sys.exit(f'{args.user} is {state!r} with {n_nodes} nodes; the driver needs none and 0')
-    before_ids = {p['id'] for p in stack.subsonic('getPlaylists')['playlists'].get('playlist', [])}
+    run = TreeRun(stack, args.user)
 
     songs = stack.native('GET', '/api/song?_start=0&_end=50&missing=false')
     if len(songs) < 4:
@@ -104,7 +99,6 @@ def main():
     def under(lines, top):
         return [line for line in lines if line[0][0] == top]
 
-    psql(f"UPDATE user_table SET playlist_tree_state='live' WHERE user_id='{user_id}'")
     try:
         # --- Rekordbox: import, export ---------------------------------------------------
         source = {root: {'House': {'2024': {'Deep': [a, b], 'Tech': [c]}, 'Warmup': [d]}, 'Loose': [a, d]}}
@@ -165,13 +159,7 @@ def main():
                   ((crates_root, 'Techno'), 'folder'), ((crates_root, 'Techno', 'Peak'), 'playlist')],
               str(under(exported, crates_root)))
     finally:
-        made = [p['id'] for p in stack.subsonic('getPlaylists')['playlists'].get('playlist', [])
-                if p['id'] not in before_ids]
-        for playlist_id in made:
-            stack.subsonic('deletePlaylist', id=playlist_id)
-        psql(f"DELETE FROM playlist_node_table WHERE user_id='{user_id}'")
-        psql(f"UPDATE user_table SET playlist_tree_state='none' WHERE user_id='{user_id}'")
-        print(f'cleaned up: {len(made)} playlists deleted, every node removed, {args.user} back to none')
+        run.cleanup()
 
     print(f'\n{sum(checks)}/{len(checks)} checks passed')
     sys.exit(0 if all(checks) else 1)

@@ -21,9 +21,9 @@ class UserRow(Base):
     # NULL until first measured; see migration 021.
     bytes_used = Column(BigInteger, nullable=True)
     # Whether the user has a playlist tree (#201, design §4.4): 'none' or 'live'.
-    # Only the #205 migration and its rollback change it; nothing is inferred from
-    # whether nodes exist. While 'none', nothing writes nodes for the user.
-    playlist_tree_state = Column(String, nullable=False, default='none', server_default='none')
+    # Every user is 'live' since #211 but `demo`, who never has a tree (§4.3); a
+    # 'none' user gets 409 from the tree routes and can't import or export.
+    playlist_tree_state = Column(String, nullable=False, default='live', server_default='live')
     wishlist_sheet_id = Column(String, nullable=True)
     wishlist_sheet_status = Column(String, nullable=True)
     wishlist_sheet_error = Column(String, nullable=True)
@@ -150,14 +150,6 @@ class UserTokenRow(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String, default='')
     token = Column(String, nullable=False)
-
-
-class PlaylistPathRow(Base):
-    __tablename__ = 'playlist_path_table'
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(String, nullable=False)
-    display_name = Column(String, nullable=False)
-    path_components = Column(JSON, nullable=False)
 
 
 class InviteRequestRow(Base):
@@ -346,9 +338,6 @@ class PlaylistNodeRow(Base):
     source_path = Column(JSON, nullable=True)
     # 'rekordbox' | 'serato' | 'subbox' | 'migrated'.
     origin = Column(String, nullable=False)
-    # The joined name the playlist had before #205 migrated it. Dropped with
-    # playlist_path_table.
-    migrated_from_name = Column(String, nullable=True)
     # Non-null: soft-deleted, i.e. hidden (#207).
     trash_batch_id = Column(String, ForeignKey('trash_batch_table.batch_id'), nullable=True)
     created_at = Column(Float, nullable=False)

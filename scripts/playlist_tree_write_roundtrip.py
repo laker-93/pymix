@@ -1,15 +1,15 @@
 """
 Build a folder tree through the #206 write routes (create a folder, create a playlist
 inside one, rename, move, reorder), then check it in the next GET /playlists/tree and
-in the next Rekordbox and Serato export (#206's "done when"), and that a user without
-a tree gets 409 from every route.
+in the next Rekordbox and Serato export (#206's "done when"). A user without a tree
+getting 409 is unit-tested: since #211 only demo has none, and it gets 403 first.
 
     PYTHONPATH=. .venv/bin/python scripts/playlist_tree_write_roundtrip.py \
         --user q2purge --password ...
 
 Local dev stack only, with the same needs and cleanup as
-playlist_tree_export_roundtrip.py: a user whose `playlist_tree_state` is 'none' with
-no nodes and at least four tracks, switched to 'live' for the run and back at the end.
+playlist_tree_export_roundtrip.py: a user with a playlist tree and at least four
+tracks (TreeRun).
 """
 import argparse
 import subprocess
@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from playlist_tree_export_roundtrip import export_xml  # noqa: E402
-from playlist_tree_import_roundtrip import outline, psql  # noqa: E402
+from playlist_tree_import_roundtrip import TreeRun, outline  # noqa: E402
 from reimport_in_place_roundtrip import Stack  # noqa: E402
 
 
@@ -43,11 +43,7 @@ def main():
     stack = Stack(args.user, args.password, 'http://localhost:' + published.rsplit(':', 1)[1])
     stack.login()
 
-    [[user_id, state]] = psql(f"SELECT user_id, playlist_tree_state FROM user_table WHERE username='{args.user}'")
-    [[n_nodes]] = psql(f"SELECT count(*) FROM playlist_node_table WHERE user_id='{user_id}'")
-    if state != 'none' or n_nodes != '0':
-        sys.exit(f'{args.user} is {state!r} with {n_nodes} nodes; the driver needs none and 0')
-    before_ids = {p['id'] for p in stack.subsonic('getPlaylists')['playlists'].get('playlist', [])}
+    run = TreeRun(stack, args.user)
 
     songs = stack.native('GET', '/api/song?_start=0&_end=50&missing=false')
     if len(songs) < 4:
@@ -70,7 +66,6 @@ def main():
     def patch(node, body):
         return stack.pymix_call('PATCH', f"/playlists/nodes/{node['node_id']}", body)
 
-    psql(f"UPDATE user_table SET playlist_tree_state='live' WHERE user_id='{user_id}'")
     try:
         # --- build it ----------------------------------------------------------------
         top = folder(root)
@@ -127,25 +122,8 @@ def main():
         code, detail = status(lambda: folder('x', 'no-such-node'))
         check('a parent that is not one of the user\'s nodes: 404', code == 404, detail)
         check('none of that changed the tree', outline(stack, root)[0] == expected)
-
-        # --- a user without a tree ---------------------------------------------------------
-        psql(f"UPDATE user_table SET playlist_tree_state='none' WHERE user_id='{user_id}'")
-        n_before = psql(f"SELECT count(*) FROM playlist_node_table WHERE user_id='{user_id}'")
-        n_playlists = len(stack.subsonic('getPlaylists')['playlists'].get('playlist', []))
-        codes = [status(call)[0] for call in (
-            lambda: folder('x'), lambda: playlist('x', None, [a]), lambda: patch(top, {'name': 'x'}),
-            lambda: stack.pymix_call('GET', '/playlists/tree'))]
-        check('a none user gets 409 from every route, and nothing is written', codes == [409] * 4
-              and psql(f"SELECT count(*) FROM playlist_node_table WHERE user_id='{user_id}'") == n_before
-              and len(stack.subsonic('getPlaylists')['playlists'].get('playlist', [])) == n_playlists, str(codes))
     finally:
-        made = [p['id'] for p in stack.subsonic('getPlaylists')['playlists'].get('playlist', [])
-                if p['id'] not in before_ids]
-        for playlist_id in made:
-            stack.subsonic('deletePlaylist', id=playlist_id)
-        psql(f"DELETE FROM playlist_node_table WHERE user_id='{user_id}'")
-        psql(f"UPDATE user_table SET playlist_tree_state='none' WHERE user_id='{user_id}'")
-        print(f'cleaned up: {len(made)} playlists deleted, every node removed, {args.user} back to none')
+        run.cleanup()
 
     print(f'\n{sum(checks)}/{len(checks)} checks passed')
     sys.exit(0 if all(checks) else 1)

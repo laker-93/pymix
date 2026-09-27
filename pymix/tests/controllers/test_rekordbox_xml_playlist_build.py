@@ -29,6 +29,7 @@ def _make_controller(rekordbox_xml_orchestrator):
         local_user_music_stem="foo",
         serving_music_path_base="/private-music",
         beets_exec=mock.Mock(),
+        playlist_tree_controller=mock.Mock(import_playlists=mock.AsyncMock()),
     )
 
 
@@ -60,4 +61,5 @@ async def test_playlists_are_built_once_off_the_event_loop_and_shared_by_both_pa
     assert built_on and built_on[0] != loop_thread
     assert create.call_args.args[4] is playlists
     assert metadata.call_args.args[5] is playlists
-    controller._subsonic_orchestrator.create_playlists.assert_awaited_once_with({"username": "demo"}, playlists, scan_finished=True)
+    controller._playlist_tree.import_playlists.assert_awaited_once_with(
+        {"username": "demo"}, playlists, origin='rekordbox', scan_finished=True)

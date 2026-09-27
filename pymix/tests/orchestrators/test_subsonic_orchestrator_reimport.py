@@ -2,6 +2,10 @@
 #203: a re-import updates a playlist the user already has in place, keeping its
 Navidrome id, instead of deleting it and creating a new one by name.
 
+Which playlist an incoming one matches is the tree's to say, by `source_path`
+(#202, test_playlist_tree_import.py); the match by joined name went with #211. What
+the orchestrator does with a match, or with no match, is here.
+
 The Navidrome behaviour these rest on was measured on 0.60.3 (design-playlists-and-undo
 §15 Q7): `createPlaylist` with `playlistId` keeps the id, name, comment and public flag;
 with no song ids it changes nothing; on a smart playlist it returns ok and changes
@@ -47,10 +51,21 @@ def native():
 
 
 async def _write(client, existing, incoming, scan_finished=True, native=None):
-    client.get_playlists.return_value = existing
+    """Each incoming playlist to the orchestrator, as the tree's import hands it
+    over: updated in place if it matched one of ``existing`` (here, by name, the
+    first unclaimed), created if not."""
     if native is None:
         native = mock.Mock(playlist_tracks=mock.AsyncMock(return_value=[]))
-    report = await SubsonicOrchestrator(client, native).create_playlists(USER, incoming, scan_finished=scan_finished)
+    orchestrator = SubsonicOrchestrator(client, native)
+    report = PlaylistWriteReport()
+    unclaimed = list(existing or [])
+    for playlist in incoming:
+        match = next((p for p in unclaimed if p.name == playlist.name), None)
+        if match is None:
+            await orchestrator.create_playlist(USER, playlist, report)
+        else:
+            unclaimed.remove(match)
+            await orchestrator.update_playlist(USER, playlist, match, report, scan_finished=scan_finished)
     client.delete_playlist.assert_not_called()
     return report
 
@@ -76,23 +91,6 @@ async def test_a_new_playlist_is_created(client):
     client.create_playlist.assert_awaited_once_with(USER, 'Techno', incoming.tracks)
     client.replace_playlist.assert_not_called()
     assert report.created == ['Techno']
-
-
-@pytest.mark.anyio
-async def test_another_users_public_playlist_is_never_matched(client):
-    report = await _write(client, [_existing('Deep', 'theirs', owner='someone')], [_incoming('Deep', 's1')])
-
-    client.replace_playlist.assert_not_called()
-    assert report.created == ['Deep']
-
-
-@pytest.mark.anyio
-async def test_a_smart_playlist_is_never_matched(client):
-    # Navidrome would return ok and change nothing, and the user's rules are theirs.
-    report = await _write(client, [_existing('Deep', 'smart', readonly=True)], [_incoming('Deep', 's1')])
-
-    client.replace_playlist.assert_not_called()
-    assert report.created == ['Deep']
 
 
 @pytest.mark.anyio
@@ -125,25 +123,6 @@ async def test_a_match_none_of_whose_tracks_matched_is_left_alone(client):
 
 
 @pytest.mark.anyio
-async def test_two_incoming_playlists_of_one_name_update_one_and_create_the_other(client):
-    first, second = _incoming('Deep', 's1'), _incoming('Deep', 's2')
-
-    report = await _write(client, [_existing('Deep', 'pl-1')], [first, second])
-
-    client.replace_playlist.assert_awaited_once_with(USER, 'pl-1', first.tracks)
-    client.create_playlist.assert_awaited_once_with(USER, 'Deep', second.tracks)
-    assert report.updated == ['Deep'] and report.created == ['Deep']
-
-
-@pytest.mark.anyio
-async def test_of_two_owned_playlists_with_the_name_the_first_is_updated(client):
-    report = await _write(client, [_existing('Deep', 'pl-1'), _existing('Deep', 'pl-2')], [_incoming('Deep', 's1')])
-
-    assert client.replace_playlist.await_args.args[1] == 'pl-1'
-    assert report.updated == ['Deep']
-
-
-@pytest.mark.anyio
 async def test_a_write_navidrome_refused_is_reported(client):
     client.replace_playlist.return_value = False
     client.create_playlist.return_value = False
@@ -152,13 +131,6 @@ async def test_a_write_navidrome_refused_is_reported(client):
 
     assert report.failed == ['Deep', 'New']
     assert report.warning() == "`Deep`, `New` could not be written to your library."
-
-
-@pytest.mark.anyio
-async def test_a_user_with_no_playlists_gets_them_created(client):
-    report = await _write(client, None, [_incoming('Deep', 's1')])
-
-    assert report.created == ['Deep']
 
 
 @pytest.mark.anyio
