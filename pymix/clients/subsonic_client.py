@@ -698,6 +698,10 @@ class SubsonicClient(BaseAPIClient):
         #201), or None if Navidrome refused."""
         return await self._write_playlist(user, [('name', name)], _song_ids(tracks))
 
+    async def create_playlist_from_ids(self, user: dict, name: str, song_ids: List[str]) -> Optional[str]:
+        """``create_playlist`` with Navidrome song ids in hand (POST /playlists, #206)."""
+        return await self._write_playlist(user, [('name', name)], song_ids)
+
     async def replace_playlist(self, user: dict, playlist_id: str, tracks: List[SubBoxTrack]) -> bool:
         """
         Rewrite an existing playlist's entries in place, keeping its id, name, comment

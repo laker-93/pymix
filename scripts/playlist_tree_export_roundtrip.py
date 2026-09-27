@@ -11,8 +11,7 @@ playlist_tree_import_roundtrip.py, whose helpers it uses: a user whose
 `playlist_tree_state` is 'none' and who has no nodes, switched to 'live' for the run
 and back at the end.
 
-There is no move route yet (#206), so the reorder is written to the database
-directly, the way the tree controller's move_node would write it.
+The reorder goes through PATCH /playlists/nodes/{id} (#206).
 """
 import argparse
 import subprocess
@@ -121,9 +120,7 @@ def main():
         nodes = stack.pymix_call('GET', '/playlists/tree')['nodes']
         [top] = [n for n in nodes if n['name'] == root and n['parent_id'] is None]
         [loose] = [n for n in nodes if n['name'] == 'Loose' and n['parent_id'] == top['node_id']]
-        psql(f"UPDATE playlist_node_table SET position = position + 1 "
-             f"WHERE parent_id='{top['node_id']}' AND position < {loose['position']} AND trash_batch_id IS NULL")
-        psql(f"UPDATE playlist_node_table SET position = 0 WHERE node_id='{loose['node_id']}'")
+        stack.pymix_call('PATCH', f"/playlists/nodes/{loose['node_id']}", {'position': 0})
         exported = export_xml(stack)
         check('the user\'s sibling order reaches Rekordbox',
               [line[0] for line in under(exported, root) if len(line[0]) == 2] == [(root, 'Loose'), (root, 'House')])

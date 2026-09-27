@@ -281,6 +281,19 @@ async def test_a_long_playlist_is_written_in_chunks_in_order(subsonic, monkeypat
 
 
 @pytest.mark.anyio
+async def test_a_playlist_made_from_song_ids_keeps_their_order_and_is_chunked(subsonic, monkeypatch):
+    # POST /playlists (#206) has Navidrome ids, not tracks.
+    monkeypatch.setattr('pymix.clients.subsonic_client.PLAYLIST_WRITE_CHUNK', 2)
+
+    assert await subsonic.create_playlist_from_ids(USER, 'Sunday', ['s2', 's0', 's1']) == 'pl-9'
+
+    assert _calls(subsonic.get) == [
+        ('createPlaylist.view', [('name', 'Sunday'), ('songId', 's2'), ('songId', 's0')]),
+        ('updatePlaylist.view', [('playlistId', 'pl-9'), ('songIdToAdd', 's1')]),
+    ]
+
+
+@pytest.mark.anyio
 async def test_setting_no_entries_empties_the_playlist_last_chunk_first(subsonic, monkeypatch):
     # createPlaylist with no ids changes nothing, so an undo to an empty playlist
     # removes each visible entry by index, from the end so the indexes don't shift.

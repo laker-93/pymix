@@ -317,6 +317,12 @@ class SubsonicOrchestrator:
         already holds the user's tree lock, which isn't reentrant."""
         return await self._subsonic_client.rename_playlist(user, playlist_id, name)
 
+    async def new_playlist(self, user: dict, name: str, song_ids: List[str]) -> Optional[str]:
+        """Create a playlist from Navidrome song ids and return its id, or None if
+        Navidrome refused. Unlocked, like rename_playlist: its caller, the tree's
+        POST /playlists (#206), holds the tree lock across this and the node write."""
+        return await self._subsonic_client.create_playlist_from_ids(user, name, song_ids)
+
     async def set_playlist_entries(self, user: dict, playlist_id: str, song_ids: List[str]) -> bool:
         return await self._subsonic_client.set_playlist_entries(user, playlist_id, song_ids)
 
