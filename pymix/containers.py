@@ -22,6 +22,8 @@ from pymix.orchestrators.rekordbox_xml_orchestrator import RekordboxXMLOrchestra
 from pymix.orchestrators.serato_crate_orchestrator import SeratoCrateOrchestrator
 from pymix.orchestrators.services_orchestrator import ServicesOrchestrator
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
+from pymix.controllers.playlist_tree_controller import PlaylistTreeController
+from pymix.services.tree_lock import TreeLocks
 from pymix.services.automatch_service import AutomatchService
 from pymix.services.google_sheets_service import GoogleSheetsService
 from pymix.services.link_parse_service import LinkParseService
@@ -108,11 +110,25 @@ class Container(containers.DeclarativeContainer):
         beets_exec,
     )
 
+    # One per process: the per-user playlist tree lock (#201).
+    tree_locks = providers.Singleton(TreeLocks)
+
     subsonic_orchestrator = providers.Singleton(
         SubsonicOrchestrator,
         subsonic_client,
         # to snapshot a playlist before a re-import replaces it (#208)
         native_client=navidrome_native_client,
+        # to leave hidden playlists out of every listing, and to take the tree lock (#201)
+        db_controller=db_controller,
+        tree_locks=tree_locks,
+    )
+
+    playlist_tree_controller = providers.Singleton(
+        PlaylistTreeController,
+        db,
+        db_controller,
+        subsonic_orchestrator,
+        tree_locks,
     )
 
     rekordbox_xml_orchestrator = providers.Singleton(

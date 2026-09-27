@@ -7,6 +7,7 @@ from pymix.clients.subsonic_client import SubsonicClient
 from pymix.model.playlist_write_report import PlaylistSnapshot, PlaylistWriteReport
 from pymix.model.subboxplaylist import SubBoxPlaylist
 from pymix.model.subboxtrack import SubBoxTrack
+from pymix.services.tree_lock import TreeLocks
 from pymix.services.track_matcher import TrackMatcher
 
 logger = logging.getLogger(__name__)
@@ -33,8 +34,14 @@ def snapshot_entry(row: dict) -> dict:
 
 
 class SubsonicOrchestrator:
-    def __init__(self, subsonic_client: SubsonicClient, native_client=None):
+    def __init__(self, subsonic_client: SubsonicClient, native_client=None, db_controller=None,
+                 tree_locks: Optional[TreeLocks] = None):
         self._subsonic_client = subsonic_client
+        # For the trashed (hidden) playlists every listing leaves out (#201). Typed
+        # loosely: the DbController module is heavy to import here.
+        self._db = db_controller
+        # Every Navidrome playlist write runs under the user's tree lock (#201, §4.2).
+        self._tree_locks = tree_locks or TreeLocks()
         # Navidrome's native API, to snapshot a playlist's entries before a re-import
         # replaces them (#208): only it lists the entries whose track is in the trash.
         # Without it, updates still happen but can't be undone.
@@ -55,6 +62,7 @@ class SubsonicOrchestrator:
         playlists = await self._subsonic_client.get_playlists(user)
         if not playlists:
             return playlists
+        playlists = self._visible(user, playlists)
         if playlist_ids is not None:
             playlists = [p for p in playlists if p.subsonic_id in playlist_ids]
 
@@ -66,6 +74,19 @@ class SubsonicOrchestrator:
 
         await asyncio.gather(*(fetch_tracks(p) for p in playlists))
         return playlists
+
+    def _visible(self, user: dict, playlists: List[SubBoxPlaylist]) -> List[SubBoxPlaylist]:
+        """
+        The playlists pymix lists for a user, in the one place every listing (exports,
+        sync) goes through (#201, design §4.2): only their own, never another user's
+        public one, and not the ones hidden in their trash (#207).
+
+        getPlaylists returns other users' public playlists too. In demoadmin's
+        container that includes demo's, which used to end up in demoadmin's exports.
+        """
+        username = user['username']
+        hidden = self._db.hidden_playlist_ids(username) if self._db is not None else set()
+        return [p for p in playlists if p.owner == username and p.subsonic_id not in hidden]
 
     async def get_subsonic_playlists(
         self, user: dict, playlist_ids: Optional[Set[str]] = None
@@ -197,7 +218,10 @@ class SubsonicOrchestrator:
             # sibling duplicates) is created beside it, not written over the first.
             match = owned.pop(playlist.name, None)
             if match is None:
-                if await self._subsonic_client.create_playlist(user, playlist.name, playlist.tracks):
+                # Under the tree lock, so a tree read can't adopt it mid-write (#201).
+                async with self._tree_locks.hold(username):
+                    created = await self._subsonic_client.create_playlist(user, playlist.name, playlist.tracks)
+                if created:
                     report.created.append(playlist.name)
                 else:
                     report.failed.append(playlist.name)
@@ -209,7 +233,9 @@ class SubsonicOrchestrator:
                 report.unmatched.append(playlist.name)
             else:
                 snapshot = await self._snapshot(user, match)
-                if await self._subsonic_client.replace_playlist(user, match.subsonic_id, playlist.tracks):
+                async with self._tree_locks.hold(username):
+                    replaced = await self._subsonic_client.replace_playlist(user, match.subsonic_id, playlist.tracks)
+                if replaced:
                     report.updated.append(playlist.name)
                     if match.n_of_songs is not None and n_after < match.n_of_songs:
                         report.shortened.append((playlist.name, match.n_of_songs, n_after))

@@ -22,7 +22,7 @@ from pymix.handlers.trash_reaper_handler import trash_reaper_loop
 from pymix.services.trash import trash_setting
 from pymix.handlers.wishlist_reconcile_handler import wishlist_reconcile_loop
 from pymix.handlers.wishlist_resolve_handler import wishlist_resolve_loop
-from pymix.routers import admin, auth, maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, trash, wishlist, invite_request, metrics
+from pymix.routers import admin, auth, maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, trash, wishlist, invite_request, metrics, playlists
 from pymix.services import metrics as metrics_service
 
 
@@ -191,6 +191,7 @@ def create_app(container):
     app.include_router(sync.router)
     app.include_router(track.router)
     app.include_router(trash.router)
+    app.include_router(playlists.router)
     app.include_router(wishlist.router)
     app.include_router(invite_request.router)
     app.include_router(admin.router)
@@ -236,7 +237,7 @@ def create_container(environment="dev"):
     )
     container.wire(
         modules=[
-            auth, maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, trash, wishlist, invite_request, admin, metrics, sys.modules[__name__]
+            auth, maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, trash, wishlist, invite_request, admin, metrics, playlists, sys.modules[__name__]
         ]
     )
     return container

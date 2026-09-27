@@ -678,7 +678,9 @@ class SubsonicClient(BaseAPIClient):
         response = await self.get(url)
         return response['subsonic-response']['status'] == 'ok'
 
-    async def create_playlist(self, user: dict, name: str, tracks: List[SubBoxTrack]) -> bool:
+    async def create_playlist(self, user: dict, name: str, tracks: List[SubBoxTrack]) -> Optional[str]:
+        """Create a playlist, and return its Navidrome id (a playlist node needs it,
+        #201), or None if Navidrome refused."""
         return await self._write_playlist(user, [('name', name)], _song_ids(tracks))
 
     async def replace_playlist(self, user: dict, playlist_id: str, tracks: List[SubBoxTrack]) -> bool:
@@ -691,7 +693,7 @@ class SubsonicClient(BaseAPIClient):
         changes nothing, so it can't empty a playlist. And it silently drops any entry
         whose track is missing (in the trash): those memberships are gone.
         """
-        return await self._write_playlist(user, [('playlistId', playlist_id)], _song_ids(tracks))
+        return bool(await self._write_playlist(user, [('playlistId', playlist_id)], _song_ids(tracks)))
 
     async def set_playlist_entries(self, user: dict, playlist_id: str, song_ids: List[str]) -> bool:
         """
@@ -702,7 +704,7 @@ class SubsonicClient(BaseAPIClient):
         that come back with the track (measured on 0.60.3).
         """
         if song_ids:
-            return await self._write_playlist(user, [('playlistId', playlist_id)], song_ids)
+            return bool(await self._write_playlist(user, [('playlistId', playlist_id)], song_ids))
         # createPlaylist with no ids changes nothing, so remove each visible entry.
         username = user['username']
         base_path = self._host.format(user=username, port=4533)
@@ -720,7 +722,7 @@ class SubsonicClient(BaseAPIClient):
                 return False
         return True
 
-    async def _write_playlist(self, user: dict, target: list, song_ids: List[str]) -> bool:
+    async def _write_playlist(self, user: dict, target: list, song_ids: List[str]) -> Optional[str]:
         """
         `createPlaylist` with the first chunk of song ids, then `updatePlaylist
         songIdToAdd` for the rest, in order.
@@ -744,7 +746,7 @@ class SubsonicClient(BaseAPIClient):
         response = await self.get(url)
         if response['subsonic-response']['status'] != 'ok':
             logger.error(f"createPlaylist failed for {username}: {response['subsonic-response'].get('error')}")
-            return False
+            return None
         playlist_id = response['subsonic-response']['playlist']['id']
         for chunk in chunks[1:]:
             url = self._subsonic_format_url(
@@ -756,8 +758,8 @@ class SubsonicClient(BaseAPIClient):
             response = await self.get(url)
             if response['subsonic-response']['status'] != 'ok':
                 logger.error(f"updatePlaylist failed for {username}: {response['subsonic-response'].get('error')}")
-                return False
-        return True
+                return None
+        return playlist_id
 
     async def set_rating(self, user: dict, tracks: List[SubBoxTrack]):
         """

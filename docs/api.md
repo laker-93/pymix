@@ -204,6 +204,34 @@ Restoring one (`TrashService.restore_tracks`):
 
 With that id come its star, rating, play count and playlist entries. A track that came back under a new id is named in `warnings` with what it lost. `scripts/trash_restore_roundtrip.py` checks every row of the design's §13 contract against the local dev stack.
 
+## Playlist tree — `routers/playlists.py`
+`require_uploader`: `demo` gets 403, and the client draws its flat list. Design:
+`design-playlists-and-undo.md` §4 in `subbox-workspace`. The write routes arrive with
+#204 and #207.
+
+| Endpoint | Purpose |
+|---|---|
+| GET `/playlists/tree` | The user's playlist tree (#201). **409 `{"detail": "tree_not_enabled"}`** while their `playlist_tree_state` is `none`; the client treats that, a 403 and a 404 all as "no tree". Every read first reconciles against one `getPlaylists`, filtered to the user's own playlists: a playlist with no node is adopted at the root, and a node whose playlist has gone is dropped, with its children moved up into its place. So a playlist made or deleted directly in Navidrome shows up on the next read. |
+
+```ts
+z.object({
+  nodes: z.array(z.object({          // live nodes, depth-first, siblings by position
+    node_id: z.string().uuid(),
+    parent_id: z.string().uuid().nullable(),   // null = root
+    position: z.number().int(),                // 0..n-1 among its siblings
+    kind: z.enum(['folder', 'playlist']),
+    name: z.string().nullable(),               // a folder's; a playlist's is Navidrome's, read live
+    navidrome_playlist_id: z.string().nullable(), // playlists only
+    child_count: z.number().int(),
+  })),
+  hidden_playlist_ids: z.array(z.string()),  // trashed playlists: leave them out of every list
+})
+```
+
+Every playlist listing pymix itself makes (exports, sync) goes through
+`SubsonicOrchestrator._visible`. It leaves out other users' public playlists, and
+the user's hidden ones.
+
 ## Wishlist — `routers/wishlist.py`
 
 The wishlist is "tracks the user wants but doesn't have yet". Statuses and the

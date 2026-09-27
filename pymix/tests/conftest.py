@@ -53,21 +53,21 @@ def mock_get_playlist_tracks(playlist_a_tracks, playlist_b_tracks, playlist_c_tr
 def mock_playlist_a():
     return SubBoxPlaylist(name='UK-Funky', n_of_songs=1, comment='',
                    last_updated=datetime.datetime(2022, 12, 15, 12, 56, 39, tzinfo=datetime.timezone.utc),
-                   duration_s=371, subsonic_id='4b421baf-21b7-4238-966e-c8f03e5dd5c2',
+                   duration_s=371, subsonic_id='4b421baf-21b7-4238-966e-c8f03e5dd5c2', owner='demoadmin',
                    )
 
 @pytest.fixture
 def mock_playlist_b():
     return SubBoxPlaylist(name='hardcore', n_of_songs=1, comment='lofi',
                last_updated=datetime.datetime(2022, 12, 4, 8, 40, 30, tzinfo=datetime.timezone.utc),
-               duration_s=377, subsonic_id='43fdb143-4b87-4224-a50c-fef2e2ce9763',
+               duration_s=377, subsonic_id='43fdb143-4b87-4224-a50c-fef2e2ce9763', owner='demoadmin',
                )
 
 @pytest.fixture
 def mock_playlist_c():
     return SubBoxPlaylist(name='techno-dark', n_of_songs=4, comment='',
                    last_updated=datetime.datetime(2022, 12, 15, 14, 24, 42, tzinfo=datetime.timezone.utc),
-                   duration_s=1373, subsonic_id='99015bb5-cc58-4492-a5ee-6108f3acba41',
+                   duration_s=1373, subsonic_id='99015bb5-cc58-4492-a5ee-6108f3acba41', owner='demoadmin',
                    )
 
 @pytest.fixture
