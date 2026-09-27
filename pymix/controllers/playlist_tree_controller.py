@@ -39,6 +39,8 @@ logger = logging.getLogger(__name__)
 FOLDER = 'folder'
 PLAYLIST = 'playlist'
 ORIGINS = ('rekordbox', 'serato', 'subbox', 'migrated')
+#: update_node's "leave the parent as it is", as distinct from None, the root.
+UNCHANGED = object()
 
 
 class TreeNotEnabled(Exception):
@@ -47,6 +49,14 @@ class TreeNotEnabled(Exception):
 
 class TreeInvariantError(ValueError):
     """A write that would break one of the tree's invariants."""
+
+
+class NodeNotFound(TreeInvariantError):
+    """No live node with that id belongs to the user: the routes answer 404."""
+
+
+class PlaylistNotCreated(Exception):
+    """Navidrome refused to create the playlist: nothing was written."""
 
 
 @dataclass
@@ -89,8 +99,8 @@ class PlaylistTreeController:
         never stored.
         """
         username = user['username']
-        user_id = self._require_live(username)
         async with self._locks.hold(username):
+            user_id = self._require_live(username)
             playlists = await self._subsonic.owned_playlists(user)
             self._reconcile(user_id, username, playlists)
             names = {p.subsonic_id: p.name for p in playlists}
@@ -119,6 +129,11 @@ class PlaylistTreeController:
         }
 
     def _require_live(self, username: str) -> str:
+        """The user's id, or TreeNotEnabled. Read with the tree lock held wherever
+        what follows writes nodes or trusts the state: the migration and its
+        rollback (#205) change it under the same lock, so a check made before
+        taking it can be stale by the time the write runs, and write nodes for a
+        user who has just gone back to 'none'."""
         with self._sessions() as session:
             row = session.query(UserRow.user_id, UserRow.playlist_tree_state).filter(
                 UserRow.username == username).one()
@@ -151,8 +166,8 @@ class PlaylistTreeController:
         """Add a node under ``parent_id`` (the root if None) at ``position`` (the end
         if None), shifting later siblings along. Returns its node_id."""
         username = user['username']
-        user_id = self._require_live(username)
         async with self._locks.hold(username):
+            user_id = self._require_live(username)
             with self._sessions() as session:
                 node_id = self._add(session, user_id, kind, parent_id, position, name,
                                     navidrome_playlist_id, source_path, origin)
@@ -162,23 +177,108 @@ class PlaylistTreeController:
     async def move_node(self, user: dict, node_id: str, parent_id: Optional[str], position: Optional[int] = None) -> None:
         """Move a live node, and its subtree with it, under ``parent_id`` at
         ``position`` (the end if None). Refused into its own subtree."""
+        await self.update_node(user, node_id, parent_id=parent_id, position=position)
+
+    async def update_node(
+            self, user: dict, node_id: str, *, name: Optional[str] = None, parent_id=UNCHANGED,
+            position: Optional[int] = None,
+    ) -> dict:
+        """
+        PATCH /playlists/nodes/{id} (#206): rename a folder, move a node, reorder it,
+        or any of them at once, in one commit. Returns the node as the tree gives it.
+
+        ``parent_id`` is UNCHANGED to stay under the current parent, None for the
+        root. ``position`` is where the node ends up among its new siblings, not
+        counting itself, clamped to the end; None is the end on a move and no change
+        on a reorder or rename. A playlist is renamed in Navidrome, not here: its
+        name isn't stored (§4.1).
+        """
         username = user['username']
-        user_id = self._require_live(username)
         async with self._locks.hold(username):
+            user_id = self._require_live(username)
             with self._sessions() as session:
                 node = self._live(session, user_id, node_id)
-                if parent_id is not None:
+                if name is not None:
+                    if node.kind != FOLDER:
+                        raise TreeInvariantError("a playlist is renamed in Navidrome, not the tree")
+                    node.name = self._folder_name(name)
+                moving = parent_id is not UNCHANGED and parent_id != node.parent_id
+                if parent_id is UNCHANGED:
+                    parent_id = node.parent_id
+                if moving and parent_id is not None:
                     self._live(session, user_id, parent_id)
                     ancestor = parent_id
                     while ancestor is not None:
                         if ancestor == node_id:
                             raise TreeInvariantError(f"cannot move {node_id} into its own subtree")
                         ancestor = session.get(PlaylistNodeRow, ancestor).parent_id
-                self._close_gap(session, user_id, node.parent_id, node.position, exclude=node_id)
-                node.parent_id = parent_id
-                node.position = self._open_gap(session, user_id, parent_id, position, exclude=node_id)
+                if moving or position is not None:
+                    self._close_gap(session, user_id, node.parent_id, node.position, exclude=node_id)
+                    node.parent_id = parent_id
+                    node.position = self._open_gap(session, user_id, parent_id, position, exclude=node_id)
                 node.updated_at = _now()
                 session.commit()
+                return self._node_body(node, None)
+
+    async def create_folder(
+            self, user: dict, name: str, *, parent_id: Optional[str] = None, position: Optional[int] = None,
+    ) -> dict:
+        """POST /playlists/folders (#206): a folder made in subbox, so no
+        `source_path`, and an import never takes it over. Returns the node."""
+        node_id = await self.create_node(user, FOLDER, name=self._folder_name(name), parent_id=parent_id,
+                                         position=position)
+        with self._sessions() as session:
+            return self._node_body(session.get(PlaylistNodeRow, node_id), None)
+
+    async def create_playlist(
+            self, user: dict, name: str, *, parent_id: Optional[str] = None, song_ids: Optional[List[str]] = None,
+    ) -> dict:
+        """
+        POST /playlists (#206): a Navidrome playlist and its node, at the end of
+        ``parent_id``'s children, in one call. Returns the node.
+
+        Both writes happen under the tree lock, so a tree read can't adopt the new
+        playlist at the root between them (§4.2). The parent is checked first, so a
+        bad one creates nothing. If the node write fails after Navidrome has the
+        playlist, the next tree read adopts it at the root: the playlist is never
+        lost, only misplaced.
+        """
+        username = user['username']
+        name = name.strip()
+        if not name:
+            raise TreeInvariantError("a playlist needs a name")
+        async with self._locks.hold(username):
+            user_id = self._require_live(username)
+            if parent_id is not None:
+                with self._sessions() as session:
+                    self._live(session, user_id, parent_id)
+            playlist_id = await self._subsonic.new_playlist(user, name, list(song_ids or []))
+            if not playlist_id:
+                raise PlaylistNotCreated(name)
+            with self._sessions() as session:
+                node_id = self._add(session, user_id, PLAYLIST, parent_id, None, None, playlist_id, None, 'subbox')
+                session.commit()
+                return self._node_body(session.get(PlaylistNodeRow, node_id), name)
+
+    @staticmethod
+    def _folder_name(name: str) -> str:
+        name = (name or '').strip()
+        if not name:
+            raise TreeInvariantError("a folder needs a name")
+        return name
+
+    @staticmethod
+    def _node_body(row: PlaylistNodeRow, playlist_name: Optional[str]) -> dict:
+        """One node as GET /playlists/tree returns it, minus `child_count`. A
+        playlist's name is Navidrome's: the caller passes it when it knows it."""
+        return {
+            'node_id': row.node_id,
+            'parent_id': row.parent_id,
+            'position': row.position,
+            'kind': row.kind,
+            'name': row.name if row.kind == FOLDER else playlist_name,
+            'navidrome_playlist_id': row.navidrome_playlist_id,
+        }
 
     def _add(self, session, user_id, kind, parent_id, position, name, navidrome_playlist_id, source_path, origin,
              migrated_from_name=None) -> str:
@@ -214,7 +314,7 @@ class PlaylistTreeController:
     def _live(session, user_id: str, node_id: str) -> PlaylistNodeRow:
         node = session.get(PlaylistNodeRow, node_id)
         if node is None or node.user_id != user_id or node.trash_batch_id is not None:
-            raise TreeInvariantError(f"no live node {node_id}")
+            raise NodeNotFound(f"no live node {node_id}")
         return node
 
     @staticmethod

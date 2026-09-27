@@ -62,6 +62,9 @@ class FakeNavidrome:
         await asyncio.sleep(0)
         return playlist_id
 
+    async def create_playlist_from_ids(self, user, name, song_ids):
+        return await self.create_playlist(user, name, [_track(s) for s in song_ids])
+
     async def replace_playlist(self, user, playlist_id, tracks):
         self.replaced.append(playlist_id)
         self.entries[playlist_id] = [t.sub_track_id for t in tracks if t.sub_track_id]

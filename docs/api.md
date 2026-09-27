@@ -206,12 +206,20 @@ With that id come its star, rating, play count and playlist entries. A track tha
 
 ## Playlist tree — `routers/playlists.py`
 `require_uploader`: `demo` gets 403, and the client draws its flat list. Design:
-`design-playlists-and-undo.md` §4 in `subbox-workspace`. The write routes arrive with
-#204 and #207.
+`design-playlists-and-undo.md` §4 and §10 in `subbox-workspace`. Every route here
+answers **409 `{"detail": "tree_not_enabled"}`** while the user's `playlist_tree_state`
+is `none`. Delete and restore arrive with #207.
+
+These are the **structural** verbs. The content verbs (rename a playlist, add, reorder
+or remove its tracks) stay client → Navidrome, unchanged: the tree is keyed by
+Navidrome id, not by name, so they don't disturb it.
 
 | Endpoint | Purpose |
 |---|---|
 | GET `/playlists/tree` | The user's playlist tree (#201). **409 `{"detail": "tree_not_enabled"}`** while their `playlist_tree_state` is `none`; the client treats that, a 403 and a 404 all as "no tree". Every read first reconciles against one `getPlaylists`, filtered to the user's own playlists: a playlist with no node is adopted at the root, and a node whose playlist has gone is dropped, with its children moved up into its place. So a playlist made or deleted directly in Navidrome shows up on the next read. |
+| POST `/playlists/folders` | `{name, parent_id?, position?}` → a folder (#206), under `parent_id` (the root if absent) at `position` (the end if absent), later siblings shifting along. Returns the node. It has no `source_path`, so an import never takes it over. 400 for a blank name, 404 for a parent that isn't one of the user's live nodes. |
+| POST `/playlists` | `{name, parent_id?, song_ids?}` → a Navidrome playlist with those songs in order, **and** its node at the end of `parent_id`'s children, in one call (#206): "New playlist inside" a folder. Both writes happen under the tree lock, so a tree read can't adopt the playlist at the root in between. A bad parent is refused (404) before Navidrome is asked; 502 if Navidrome refuses. Returns the node with `navidrome_playlist_id`. Upstream's create modal still creates directly in Navidrome, and that playlist is adopted at the root. |
+| PATCH `/playlists/nodes/{id}` | `{name?, parent_id?, position?}`, any together, in one commit (#206). `name` renames a **folder**; a playlist is renamed in Navidrome (400). `parent_id` moves the node and its subtree, `null` meaning the root; **absent** means "stay under the current parent", so a body of just `position` is a reorder. `position` is where it ends up among its siblings, not counting itself, clamped to the end; absent on a move means the end. A move under the parent the node already has, with no `position`, changes nothing. 400 for a move into its own subtree or an empty body, 404 for a node or parent that isn't one of the user's live nodes. Returns the node; a playlist's `name` is `null` here. |
 
 ```ts
 z.object({
@@ -227,6 +235,8 @@ z.object({
   hidden_playlist_ids: z.array(z.string()),  // trashed playlists: leave them out of every list
 })
 ```
+
+The write routes return one node, shaped as in `nodes` above without `child_count`.
 
 Every playlist listing pymix itself makes (exports, sync) goes through
 `SubsonicOrchestrator._visible`. It leaves out other users' public playlists, and
