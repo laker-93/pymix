@@ -55,20 +55,21 @@ class TreeRun:
         self.playlists = self.playlist_ids()
         self.nodes = {r[0] for r in psql(f"SELECT node_id FROM playlist_node_table WHERE user_id='{self.user_id}'")}
         self.batches = {r[0] for r in psql(
-            f"SELECT batch_id FROM trash_batch_table WHERE user_id='{self.user_id}' AND kind='nodes'")}
+            f"SELECT batch_id FROM trash_batch_table WHERE user_id='{self.user_id}' AND kind IN ('nodes', 'playlist_entries')")}
 
     def playlist_ids(self):
         return {p['id'] for p in self.stack.subsonic('getPlaylists')['playlists'].get('playlist', [])}
 
     def cleanup(self):
-        """The run's playlists, its `nodes` trash batches and its nodes, then the
-        user's live siblings renumbered 0..n-1: a run can shift the user's own
-        nodes (a move to the top of the root), and deleting its nodes leaves gaps."""
+        """The run's playlists, its `nodes` and re-import (`playlist_entries`) trash
+        batches and its nodes, then the user's live siblings renumbered 0..n-1: a run
+        can shift the user's own nodes (a move to the top of the root), and deleting
+        its nodes leaves gaps."""
         made = sorted(self.playlist_ids() - self.playlists)
         for playlist_id in made:
             self.stack.subsonic('deletePlaylist', id=playlist_id)
         batches = [r[0] for r in psql(f"SELECT batch_id FROM trash_batch_table WHERE user_id='{self.user_id}' "
-                                      f"AND kind='nodes'") if r[0] not in self.batches]
+                                      f"AND kind IN ('nodes', 'playlist_entries')") if r[0] not in self.batches]
         for batch_id in batches:
             psql(f"UPDATE playlist_node_table SET trash_batch_id=NULL WHERE trash_batch_id='{batch_id}'")
             psql(f"DELETE FROM trash_item_table WHERE batch_id='{batch_id}'")
@@ -157,16 +158,18 @@ def import_crates(stack, songs, crates, tag):
 
 
 def outline(stack, under):
-    """The live subtree under the root node named `under`, as indented names."""
+    """The live subtree under the root node named `under`, as indented names, and its
+    nodes. Only that subtree's: the user's own tree can have a `Deep` of its own."""
     nodes = stack.pymix_call('GET', '/playlists/tree')['nodes']
-    depth, lines, inside = {}, [], None
+    depth, lines, mine, inside = {}, [], [], None
     for node in nodes:
         depth[node['node_id']] = depth.get(node['parent_id'], -1) + 1
         if node['parent_id'] is None:
             inside = node['name'] == under
         if inside:
             lines.append('  ' * depth[node['node_id']] + f"{node['name']} [{node['kind'][0]}]")
-    return lines, nodes
+            mine.append(node)
+    return lines, mine
 
 
 def main():

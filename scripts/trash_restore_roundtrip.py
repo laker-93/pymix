@@ -151,91 +151,99 @@ def main():
         name: stack.subsonic('createPlaylist', name=name, songId=songs)['playlist']['id']
         for name, songs in playlists.items()
     }
-    cuedata = {'cues': [{'index': 0, 'position': 12.5, 'name': 'drop', 'color': '#ff0000'}], 'loops': [],
-               'beatgrid': [{'position_ms': 46, 'bpm': 124.0, 'beats_till_next': None, 'metro': '4/4', 'battito': 1}]}
-    stack.pymix_call('POST', '/track/metadata/update',
-                     {'cuedata': cuedata, 'source_app': 'rekordbox', 'change_type': 'edit'},
-                     cookies={'subbox_id': args.subbox_id})
+    try:
+        cuedata = {'cues': [{'index': 0, 'position': 12.5, 'name': 'drop', 'color': '#ff0000'}], 'loops': [],
+                   'beatgrid': [{'position_ms': 46, 'bpm': 124.0, 'beats_till_next': None, 'metro': '4/4', 'battito': 1}]}
+        stack.pymix_call('POST', '/track/metadata/update',
+                         {'cuedata': cuedata, 'source_app': 'rekordbox', 'change_type': 'edit'},
+                         cookies={'subbox_id': args.subbox_id})
 
-    def state():
-        song = stack.subsonic('getSong', id=t_id)['song']
-        return {
-            'navidrome id': song['id'],
-            'starred': bool(song.get('starred')),
-            'rating': song.get('userRating'),
-            'play count': song.get('playCount'),
-            'last played': song.get('played'),
-            'playlists': {
-                name: [e['mediaFileId'] == t_id and 'T' or 'x'
-                       for e in stack.native(f'/api/playlist/{pid}/tracks?_start=0&_end=100')]
-                for name, pid in playlist_ids.items()
-            },
-            'cues and grid': stack.pymix_call('GET', f'/track/metadata/{args.subbox_id}').get('metadata'),
-        }
+        def state():
+            try:
+                song = stack.subsonic('getSong', id=t_id)['song']
+            except RuntimeError as ex:
+                # Only after the restore: under PurgeMissing = "always" the row was purged,
+                # and the track is back under a new id with none of the rest.
+                sys.exit(f'{ex}: {t_id} is gone, so the track came back as a new one. '
+                         f'Is navidrome{args.user} on Scanner.PurgeMissing = "never" (#210)?')
+            return {
+                'navidrome id': song['id'],
+                'starred': bool(song.get('starred')),
+                'rating': song.get('userRating'),
+                'play count': song.get('playCount'),
+                'last played': song.get('played'),
+                'playlists': {
+                    name: [e['mediaFileId'] == t_id and 'T' or 'x'
+                           for e in stack.native(f'/api/playlist/{pid}/tracks?_start=0&_end=100')]
+                    for name, pid in playlist_ids.items()
+                },
+                'cues and grid': stack.pymix_call('GET', f'/track/metadata/{args.subbox_id}').get('metadata'),
+            }
 
-    def disk():
-        if not args.docker:
-            return {}
-        sha = docker('pymix', 'sha256sum', f'/private-music/{args.user}/{t_path}').split()[0]
-        beets = parse_json_lines(docker(f'beets{args.user}', *build_dump_command([args.subbox_id])))
-        # An album recreated by the restore is a new row: compare which tracks share
-        # it, not its id.
-        for item in beets:
-            if item.get('album'):
-                item['album'].pop('id', None)
-        mates = docker(
-            f'beets{args.user}', 'python3', '-c',
-            "from beets import config\nfrom beets.library import Library\nconfig.read()\n"
-            "lib=Library(config['library'].as_filename(),config['directory'].as_filename())\n"
-            f"for i in lib.items(u'subbox_id::^{args.subbox_id}$'):\n"
-            " a=i.get_album()\n"
-            " print(sorted(x.get('subbox_id') or x.title for x in a.items()) if a else [])",
-        ).strip()
-        return {'file sha256': sha, 'beets item': beets, 'album mates': mates}
+        def disk():
+            if not args.docker:
+                return {}
+            sha = docker('pymix', 'sha256sum', f'/private-music/{args.user}/{t_path}').split()[0]
+            beets = parse_json_lines(docker(f'beets{args.user}', *build_dump_command([args.subbox_id])))
+            # An album recreated by the restore is a new row: compare which tracks share
+            # it, not its id.
+            for item in beets:
+                if item.get('album'):
+                    item['album'].pop('id', None)
+            mates = docker(
+                f'beets{args.user}', 'python3', '-c',
+                "from beets import config\nfrom beets.library import Library\nconfig.read()\n"
+                "lib=Library(config['library'].as_filename(),config['directory'].as_filename())\n"
+                f"for i in lib.items(u'subbox_id::^{args.subbox_id}$'):\n"
+                " a=i.get_album()\n"
+                " print(sorted(x.get('subbox_id') or x.title for x in a.items()) if a else [])",
+            ).strip()
+            return {'file sha256': sha, 'beets item': beets, 'album mates': mates}
 
-    before = {**state(), **disk()}
+        before = {**state(), **disk()}
 
-    # --- delete into the trash, then restore ----------------------------------------
-    deleted = stack.pymix_call('DELETE', '/track', {'ids': [args.subbox_id]})
-    batch_id = deleted.get('trash_batch_id')
-    if not deleted['success'] or not batch_id:
-        sys.exit(f'delete failed: {deleted}')
-    print(f'deleted into trash batch {batch_id}')
-    for _ in range(60):
-        if any(r['id'] == t_id for r in stack.native('/api/missing?_start=0&_end=500')):
-            break
-        time.sleep(1)
-    started = stack.pymix_call('POST', f'/trash/{batch_id}/restore')
-    job_id = started['job_id']
-    for _ in range(300):
-        progress = stack.pymix_call('GET', f'/trash/restore/progress?job_id={job_id}')
-        if not progress['in_progress']:
-            break
-        time.sleep(1)
-    print(f'restore job {job_id}: result={progress["result"]} reason={progress["reason"]!r} '
-          f'warnings={progress["warnings"]!r}')
+        # --- delete into the trash, then restore ----------------------------------------
+        deleted = stack.pymix_call('DELETE', '/track', {'ids': [args.subbox_id]})
+        batch_id = deleted.get('trash_batch_id')
+        if not deleted['success'] or not batch_id:
+            sys.exit(f'delete failed: {deleted}')
+        print(f'deleted into trash batch {batch_id}')
+        for _ in range(60):
+            if any(r['id'] == t_id for r in stack.native('/api/missing?_start=0&_end=500')):
+                break
+            time.sleep(1)
+        started = stack.pymix_call('POST', f'/trash/{batch_id}/restore')
+        job_id = started['job_id']
+        for _ in range(300):
+            progress = stack.pymix_call('GET', f'/trash/restore/progress?job_id={job_id}')
+            if not progress['in_progress']:
+                break
+            time.sleep(1)
+        print(f'restore job {job_id}: result={progress["result"]} reason={progress["reason"]!r} '
+              f'warnings={progress["warnings"]!r}')
 
-    after = {**state(), **disk()}
+        after = {**state(), **disk()}
 
-    # --- the contract, row by row ----------------------------------------------------
-    failures = 0
-    for key in before:
-        ok = before[key] == after[key]
+        # --- the contract, row by row ----------------------------------------------------
+        failures = 0
+        for key in before:
+            ok = before[key] == after[key]
+            failures += not ok
+            if ok:
+                print(f"PASS  {key}: {json.dumps(after[key])[:200]}")
+            else:
+                print(f"FAIL  {key}:")
+                for line in diff(before[key], after[key]):
+                    print(f"        {line}")
+        in_trash = [b['batch_id'] for b in stack.pymix_call('GET', '/trash')['batches']]
+        ok = batch_id not in in_trash
         failures += not ok
-        if ok:
-            print(f"PASS  {key}: {json.dumps(after[key])[:200]}")
-        else:
-            print(f"FAIL  {key}:")
-            for line in diff(before[key], after[key]):
-                print(f"        {line}")
-    in_trash = [b['batch_id'] for b in stack.pymix_call('GET', '/trash')['batches']]
-    ok = batch_id not in in_trash
-    failures += not ok
-    print(f"{'PASS' if ok else 'FAIL'}  batch left the trash listing")
+        print(f"{'PASS' if ok else 'FAIL'}  batch left the trash listing")
 
-    for pid in playlist_ids.values():
-        stack.subsonic('deletePlaylist', id=pid)
-    sys.exit(1 if failures or not progress['result'] else 0)
+        sys.exit(1 if failures or not progress['result'] else 0)
+    finally:
+        for pid in playlist_ids.values():
+            stack.subsonic('deletePlaylist', id=pid)
 
 
 if __name__ == '__main__':
