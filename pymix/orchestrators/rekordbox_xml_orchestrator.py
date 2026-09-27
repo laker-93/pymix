@@ -153,17 +153,11 @@ class RekordboxXMLOrchestrator:
 
     def create_rekordbox_xml_playlist(self, rekordbox_xml: RekordboxXml, subsonic_playlist: SubBoxPlaylist) -> Node:
         """
-        From the playlist, create the rekordbox folders and playlist node.
-        Uses path_components if available for lossless folder reconstruction,
-        otherwise falls back to splitting display name by ' / '.
+        From the playlist, create the rekordbox folders on its path_components and the
+        playlist node. With none, it's a top-level playlist under its own name: a name
+        is never split on ' / ' (#211).
         """
-        if subsonic_playlist.path_components and len(subsonic_playlist.path_components) > 1:
-            folders = subsonic_playlist.path_components[:-1]
-            playlist_name = subsonic_playlist.path_components[-1]
-        else:
-            parts = subsonic_playlist.name.split(' / ')
-            folders = parts[:-1]
-            playlist_name = parts[-1]
+        *folders, playlist_name = subsonic_playlist.path_components or [subsonic_playlist.name]
         playlist_root = self._create_playlist_folders(rekordbox_xml, list(folders)) if folders else rekordbox_xml
         new_playlist = playlist_root.add_playlist(playlist_name)
         logger.info(f'created playlist with name {playlist_name}')

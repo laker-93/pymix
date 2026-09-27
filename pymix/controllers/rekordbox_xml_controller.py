@@ -107,9 +107,9 @@ class RekordboxXMLController:
             playlist_tree_controller=None,
     ):
         self._subsonic_orchestrator = subsonic_orchestrator
-        # Writes an import's playlists and, for a `live` user, their tree (#202).
-        # Typed loosely: the tree controller's module imports this one's neighbours.
-        # Without it, playlists are written as for a `none` user.
+        # Writes an import's playlists and the tree around them (#202), and walks the
+        # tree for an export (#204). Typed loosely: the tree controller's module
+        # imports this one's neighbours.
         self._playlist_tree = playlist_tree_controller
         self._rekordbox_xml_orchestrator = rekordbox_xml_orchestrator
         self._rb_backup_file_handler = rb_backup_file_handler
@@ -122,28 +122,16 @@ class RekordboxXMLController:
         self._serving_music_path_base = serving_music_path_base
         self._beets_exec = beets_exec
 
-    def _create_rekordbox_xml_playlist(self, user_root: str, user: dict, subsonic_playlist: SubBoxPlaylist, rekordbox_xml: RekordboxXml):
-        """
-        From the playlist given, create the rekordbox folders and playlists.
-        Add the tracks to the playlist.
-        :param subsonic_playlist:
-        :return:
-        """
-        playlist = self._rekordbox_xml_orchestrator.create_rekordbox_xml_playlist(rekordbox_xml, subsonic_playlist)
-        for track in subsonic_playlist.tracks:
-            self._rekordbox_xml_orchestrator.add_track_to_rekordbox_playlist(rekordbox_xml, user_root, user, track, playlist)
-
-
     def _write_tree(self, user_root: str, user: dict, rekordbox_xml: RekordboxXml, parent, nodes) -> None:
         """
-        A `live` user's playlist tree into the XML under `parent` (the XML itself, or
+        The user's playlist tree into the XML under `parent` (the XML itself, or
         a folder node), depth first, siblings in order (#204, design §5.4). A folder
         is a folder, a playlist a playlist.
 
         A playlist with children (a Serato crate with its own tracks and sub-crates)
         has no Rekordbox equivalent. It becomes the playlist, then a folder of the
         same name holding its children, side by side: what the export by joined name
-        has always written. Unlike a folder holding a same-named playlist (§5.4 as
+        wrote before the tree. Unlike a folder holding a same-named playlist (§5.4 as
         drawn), it comes back whole: a re-import resolves the children's path to the
         playlist (#202), and the next Serato export writes one crate `X`, not `X/X`.
         """
@@ -695,40 +683,12 @@ class RekordboxXMLController:
         # todo this could be made a context manager to create, update then save the xml
         rekordbox_xml = self._rekordbox_xml_orchestrator.create_xml(xml_path)
 
-        # Scope to playlist_ids at the fetch itself — get_subsonic_playlists only
-        # fetches tracks for playlists that match, instead of fetching every one of
-        # the user's playlists and discarding all but the requested few (this used
-        # to make a single-playlist export pay for every OTHER playlist's fetch too;
-        # see laker-93/pymix#66 follow-up).
+        # Scoped to playlist_ids at the fetch itself: only the requested playlists'
+        # tracks are fetched (laker-93/pymix#66 follow-up).
         id_set = set(playlist_ids) if playlist_ids else None
-        tree = await self._playlist_tree.export_tree(user, id_set) if self._playlist_tree else None
-        if tree is not None:
-            # A `live` user (#204): the tree, walked, in the user's own order.
-            self._write_tree(user_root, user, rekordbox_xml, rekordbox_xml, tree)
-            subsonic_playlists = None
-        else:
-            subsonic_playlists = await self._subsonic_orchestrator.get_subsonic_playlists(user, id_set)
-            if not subsonic_playlists:
-                logger.info(f'no subsonic playlists found for user')
-
-        if subsonic_playlists:
-            if id_set:
-                matched_ids = {p.subsonic_id for p in subsonic_playlists}
-                unmatched_ids = id_set - matched_ids
-                if unmatched_ids:
-                    logger.error(f'export: requested playlist ids not found: {unmatched_ids}')
-                logger.info(f'export: {len(subsonic_playlists)} playlists matched requested ids: {[(p.name, p.subsonic_id) for p in subsonic_playlists]}')
-            # sort the playlists by name so duplicate folders of the same name are not created
-            subsonic_playlists.sort(key=lambda playlist: playlist.name)
-            # Enrich subsonic playlists with stored path_components for lossless folder reconstruction
-            path_rows = self._db_controller.get_playlist_paths(user['username'])
-            path_map = {row['display_name']: row['path_components'] for row in path_rows}
-            for subsonic_playlist in subsonic_playlists:
-                if subsonic_playlist.name in path_map:
-                    subsonic_playlist.path_components = path_map[subsonic_playlist.name]
-            # Given the Playlist data from Subsonic create the playlist directory structure in Rekordbox.
-            for subsonic_playlist in subsonic_playlists:
-                self._create_rekordbox_xml_playlist(user_root, user, subsonic_playlist, rekordbox_xml)
+        # The tree, walked, in the user's own order (#204).
+        tree = await self._playlist_tree.export_tree(user, id_set)
+        self._write_tree(user_root, user, rekordbox_xml, rekordbox_xml, tree)
         # When not filtering, add subsonic tracks that do not belong to a playlist to a default playlist.
         if not playlist_ids:
             default_playlist = self._rekordbox_xml_orchestrator.get_playlist(rekordbox_xml, 'NOPLAYLIST')
@@ -1057,25 +1017,15 @@ class RekordboxXMLController:
             logger.info("No playlists selected from XML for import.")
             return None
 
-        # Persist playlist path_components in DB for lossless export reconstruction.
-        # Only for a `none` user, whose migration to the tree reads them (#205); a
-        # `live` user's paths are in their nodes' source_path (#202).
-        if self._db_controller.playlist_tree_state(user['username']) != 'live':
-            self._db_controller.save_playlist_paths(
-                user['username'],
-                [{'display_name': p.name, 'path_components': p.path_components} for p in subbox_playlists if p.path_components],
-            )
-
         # 5. given the subbox info, create the playlists in navidrome using subsonic api
         # 6. get the tracks from navidrome by using the 'query' api for each track.
         # this sets the subsonic id found from querying navidrome. This can then be used to create the playlist and place
         # the track in the playlist
         res = await self._subsonic_orchestrator.update_tracks_with_subid(user, subbox_playlists=subbox_playlists, matcher=matcher)
-        # 8. create the playlists, or update in place the ones the user already has
-        if self._playlist_tree is not None:
-            return await self._playlist_tree.import_playlists(
-                user, subbox_playlists, origin='rekordbox', scan_finished=scan_finished)
-        return await self._subsonic_orchestrator.create_playlists(user, subbox_playlists, scan_finished=scan_finished)
+        # 8. create the playlists, or update in place the ones the user already has,
+        # and the tree around them
+        return await self._playlist_tree.import_playlists(
+            user, subbox_playlists, origin='rekordbox', scan_finished=scan_finished)
 
     async def get_healthcheck(self) -> dict:
         return {

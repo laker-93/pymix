@@ -13,7 +13,7 @@ from sqlalchemy.orm import sessionmaker
 from pymix.model.db_tables import (
     UserRow, SessionRow, SubboxBeetsMapRow, LibraryRow,
     MetaHistoryRow, UserJobRow, JobRow, OriginalTrackMetaRow, UserTokenRow,
-    PlaylistPathRow, WishlistRow, InviteRequestRow, UploadAttemptRow,
+    WishlistRow, InviteRequestRow, UploadAttemptRow,
     TrashBatchRow, TrashItemRow, TrashReaperRunRow, PlaylistNodeRow,
 )
 from pymix.model.invite_request import DJ_SOFTWARE_OPTIONS, INVITE_REQUEST_STATUSES, InviteRequestStatus
@@ -136,12 +136,8 @@ class DbController:
             max_library_size: int,
             serving_music_path_base: str = '/private-music',
             staging_path: str = '/private-staged/{user}/',
-            new_user_playlist_tree_state: Optional[str] = None,
     ):
         self._session_factory = session_factory
-        # 'none' until #205's pass has migrated every user, then 'live' (§4.4).
-        self._new_user_tree_state = new_user_playlist_tree_state or 'none'
-        assert self._new_user_tree_state in ('none', 'live'), self._new_user_tree_state
         self._app_env = app_env
         self._max_library_size = max_library_size
         self._serving_music_path_base = serving_music_path_base.removesuffix('/')
@@ -799,7 +795,7 @@ class DbController:
                 beets_port=beets_port,
                 subsonic_port=subsonic_port,
                 max_library_size=self._max_library_size,
-                playlist_tree_state=self._new_user_tree_state,
+                playlist_tree_state='live',
             ))
             session.commit()
 
@@ -865,13 +861,6 @@ class DbController:
         """'none' or 'live' (#201, design §4.4)."""
         with self._session_factory() as session:
             return session.query(UserRow.playlist_tree_state).filter(UserRow.username == username).scalar() or 'none'
-
-    def set_playlist_tree_state(self, username: str, state: str) -> None:
-        """Only #205's migration pass and its rollback call this."""
-        assert state in ('none', 'live'), state
-        with self._session_factory() as session:
-            session.query(UserRow).filter(UserRow.username == username).update({'playlist_tree_state': state})
-            session.commit()
 
     def hidden_playlist_ids(self, username: str) -> set:
         """
@@ -1435,36 +1424,6 @@ class DbController:
                 errors='\n'.join(errors) if errors else None,
             ))
             session.commit()
-
-    def save_playlist_paths(self, username: str, playlists: list[dict]):
-        """Store display_name -> path_components mappings for a user's playlists."""
-        user = self.get_user(username)
-        user_id = user['user_id']
-        with self._session_factory() as session:
-            for pl in playlists:
-                existing = session.query(PlaylistPathRow).filter(
-                    PlaylistPathRow.user_id == user_id,
-                    PlaylistPathRow.display_name == pl['display_name'],
-                ).first()
-                if existing:
-                    existing.path_components = pl['path_components']
-                else:
-                    session.add(PlaylistPathRow(
-                        user_id=user_id,
-                        display_name=pl['display_name'],
-                        path_components=pl['path_components'],
-                    ))
-            session.commit()
-
-    def get_playlist_paths(self, username: str) -> list[dict]:
-        """Return all playlist path mappings for a user."""
-        user = self.get_user(username)
-        user_id = user['user_id']
-        with self._session_factory() as session:
-            rows = session.query(PlaylistPathRow).filter(
-                PlaylistPathRow.user_id == user_id,
-            ).all()
-            return [_row_to_dict(r) for r in rows]
 
     def create_wishlist_item(
             self,

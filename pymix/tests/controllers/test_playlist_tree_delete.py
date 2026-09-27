@@ -11,7 +11,8 @@ from pymix.controllers.playlist_tree_controller import (
 from pymix.model.db_tables import PlaylistNodeRow, TrashBatchRow, TrashItemRow
 from pymix.services.trash import ItemState, batch_state
 from pymix.tests.fixtures.playlist_tree import (  # noqa: F401 (fixtures)
-    USER, _import, _incoming, _nodes, _outline, _xml, db_controller, navidrome, rekordbox, sessions, tree,
+    USER, _import, _incoming, _nodes, _outline, _xml, db_controller, navidrome, rekordbox, sessions, set_tree_state,
+    tree,
 )
 
 
@@ -66,8 +67,8 @@ async def test_a_folder_deleted_and_restored_is_identical_and_hidden_in_between(
     # Absent from every list pymix gives: its own listing and both exports.
     assert {p.subsonic_id for p in await tree._subsonic.get_subsonic_playlists(USER)} & hidden == set()
     assert [name for name, *_ in await _xml(rekordbox)] == ['Before', 'After', 'NOPLAYLIST']
-    # Nothing was deleted, renamed or rewritten in Navidrome.
-    assert len(navidrome.playlists) == 8 and navidrome.deleted == [] and navidrome.renamed == []
+    # Nothing was deleted in Navidrome.
+    assert len(navidrome.playlists) == 8 and navidrome.deleted == []
     assert navidrome.entries == entries
 
     restored = await tree.restore_nodes(USER, deleted['trash_batch_id'])
@@ -161,18 +162,6 @@ async def test_nothing_can_be_moved_into_a_trashed_folder(tree):
 
 
 @pytest.mark.anyio
-async def test_a_user_with_a_playlist_in_the_trash_cannot_be_rolled_back(tree, db_controller):
-    await _import(tree, _incoming('Deep', songs=('1',)))
-    await tree.delete_nodes(USER, [(await _ids(tree))['Deep']])
-
-    with pytest.raises(TreeInvariantError):
-        await tree.rollback(USER)
-    assert db_controller.playlist_tree_state('dj') == 'live'
-
-
-# --- restore: where each node goes ----------------------------------------------------------
-
-@pytest.mark.anyio
 async def test_siblings_deleted_together_go_back_in_their_own_gaps(tree):
     await _import(tree, *(_incoming(n, songs=(str(i),)) for i, n in enumerate('ABCDE')))
     ids = await _ids(tree)
@@ -230,7 +219,7 @@ async def test_s9_a_smart_playlist_comes_back_with_its_rules_untouched(tree, nav
     restored = await tree.restore_nodes(USER, deleted['trash_batch_id'])
 
     assert [n['navidrome_playlist_id'] for n in restored['restored']] == [smart] and restored['shrunk'] == []
-    assert navidrome.playlists[smart].readonly and navidrome.renamed == [] and navidrome.replaced == []
+    assert navidrome.playlists[smart].readonly and navidrome.replaced == []
 
 
 @pytest.mark.anyio
@@ -455,9 +444,9 @@ async def test_a_purge_that_stopped_after_the_deletes_is_finished_by_reconciliat
 # --- users without a tree ---------------------------------------------------------------------
 
 @pytest.mark.anyio
-async def test_a_user_without_a_tree_cannot_delete_or_restore(tree, db_controller, navidrome):
+async def test_a_user_without_a_tree_cannot_delete_or_restore(tree, sessions, navidrome):
     navidrome.add('Deep')
-    db_controller.set_playlist_tree_state('dj', 'none')
+    set_tree_state(sessions, 'none')
 
     with pytest.raises(TreeNotEnabled):
         await tree.delete_nodes(USER, ['any'])

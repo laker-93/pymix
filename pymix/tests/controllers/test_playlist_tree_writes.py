@@ -15,7 +15,8 @@ from pymix.controllers.playlist_tree_controller import (
 )
 from pymix.model.db_tables import PlaylistNodeRow
 from pymix.tests.fixtures.playlist_tree import (  # noqa: F401 (fixtures)
-    USER, _import, _incoming, _nodes, _outline, _xml, db_controller, navidrome, rekordbox, serato, sessions, tree,
+    USER, _import, _incoming, _nodes, _outline, _xml, db_controller, navidrome, rekordbox, serato, sessions,
+    set_tree_state, tree,
 )
 
 
@@ -263,43 +264,15 @@ async def test_another_users_node_is_not_found(tree, sessions):
 # --- tree state ----------------------------------------------------------------------
 
 @pytest.mark.anyio
-async def test_a_user_without_a_tree_can_do_none_of_it(tree, navidrome, sessions, db_controller):
+async def test_a_user_without_a_tree_can_do_none_of_it(tree, navidrome, sessions):
     [a, *_] = await _abc(tree)
-    db_controller.set_playlist_tree_state('dj', 'none')
+    set_tree_state(sessions, 'none')
 
     for write in (tree.create_folder(USER, 'x'), tree.create_playlist(USER, 'x'),
                   tree.update_node(USER, a, name='x')):
         with pytest.raises(TreeNotEnabled):
             await write
     assert navidrome.playlists == {}
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize('write', ['folder', 'playlist', 'update', 'read', 'delete', 'restore'])
-async def test_the_state_is_read_under_the_tree_lock(tree, navidrome, sessions, db_controller, write):
-    # A rollback (#205) sets the user 'none' and deletes their nodes under the lock. A
-    # write that checked the state before taking the lock would then write a node for
-    # a user who has no tree, and a read would adopt their playlists into one.
-    navidrome.add('Deep')
-    with sessions() as session:
-        session.query(PlaylistNodeRow).delete()
-        session.commit()
-    calls = {
-        'folder': lambda: tree.create_folder(USER, 'x'),
-        'playlist': lambda: tree.create_playlist(USER, 'x'),
-        'update': lambda: tree.update_node(USER, 'any', name='x'),
-        'read': lambda: tree.get_tree(USER),
-        'delete': lambda: tree.delete_nodes(USER, ['any']),
-        'restore': lambda: tree.restore_nodes(USER, 'any'),
-    }
-    async with tree._locks.hold('dj'):
-        pending = asyncio.ensure_future(calls[write]())
-        await asyncio.sleep(0)
-        db_controller.set_playlist_tree_state('dj', 'none')
-
-    with pytest.raises(TreeNotEnabled):
-        await pending
-    assert _nodes(sessions) == [] and len(navidrome.playlists) == 1
 
 
 # --- #206's "done when" ------------------------------------------------------------------

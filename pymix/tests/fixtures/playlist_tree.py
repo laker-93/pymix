@@ -35,9 +35,6 @@ class FakeNavidrome:
         self.entries: dict[str, list] = {}
         self.replaced: list[str] = []
         self.refuse_create = False
-        # Names a rename is refused for, as Navidrome refusing an updatePlaylist.
-        self.refuse_rename = set()
-        self.renamed: list[tuple] = []
         self.on_create = None
         # #207: tracks in the trash (a missing row, its entries kept and listed by
         # the native API) and purged (the row gone, so its entries are too).
@@ -92,13 +89,6 @@ class FakeNavidrome:
         return [{'mediaFileId': s, 'path': f'{s}.mp3', 'missing': s in self.missing, 'tags': {}}
                 for s in self.entries[playlist_id] if s not in self.purged]
 
-    async def rename_playlist(self, user, playlist_id, name):
-        if name in self.refuse_rename:
-            return False
-        self.renamed.append((playlist_id, name))
-        self.playlists[playlist_id].name = name
-        return True
-
 
 @pytest.fixture
 def sessions():
@@ -112,12 +102,18 @@ def sessions():
     return factory
 
 
+def set_tree_state(sessions, state, username='dj'):
+    """A user row starts 'live' (#211). 'none' is only demo's now, and nothing in
+    pymix sets it, so the tests that need it write it here."""
+    with sessions() as session:
+        session.query(UserRow).filter(UserRow.username == username).update({'playlist_tree_state': state})
+        session.commit()
+
+
 @pytest.fixture
 def db_controller(sessions, tmp_path):
-    db = DbController(session_factory=sessions, app_env='test', max_library_size=0,
-                      serving_music_path_base=str(tmp_path), staging_path=f'{tmp_path}/s/{{user}}/')
-    db.set_playlist_tree_state('dj', 'live')
-    return db
+    return DbController(session_factory=sessions, app_env='test', max_library_size=0,
+                        serving_music_path_base=str(tmp_path), staging_path=f'{tmp_path}/s/{{user}}/')
 
 
 @pytest.fixture
@@ -185,8 +181,8 @@ class XmlOrchestrator:
         return None
 
     def create_rekordbox_xml_playlist(self, rekordbox_xml, playlist):
-        # A `none` user's playlist: the joined name, split, as the real one does.
-        *folders, leaf = playlist.path_components or playlist.name.split(' / ')
+        # NOPLAYLIST, the one playlist an export makes outside the tree.
+        *folders, leaf = playlist.path_components or [playlist.name]
         parent = rekordbox_xml.root_playlist_folder
         for folder in folders:
             parent = next((p for p in parent.get_playlists() if p.name == folder and p.is_folder), None) \

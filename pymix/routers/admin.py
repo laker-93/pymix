@@ -9,15 +9,12 @@ public API from letting anyone recreate any user's beets container.
 import logging
 import os
 import secrets
-from typing import Optional
 
 from dependency_injector.wiring import Provide, inject
 from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel
 
 from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
-from pymix.controllers.playlist_tree_controller import PlaylistTreeController, TreeInvariantError
 from pymix.orchestrators.services_orchestrator import ServicesOrchestrator
 from pymix.routers.auth import DEMO_USERNAME
 from pymix.utils import memdiag
@@ -172,61 +169,13 @@ async def memory_tracemalloc_top(limit: int = 20) -> dict:
     return memdiag.tracemalloc_top(limit=limit)
 
 
-class PlaylistMigrateRequest(BaseModel):
-    # One user, or every user but demo.
-    username: Optional[str] = None
-    all_users: bool = False
-    # Report what would happen, including §15 Q8's playlists split with no path row.
-    dry_run: bool = False
-    # Per user only.
-    rollback: bool = False
-
-
-@router.post("/playlists/migrate", dependencies=[Depends(require_admin_token)])
-@inject
-async def migrate_playlists(
-        request: PlaylistMigrateRequest,
-        db_controller: DbController = Depends(Provide[Container.db_controller]),
-        tree: PlaylistTreeController = Depends(Provide[Container.playlist_tree_controller]),
-) -> dict:
-    """Move users' playlists into the playlist tree and rename them to their leaf
-    names, or roll one user back (#205, design-playlists-and-undo §6). It writes to
-    each user's Navidrome, so it runs only from here, deliberately. Safe to re-run:
-    a `live` user is left alone and a stopped run is finished.
-
-    `demo` never gets a tree (§4.3): refused by name, and skipped by `all_users`.
-    The all-users report ends with `still_none`; re-run until it is zero.
-    """
-    if bool(request.username) == request.all_users:
-        raise HTTPException(status_code=400, detail="give exactly one of username and all_users")
-    if request.rollback and (request.all_users or request.dry_run):
-        raise HTTPException(status_code=400, detail="rollback is per user, and has no dry run")
-    if request.all_users:
-        users = [db_controller.get_user(u) for u in db_controller.usernames() if u != DEMO_USERNAME]
-        logger.info(f"admin: playlist tree migration of {len(users)} users, dry_run={request.dry_run}")
-        return await tree.migrate_all(users, dry_run=request.dry_run)
-    if request.username == DEMO_USERNAME:
-        raise HTTPException(status_code=400, detail="demo has no playlist tree")
-    try:
-        user = db_controller.get_user(request.username)
-    except AssertionError:
-        raise HTTPException(status_code=404, detail=f"no such user: {request.username}")
-    if request.rollback:
-        logger.info(f"admin: playlist tree rollback of {request.username}")
-        try:
-            return await tree.rollback(user)
-        except TreeInvariantError as ex:
-            raise HTTPException(status_code=409, detail=str(ex))
-    logger.info(f"admin: playlist tree migration of {request.username}, dry_run={request.dry_run}")
-    return await tree.migrate(user, dry_run=request.dry_run)
-
-
 @router.get("/playlists/tree-state", dependencies=[Depends(require_admin_token)])
 @inject
 async def playlist_tree_states(
         db_controller: DbController = Depends(Provide[Container.db_controller]),
 ) -> dict:
     """Read-only: each user's playlist tree state, and how many (demo aside) are
-    still `none`, without touching anyone's Navidrome."""
+    still `none`, without touching anyone's Navidrome. Migration 025 (#211) won't run
+    until that's zero. The migration that moved users to `live` (#205) is gone with it."""
     states = {u: db_controller.playlist_tree_state(u) for u in db_controller.usernames() if u != DEMO_USERNAME}
     return {'users': states, 'still_none': sum(s == 'none' for s in states.values())}

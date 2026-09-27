@@ -157,8 +157,8 @@ on `/user/create`:
 `POST /rekordbox/export`
 → `routers/rb_import_export.rekordbox_export`
 → `RekordboxXMLController.create_rekordbox_xml_from_subsonic_playlists`
-→ `PlaylistTreeController.export_tree` for a `live` user (the tree, walked); for a `none` user,
-  `SubsonicOrchestrator.get_subsonic_playlists` → `SubsonicClient.get_playlists`/`get_playlist_tracks`,
-  enriched with stored `path_components` from `playlist_path_table` for folder structure
+→ `PlaylistTreeController.export_tree`: the user's playlist tree, reconciled against
+  `SubsonicClient.get_playlists` and walked in order, with each playlist's tracks from
+  `get_playlist_tracks`
 → `RekordboxXMLOrchestrator` builds folders/playlists/tracks into the XML (via `pyrekordbox`)
 → XML written to the user's filebrowser `downloads/` dir for the client to fetch.

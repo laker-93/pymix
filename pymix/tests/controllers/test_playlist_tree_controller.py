@@ -19,6 +19,7 @@ from pymix.model.subboxplaylist import SubBoxPlaylist
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
 from pymix.services import metrics
 from pymix.services.tree_lock import TreeLocks
+from pymix.tests.fixtures.playlist_tree import set_tree_state
 
 USER = {'username': 'dj', 'password': 'pw'}
 
@@ -74,7 +75,6 @@ def locks():
 
 @pytest.fixture
 def tree(sessions, db_controller, navidrome, locks):
-    db_controller.set_playlist_tree_state('dj', 'live')
     return PlaylistTreeController(sessions, db_controller, navidrome, locks)
 
 
@@ -93,6 +93,7 @@ def _shape(body):
 
 @pytest.mark.anyio
 async def test_a_user_without_a_tree_gets_nothing_and_no_nodes_are_written(sessions, db_controller, navidrome, locks):
+    set_tree_state(sessions, 'none')
     navidrome.add('pl-1', 'Deep')
     tree = PlaylistTreeController(sessions, db_controller, navidrome, locks)
 
@@ -103,6 +104,19 @@ async def test_a_user_without_a_tree_gets_nothing_and_no_nodes_are_written(sessi
 
     assert _rows(sessions) == [] and navidrome.calls == 0
     assert db_controller.playlist_tree_state('dj') == 'none'
+
+
+def test_a_new_user_starts_with_a_tree(sessions, db_controller):
+    # #211: 'none' was a rollout state. With the migration gone, a user created
+    # 'none' could never get a tree, so there's no setting for it any more.
+    from pymix.model.db_tables import UserTokenRow
+    with sessions() as session:
+        session.add(UserTokenRow(user_id='', token='t'))
+        session.commit()
+
+    db_controller.create_user('newbie', 'password123456', 'n@example.com', 't')
+
+    assert db_controller.playlist_tree_state('newbie') == 'live'
 
 
 # --- reconciliation -----------------------------------------------------------------

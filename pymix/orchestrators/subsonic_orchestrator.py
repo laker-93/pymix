@@ -180,53 +180,6 @@ class SubsonicOrchestrator:
         )
         return False
 
-    async def create_playlists(
-        self, user: dict, subbox_playlists: List[SubBoxPlaylist], *, scan_finished: bool
-    ) -> PlaylistWriteReport:
-        """
-        Write an import's playlists to Navidrome: create each one the user doesn't
-        have, and update the ones they do in place (#203).
-
-        A playlist is matched by name among the user's own playlists, never another
-        user's public one, and never a smart one: an incoming playlist with a smart
-        playlist's name is created beside it (design-playlists-and-undo §4.5).
-
-        A match keeps its Navidrome id, name, comment and public flag, and only its
-        entries are rewritten. This used to delete and recreate it, which threw away
-        the user's edits in subbox and changed the id that stars, the client's cache
-        and open tabs all hold.
-
-        ``scan_finished`` is whether the import saw Navidrome's scan finish. If it
-        didn't, tracks it hadn't indexed yet matched nothing, and a rewrite would drop
-        them from a playlist the user built up, with no undo. So matched playlists are
-        left as they are and named in the report; new ones are still created.
-        """
-        username = user['username']
-        report = PlaylistWriteReport()
-        existing = await self._subsonic_client.get_playlists(user) or []
-        owned = {}
-        for playlist in existing:
-            if playlist.owner != username or playlist.readonly:
-                continue
-            if playlist.name in owned:
-                logger.warning(
-                    f"{username} has more than one playlist named {playlist.name!r}; "
-                    f"a re-import updates the first, {owned[playlist.name].subsonic_id}"
-                )
-                continue
-            owned[playlist.name] = playlist
-
-        for playlist in subbox_playlists:
-            # Popped: a second incoming playlist of the same name (Rekordbox allows
-            # sibling duplicates) is created beside it, not written over the first.
-            match = owned.pop(playlist.name, None)
-            if match is None:
-                await self.create_playlist(user, playlist, report)
-            else:
-                await self.update_playlist(user, playlist, match, report, scan_finished=scan_finished)
-        self.log_report(username, report)
-        return report
-
     async def create_playlist(
         self, user: dict, playlist: SubBoxPlaylist, report: PlaylistWriteReport, *,
         name: Optional[str] = None, then: Optional[Callable[[str], None]] = None,
@@ -254,7 +207,13 @@ class SubsonicOrchestrator:
         scan_finished: bool,
     ) -> None:
         """Replace the entries of ``match``, the user's playlist an incoming one
-        matched, in place (#203), keeping a snapshot for the undo (#208)."""
+        matched, in place (#203), keeping a snapshot for the undo (#208). Its
+        Navidrome id, name, comment and public flag are kept.
+
+        ``scan_finished`` is whether the import saw Navidrome's scan finish. If it
+        didn't, tracks it hadn't indexed yet matched nothing, and a rewrite would drop
+        them from a playlist the user built up, so the playlist is left as it is and
+        named in the report."""
         n_after = sum(1 for t in playlist.tracks or [] if t.sub_track_id is not None)
         if not scan_finished:
             report.held_back.append(playlist.name)
@@ -312,15 +271,10 @@ class SubsonicOrchestrator:
         playlists = await self._subsonic_client.get_playlists(user) or []
         return [p for p in playlists if p.owner == user['username']]
 
-    async def rename_playlist(self, user: dict, playlist_id: str, name: str) -> bool:
-        """Rename one playlist. Unlocked: its only caller, the tree migration (#205),
-        already holds the user's tree lock, which isn't reentrant."""
-        return await self._subsonic_client.rename_playlist(user, playlist_id, name)
-
     async def new_playlist(self, user: dict, name: str, song_ids: List[str]) -> Optional[str]:
         """Create a playlist from Navidrome song ids and return its id, or None if
-        Navidrome refused. Unlocked, like rename_playlist: its caller, the tree's
-        POST /playlists (#206), holds the tree lock across this and the node write."""
+        Navidrome refused. Unlocked: its caller, the tree's POST /playlists (#206),
+        holds the tree lock, which isn't reentrant, across this and the node write."""
         return await self._subsonic_client.create_playlist_from_ids(user, name, song_ids)
 
     async def entry_counts(self, user: dict, playlist_ids: List[str]) -> dict:

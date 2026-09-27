@@ -38,11 +38,11 @@ On any failure the user + session are rolled back.
    to finish, up to `SCAN_WAIT_TIMEOUT_S`. Whether it finished decides step 5's
    playlist write.
 5. `_set_data_from_xml`:
-   - `_create_playlists_from_xml` — parse XML playlists → `SubBoxPlaylist`s →
-     persist `path_components` (a `none` user only) → resolve each track's
-     `sub_track_id` via Subsonic search → `PlaylistTreeController.import_playlists`,
-     which for a `none` user is `create_playlists` in Navidrome, under joined names.
-   - **A `live` user's import builds their playlist tree (#202).** Each playlist is
+   - `_create_playlists_from_xml` — parse XML playlists → `SubBoxPlaylist`s → resolve
+     each track's `sub_track_id` via Subsonic search →
+     `PlaylistTreeController.import_playlists`. A user without a tree (only `demo`,
+     which can't import) is refused; the import by joined name went with #211.
+   - **The import builds the user's playlist tree (#202).** Each playlist is
      matched by `source_path`, its full path in the source library, among the
      user's live playlist nodes, not by name. A match is updated in place (below)
      wherever it now sits and whatever it's now called, so a playlist the user
@@ -53,11 +53,9 @@ On any failure the user + session are rolled back.
      missing. Existing nodes keep their position. Nodes made in subbox, adopted
      ones included, have no `source_path`, so an import never takes one over. Each
      create and its node write happen under the user's tree lock, so a tree read
-     can't adopt the playlist at the root in between. A `live` user's import
-     writes nothing to `playlist_path_table`.
-   - **A re-import updates in place (#203).** An incoming playlist whose name matches
-     one of the user's own playlists (not another user's public one, and not a smart
-     one) is rewritten with `createPlaylist` + `playlistId`. That keeps its Navidrome
+     can't adopt the playlist at the root in between.
+   - **A re-import updates in place (#203).** A matched playlist (never a smart one)
+     is rewritten with `createPlaylist` + `playlistId`. That keeps its Navidrome
      id, name, comment and public flag; only the entries change. Nothing is deleted.
      If step 4's wait gave up, matched playlists are left unchanged, because tracks
      not yet indexed would drop out of them; new ones are still created. What was
@@ -112,9 +110,8 @@ looked up once per playlist *and* again in each tail pass — ~4 sequential Subs
 round trips per track, which is invisible locally and 12-32 s on a prod RTT (#104).
 
 ## 3. Rekordbox export (`POST /rekordbox/export`)
-`create_rekordbox_xml_from_subsonic_playlists`, for a `live` user (#204):
-1. `PlaylistTreeController.export_tree` reads the state under the tree lock,
-   reconciles, and takes the live nodes in tree order (trashed nodes, and everything
+`create_rekordbox_xml_from_subsonic_playlists` walks the user's playlist tree (#204):
+1. `PlaylistTreeController.export_tree` refuses a user without a tree, reconciles, and takes the live nodes in tree order (trashed nodes, and everything
    under one, are left out), then fetches the playlists' tracks.
 2. With `playlistIds`, only the selected playlists and the nodes on their path. A
    playlist that is only on the path is exported as a folder, without its tracks.
@@ -127,11 +124,11 @@ round trips per track, which is invisible locally and 12-32 s on a prod RTT (#10
    playlist would come back as a crate `X/X`. Siblings come in the user's order,
    which the sort by name never gave.
 
-For a `none` user, unchanged: fetch the Navidrome playlists and tracks, filter by
-`playlistIds`, sort by name, and rebuild folders from the stored `path_components`
-(from `playlist_path_table`), or else by splitting the name on ` / `.
+There is no other way out since #211: the export by joined name, which rebuilt
+folders from `playlist_path_table` or by splitting the name on ` / `, is gone with
+the table. A name with ` / ` in it is one playlist.
 
-Either way, tracks in no playlist go into a `NOPLAYLIST` playlist (when not
+Tracks in no playlist go into a `NOPLAYLIST` playlist (when not
 filtering), and the XML is saved into the user's `downloads/` for the client to
 import into Rekordbox.
 
@@ -153,10 +150,9 @@ and the next one parsed them as its own.
 
 Export does **not** mirror it: `/serato/export` returns the playlist and track
 structure and writes no files, because the client is the side that knows where
-the tracks are. See `docs/api.md`. For a `live` user a crate's `path_components` is
-its node's ancestry, from the same `export_tree` as §3, parents before children. A
-folder is only a path: one with no playlist under it has no crate. For a `none`
-user they come from `playlist_path_table` or the split name, as before.
+the tracks are. See `docs/api.md`. A crate's `path_components` is its node's
+ancestry, from the same `export_tree` as §3, parents before children. A folder is
+only a path: one with no playlist under it has no crate.
 
 Where it does **not** mirror Rekordbox is track identity. An RB XML carries each
 track's metadata; a `.crate` carries only an absolute path on the user's machine,

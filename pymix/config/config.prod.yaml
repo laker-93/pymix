@@ -71,10 +71,6 @@ db:
 max_number_of_users: 20
 max_number_of_tracks: 1000
 max_library_size: 10737418240 # 10GB
-# The playlist tree state a new account starts in (#205). 'none' until the admin
-# migration pass has moved every existing user to 'live'; flipped to 'live' in the
-# same deploy as that pass, so no new user is ever created on the no-tree path.
-new_user_playlist_tree_state: none
 # number of seconds after which the export job will be updated with number of files written to zip during export job
 update_job_period_s: 2
 subsonic:

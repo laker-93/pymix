@@ -1,5 +1,5 @@
 """
-#202: a Rekordbox or Serato import builds a `live` user's playlist tree, and a
+#202: a Rekordbox or Serato import builds the user's playlist tree, and a
 re-import matches by `source_path`, so a playlist the user moved or renamed in subbox
 is updated in place rather than duplicated (design-playlists-and-undo §5.1, §5.2).
 
@@ -12,10 +12,11 @@ from unittest import mock
 
 import pytest
 
+from pymix.controllers.playlist_tree_controller import TreeNotEnabled
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.model.db_tables import PlaylistNodeRow
 from pymix.tests.fixtures.playlist_tree import (  # noqa: F401 (fixtures)
-    USER, _import, _incoming, _node, _nodes, _outline, db_controller, navidrome, sessions, tree,
+    USER, _import, _incoming, _node, _nodes, _outline, db_controller, navidrome, sessions, set_tree_state, tree,
 )
 
 # --- a first import builds the tree ------------------------------------------------
@@ -54,14 +55,15 @@ async def test_a_nested_rekordbox_import_mirrors_the_source(tree, navidrome, ses
 
 
 @pytest.mark.anyio
-async def test_a_none_user_gets_joined_names_and_no_nodes(tree, navidrome, sessions, db_controller):
-    db_controller.set_playlist_tree_state('dj', 'none')
+async def test_a_user_without_a_tree_is_refused_and_nothing_is_written(tree, navidrome, sessions):
+    # Since #211 there's no import by joined name. Only demo is 'none', and it can't
+    # import (require_uploader).
+    set_tree_state(sessions, 'none')
 
-    report = await _import(tree, _incoming('House', 'Deep'), _incoming('Loose'))
+    with pytest.raises(TreeNotEnabled):
+        await _import(tree, _incoming('House', 'Deep'), _incoming('Loose'))
 
-    assert sorted(p.name for p in navidrome.playlists.values()) == ['House / Deep', 'Loose']
-    assert report.created == ['House / Deep', 'Loose']
-    assert _nodes(sessions) == []
+    assert navidrome.playlists == {} and _nodes(sessions) == []
 
 
 # --- a re-import updates in place, wherever the playlist now is ---------------------
@@ -251,11 +253,9 @@ async def test_a_serato_crate_matches_the_same_path_imported_from_rekordbox(tree
 # --- the Rekordbox controller -----------------------------------------------------------
 
 @pytest.mark.anyio
-@pytest.mark.parametrize('state, writes_paths', [('live', False), ('none', True)])
-async def test_playlist_path_table_is_written_for_none_users_only(state, writes_paths):
+async def test_a_rekordbox_import_hands_its_playlists_to_the_tree_and_writes_no_path_rows():
     controller = RekordboxXMLController.__new__(RekordboxXMLController)
     controller._db_controller = mock.Mock()
-    controller._db_controller.playlist_tree_state.return_value = state
     controller._subsonic_orchestrator = mock.Mock(update_tracks_with_subid=mock.AsyncMock())
     controller._playlist_tree = mock.Mock(import_playlists=mock.AsyncMock(return_value='report'))
 
@@ -265,4 +265,5 @@ async def test_playlist_path_table_is_written_for_none_users_only(state, writes_
     assert result == 'report'
     controller._playlist_tree.import_playlists.assert_awaited_once_with(
         USER, mock.ANY, origin='rekordbox', scan_finished=False)
-    assert controller._db_controller.save_playlist_paths.called is writes_paths
+    # playlist_path_table is gone (#211): the import reads and writes nothing of the user's.
+    assert controller._db_controller.method_calls == []

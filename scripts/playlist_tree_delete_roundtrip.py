@@ -9,10 +9,9 @@ without destroying a track, and a purge.
         --user q2purge --password ...
 
 Local dev stack only, with the same needs and cleanup as
-playlist_tree_write_roundtrip.py: a user whose `playlist_tree_state` is 'none' with
-no nodes and at least four tracks, switched to 'live' for the run and back at the
-end. One of its tracks goes into the trash and is restored (a #209 restore job).
-Nothing is ever purged but a playlist this script made.
+playlist_tree_write_roundtrip.py: a user with a playlist tree and at least four
+tracks (TreeRun). One of its tracks goes into the trash and is restored (a #209
+restore job). Nothing is ever purged but a playlist this script made.
 """
 import argparse
 import subprocess
@@ -22,8 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from playlist_tree_export_roundtrip import export_xml  # noqa: E402
-from playlist_tree_import_roundtrip import outline, psql  # noqa: E402
-from playlist_tree_write_roundtrip import status  # noqa: E402
+from playlist_tree_import_roundtrip import TreeRun, outline, psql  # noqa: E402
 from reimport_in_place_roundtrip import Stack  # noqa: E402
 
 
@@ -37,12 +35,7 @@ def main():
     stack = Stack(args.user, args.password, 'http://localhost:' + published.rsplit(':', 1)[1])
     stack.login()
 
-    [[user_id, state]] = psql(f"SELECT user_id, playlist_tree_state FROM user_table WHERE username='{args.user}'")
-    [[n_nodes]] = psql(f"SELECT count(*) FROM playlist_node_table WHERE user_id='{user_id}'")
-    if state != 'none' or n_nodes != '0':
-        sys.exit(f'{args.user} is {state!r} with {n_nodes} nodes; the driver needs none and 0')
-    before_ids = {p['id'] for p in stack.subsonic('getPlaylists')['playlists'].get('playlist', [])}
-    before_batches = {r[0] for r in psql(f"SELECT batch_id FROM trash_batch_table WHERE user_id='{user_id}'")}
+    run = TreeRun(stack, args.user)
 
     songs = stack.native('GET', '/api/song?_start=0&_end=50&missing=false')
     if len(songs) < 4:
@@ -78,9 +71,6 @@ def main():
     def navidrome_ids():
         return {p['id'] for p in stack.subsonic('getPlaylists')['playlists'].get('playlist', [])}
 
-    check('a user without a tree gets 409 from the delete route',
-          status(lambda: call('POST', '/playlists/nodes/delete', {'node_ids': ['x']}))[0] == 409)
-    psql(f"UPDATE user_table SET playlist_tree_state='live' WHERE user_id='{user_id}'")
     track_batch = None
     try:
         # --- under the run's root: Before, then House (2 sub-folders, 6 playlists), then Loose
@@ -97,6 +87,7 @@ def main():
         for line in outline(stack, root)[0]:
             print(line)
         before = shape()
+        hidden_before = set(tree()['hidden_playlist_ids'])
         six = {made[n]['navidrome_playlist_id'] for n in ('P1', 'P2', 'P3', 'P4', 'P5', 'P6')}
         content = {pid: entries(pid) for pid in six}
         export_before = export_xml(stack)
@@ -110,7 +101,7 @@ def main():
         body = tree()
         check('the tree leaves them out and lists the 6 as hidden',
               not {n['node_id'] for n in body['nodes']} & set(deleted['deleted']['node_ids'])
-              and set(body['hidden_playlist_ids']) == six)
+              and set(body['hidden_playlist_ids']) - hidden_before == six)
         check('Before is still first, and Loose closed up the gap',
               [(n[4], n[2]) for n in shape() if n[1] == top] == [('Before', 0), (f'{root} Loose', 1)])
         check('Navidrome still has all 6, with their entries', six <= navidrome_ids()
@@ -188,19 +179,7 @@ def main():
     finally:
         if track_batch:
             print(f'WARNING: track batch {track_batch} was not restored; restore it by hand')
-        made_ids = [i for i in navidrome_ids() if i not in before_ids]
-        for playlist_id in made_ids:
-            stack.subsonic('deletePlaylist', id=playlist_id)
-        batches = [r[0] for r in psql(f"SELECT batch_id FROM trash_batch_table WHERE user_id='{user_id}' "
-                                      f"AND kind='nodes'") if r[0] not in before_batches]
-        for batch_id in batches:
-            psql(f"DELETE FROM trash_item_table WHERE batch_id='{batch_id}'")
-            psql(f"DELETE FROM trash_batch_table WHERE batch_id='{batch_id}'")
-        psql(f"UPDATE playlist_node_table SET parent_id=NULL WHERE user_id='{user_id}'")
-        psql(f"DELETE FROM playlist_node_table WHERE user_id='{user_id}'")
-        psql(f"UPDATE user_table SET playlist_tree_state='none' WHERE user_id='{user_id}'")
-        print(f'cleaned up: {len(made_ids)} playlists and {len(batches)} playlist trash batches deleted, '
-              f'every node removed, {args.user} back to none')
+        run.cleanup()
 
     print(f'\n{sum(checks)}/{len(checks)} checks passed')
     sys.exit(0 if all(checks) else 1)
