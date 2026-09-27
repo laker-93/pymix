@@ -27,6 +27,8 @@ from pymix.clients.beets_exec import BeetsExec
 from pymix.clients.navidrome_native_client import NavidromeNativeClient
 from pymix.controllers.db_controller import DbController
 from pymix.services import metrics
+from pymix.services.job_outcome import JobOutcome, with_warning
+from pymix.utils.beets_items import build_add_command, build_dump_command, parse_json_lines
 from pymix.utils.beets_query import or_query
 
 logger = logging.getLogger(__name__)
@@ -44,11 +46,6 @@ TRASH_DEFAULTS = {
 
 def trash_setting(config: dict, key: str) -> float:
     return (config.get('trash') or {}).get(key, TRASH_DEFAULTS[key])
-
-
-# Between the fields of one `beet list -f` line. A subbox_id is a UUID and can
-# never contain it; a path can, which is why the path goes last.
-_FIELD_SEP = '|'
 
 
 class TrashKind(str, Enum):
@@ -74,6 +71,14 @@ class ItemState(str, Enum):
     LOST = 'lost'
 
 
+class RestorePhase(str, Enum):
+    """The passes of a track restore job (#209). The value goes over the wire."""
+    # Refusing tracks that are already back in the library.
+    CHECKING = 'checking'
+    # Moving each file back and re-adding it to beets, in place.
+    RESTORING_FILES = 'restoring_files'
+
+
 def batch_state(item_states: Iterable[str]) -> str:
     """
     A batch's verdict, computed from its items rather than stored beside them, so the
@@ -95,6 +100,12 @@ def batch_label(kind: str, n_items: int) -> str:
     if kind == TrashKind.TRACK.value:
         return f"{n_items} track" + ("" if n_items == 1 else "s")
     return f"{n_items} item" + ("" if n_items == 1 else "s")
+
+
+def _track_name(item: dict) -> str:
+    """What the job's messages call a track: its file name, which is all the trash
+    item knows about it without asking Navidrome."""
+    return Path(item['relative_path'] or item['subbox_id'] or '?').stem
 
 
 def _sha256(path: Path) -> str:
@@ -151,11 +162,15 @@ class TrashService:
             beets_exec: BeetsExec,
             native_client: NavidromeNativeClient,
             retention_s: float,
+            subsonic_orchestrator=None,
     ):
         self._db = db_controller
         self._beets_exec = beets_exec
         self._native = native_client
         self._retention_s = retention_s
+        # For scan_and_wait after a restore. Typed loosely: importing
+        # SubsonicOrchestrator here would pull the whole Subsonic client in.
+        self._subsonic = subsonic_orchestrator
 
     # --- delete ------------------------------------------------------------------
 
@@ -192,27 +207,26 @@ class TrashService:
     def _container(self, username: str) -> str:
         return f"beets{username}"
 
-    def _list_files(self, username: str, subbox_ids: List[str]) -> List[Tuple[str, str]]:
-        """(subbox_id, path relative to the library) for every beets item carrying one
-        of these ids. One id can have several: a duplicate upload is a second item
-        with the same tag (subbox-id-duplicate-breaks-retry)."""
+    def _list_items(self, username: str, subbox_ids: List[str]) -> List[dict]:
+        """
+        Every beets item carrying one of these ids, whole: what a restore needs to
+        put it back as it was (pymix.utils.beets_items), plus ``relative_path``, the
+        item's path relative to the library. One id can have several items: a
+        duplicate upload is a second item with the same tag
+        (subbox-id-duplicate-breaks-retry).
+        """
         if not subbox_ids:
             return []
-        result = self._beets_exec.execute(self._container(username), [
-            'beet', 'list', '-f', f'$subbox_id{_FIELD_SEP}$path',
-            *or_query('subbox_id', subbox_ids, exact=True),
-        ])
+        output = self._beets_exec.execute(self._container(username), build_dump_command(subbox_ids))
         wanted = set(subbox_ids)
-        files = []
-        for line in result.splitlines():
-            subbox_id, sep, path = line.strip().partition(_FIELD_SEP)
-            if sep and subbox_id in wanted:
-                # beets sees the user's library at /music (a volume subpath).
-                files.append((subbox_id, path.removeprefix('/music').lstrip('/')))
-        return files
+        items = [i for i in parse_json_lines(output) if i.get('subbox_id') in wanted]
+        for item in items:
+            # beets sees the user's library at /music (a volume subpath).
+            item['relative_path'] = item['path'].removeprefix('/music').lstrip('/')
+        return items
 
     def _present(self, username: str, subbox_ids: List[str]) -> Set[str]:
-        return {subbox_id for subbox_id, _ in self._list_files(username, subbox_ids)}
+        return {item['subbox_id'] for item in self._list_items(username, subbox_ids)}
 
     async def _media_file_ids(self, user: dict, subbox_ids: List[str]) -> Dict[str, str]:
         """
@@ -243,13 +257,14 @@ class TrashService:
         # Every step under the user's beets write lock: imports and the quota
         # reconcile hold it too, so nothing lands or is counted mid-move.
         with self._beets_exec.write_lock(self._container(username)):
-            files = self._list_files(username, subbox_ids)
-            listed = {subbox_id for subbox_id, _ in files}
+            beets_items = self._list_items(username, subbox_ids)
+            listed = {item['subbox_id'] for item in beets_items}
             # 1. Snapshot, before touching anything. A failure raises out of here
             #    with nothing moved and nothing removed.
             rows = self._db.snapshot_track_rows(username, sorted(listed))
             items = []
-            for subbox_id, relative in files:
+            for beets_item in beets_items:
+                subbox_id, relative = beets_item['subbox_id'], beets_item['relative_path']
                 source = library / relative
                 if not source.is_file():
                     # beets has an item with no file behind it. There is nothing to
@@ -263,7 +278,11 @@ class TrashService:
                     'size': source.stat().st_size,
                     'sha256': _sha256(source),
                     'media_file_id': media_ids.get(relative),
-                    'snapshot': rows.get(subbox_id),
+                    # The pymix rows, and the beets item as its database holds it,
+                    # which a re-add from the file alone would not recreate.
+                    'snapshot': {**rows.get(subbox_id, {}), 'beets_item': {
+                        k: beets_item[k] for k in ('fields', 'album')
+                    }},
                 })
             batch_id = None
             if items:
@@ -342,6 +361,204 @@ class TrashService:
                     batch_id = None
             removed = set(to_remove) - still_present
             return batch_id, removed, not_removed
+
+    # --- restore -----------------------------------------------------------------
+
+    async def restore_tracks(self, batch_id: str, username: str, reporter) -> JobOutcome:
+        """
+        Put a track batch back (#209; design §8.1 "Restore"), as a job.
+
+        Each file goes back to its exact path, byte-identical, and is re-added to
+        beets in place with the flexattrs and album it had. The pymix rows come back
+        from the snapshot, which brings back cues and beat grids. Navidrome kept
+        the track's row, marked missing (PurgeMissing = "never", #210), and matches
+        the returning file to it by path. So the star, rating, play count and every
+        playlist entry come back with it, and there is nothing to replay. The last
+        step checks that it did: a track that came back under a new media_file id
+        has lost those, and the job says so by name.
+
+        ``reporter`` is an ImportProgressReporter for the job. Returns the outcome
+        for ``job_completed``.
+        """
+        user = self._db.get_user(username)
+        batch = self._db.get_trash_batch(batch_id, username)
+        items = [i for i in batch['items'] if i['state'] == ItemState.RESTORABLE.value]
+        self._db.update_trash_items(batch_id, {i['id']: {'state': ItemState.RESTORING.value} for i in items})
+        updates: Dict[int, dict] = {}
+        warnings: List[str] = []
+        try:
+            # 1. A track uploaded again while it was in the trash is already back.
+            #    Restoring it too would give one subbox_id two beets items, the
+            #    state that breaks the next Serato import.
+            reporter.start_phase(RestorePhase.CHECKING, len(items))
+            back = await anyio.to_thread.run_sync(
+                self._present, username, sorted({i['subbox_id'] for i in items})
+            )
+            ready = []
+            for item in items:
+                if item['subbox_id'] in back:
+                    updates[item['id']] = {'state': ItemState.RESTORABLE.value}
+                    reporter.skipped(_track_name(item), 'already back in your library: it was uploaded again')
+                else:
+                    ready.append(item)
+                    reporter.ok()
+
+            # 2. Files back, beets in place, pymix rows back.
+            reporter.start_phase(RestorePhase.RESTORING_FILES, len(ready))
+            results = await anyio.to_thread.run_sync(self._restore_locked, username, batch_id, ready)
+            restored = []
+            for item in ready:
+                beet_id, state, error = results[item['id']]
+                if beet_id is None:
+                    updates[item['id']] = {'state': state, 'error': error}
+                    reporter.failed(_track_name(item), error)
+                    continue
+                restored.append(item)
+            rows_back: Dict[str, Optional[str]] = {}
+            for item in restored:
+                # The file and beets are back: whatever happens next, it is restored.
+                updates[item['id']] = {'state': ItemState.RESTORED.value, 'error': None}
+                # Duplicates share a subbox_id and its rows: write them once.
+                if item['subbox_id'] not in rows_back:
+                    try:
+                        self._db.restore_track_rows(
+                            username, item['subbox_id'], item['snapshot'] or {}, results[item['id']][0]
+                        )
+                        rows_back[item['subbox_id']] = None
+                    except Exception as ex:
+                        logger.error(f'{username}: restoring pymix rows for {item["subbox_id"]} failed', exc_info=True)
+                        rows_back[item['subbox_id']] = f'its cues, beat grid and upload record did not come back: {ex!r}'
+                if rows_back[item['subbox_id']]:
+                    updates[item['id']]['error'] = rows_back[item['subbox_id']]
+                    warnings.append(f"{_track_name(item)}: {rows_back[item['subbox_id']]}")
+                reporter.ok()
+                if results[item['id']][2]:
+                    warnings.append(f"{_track_name(item)}: {results[item['id']][2]}")
+
+            # 3. Navidrome: wait for it to see the files, then check each got its
+            #    old row back.
+            if restored:
+                warnings.extend(await self._check_navidrome_identity(user, restored))
+        finally:
+            # Anything left `restoring` by an exception goes back to restorable:
+            # its file is still in the trash, since only a finished move and re-add
+            # records a result for it.
+            for item in items:
+                updates.setdefault(item['id'], {'state': ItemState.RESTORABLE.value})
+            self._db.update_trash_items(batch_id, updates)
+        n_restored = sum(1 for u in updates.values() if u['state'] == ItemState.RESTORED.value)
+        if n_restored:
+            metrics.trash_restored(TrashKind.TRACK.value, n_restored)
+        outcome = reporter.verdict()
+        for warning in warnings:
+            outcome = with_warning(outcome, warning)
+        return outcome
+
+    def _restore_locked(self, username: str, batch_id: str, items: List[dict]) -> Dict[int, tuple]:
+        """
+        Move each item's file back and re-add it to beets, under the beets write
+        lock. Returns {item id: (new beet id, state, note)}: a beet id and a note
+        (or None) on success; None, the state to leave the item in and why, on
+        failure. A failed item's file is back in the trash, or the state says not.
+        """
+        library = self._db.library_path(username)
+        destination = self._db.trash_dir(username) / batch_id
+        results: Dict[int, tuple] = {}
+        with self._beets_exec.write_lock(self._container(username)):
+            moved: Dict[int, Tuple[Path, Path]] = {}
+            specs: List[dict] = []
+            for item in items:
+                source = destination / item['relative_path']
+                target = library / item['relative_path']
+                if not source.is_file():
+                    results[item['id']] = (None, ItemState.LOST.value, 'its file is no longer in the trash')
+                    continue
+                if target.exists():
+                    results[item['id']] = (None, ItemState.RESTORABLE.value, 'another file is now at its old path')
+                    continue
+                if item['sha256'] and _sha256(source) != item['sha256']:
+                    results[item['id']] = (
+                        None, ItemState.FAILED.value, 'its file in the trash has changed since it was deleted'
+                    )
+                    continue
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    os.rename(source, target)
+                except OSError as ex:
+                    results[item['id']] = (None, ItemState.RESTORABLE.value, f'could not move it back: {ex!r}')
+                    continue
+                moved[item['id']] = (source, target)
+                beets_item = (item['snapshot'] or {}).get('beets_item') or {}
+                specs.append({
+                    'path': f"/music/{item['relative_path']}",
+                    # subbox_id is a field like the rest; a snapshot without the
+                    # dump (none should exist) still gets the id back.
+                    'fields': {**(beets_item.get('fields') or {}), 'subbox_id': item['subbox_id']},
+                    'album': beets_item.get('album'),
+                })
+
+            added: Dict[str, dict] = {}
+            if specs:
+                try:
+                    output = self._beets_exec.execute(self._container(username), build_add_command(specs))
+                    added = {r['path']: r for r in parse_json_lines(output)}
+                except Exception as ex:
+                    logger.error(f'{username}: re-adding restored tracks to beets failed: {ex!r}', exc_info=True)
+                    added = {spec['path']: {'error': repr(ex)} for spec in specs}
+
+            for item in items:
+                if item['id'] not in moved:
+                    continue
+                source, target = moved[item['id']]
+                result = added.get(f"/music/{item['relative_path']}") or {'error': 'beets did not report on it'}
+                if result.get('id') is None:
+                    try:
+                        os.rename(target, source)
+                        _prune_empty_dirs(target.parent, library)
+                        state = ItemState.RESTORABLE.value
+                    except OSError:
+                        state = ItemState.FAILED.value
+                    results[item['id']] = (None, state, f"beets would not take it back: {result.get('error')}")
+                    continue
+                _prune_empty_dirs(source.parent, destination.parent)
+                note = None
+                # The re-add only reads the file (Q4). If the bytes moved anyway,
+                # Navidrome may see a different track; say so rather than hide it.
+                if item['sha256'] and _sha256(target) != item['sha256']:
+                    note = 'its file changed while being re-added to beets'
+                results[item['id']] = (result['id'], ItemState.RESTORED.value, note)
+        return results
+
+    async def _check_navidrome_identity(self, user: dict, items: List[dict]) -> List[str]:
+        """
+        Scan, then check each restored track is back under the media_file id it had
+        when deleted. Returns a warning per track that is not, naming what it lost.
+        """
+        if self._subsonic is not None:
+            finished = await self._subsonic.scan_and_wait(user)
+            if not finished:
+                return ['the library scan had not finished, so whether stars, ratings, play counts '
+                        'and playlist entries came back was not checked']
+        try:
+            rows = await self._native.songs_by_subbox_id(user, sorted({i['subbox_id'] for i in items}))
+        except Exception as ex:
+            logger.warning(f"{user['username']}: could not check restored tracks in navidrome: {ex!r}")
+            return ['Navidrome could not be asked whether stars, ratings, play counts and playlist '
+                    'entries came back']
+        live = {row['path']: row['id'] for row in rows if not row.get('missing')}
+        warnings = []
+        for item in items:
+            name = _track_name(item)
+            now = live.get(item['relative_path'])
+            if item['media_file_id'] is None:
+                warnings.append(f'{name}: its Navidrome id was not recorded when it was deleted, '
+                                'so whether its star, rating, play count and playlist entries came back is unknown')
+            elif now is None:
+                warnings.append(f'{name}: not yet visible in the library')
+            elif now != item['media_file_id']:
+                warnings.append(f'{name}: came back as a new track, without its star, rating, play count '
+                                'and playlist entries')
+        return warnings
 
     # --- purge -------------------------------------------------------------------
 
@@ -457,8 +674,8 @@ class TrashService:
 
     def settle_pending(self, batch_id: str) -> None:
         """
-        Settle the items of a delete that never finished: pymix died between the
-        snapshot and the verify. Where the file ended up says what happened.
+        Settle the items of a delete or a restore that never finished: pymix died
+        partway through. Where the file ended up says what happened.
         """
         batch = self._db.get_trash_batch(batch_id)
         if batch is None:
@@ -467,8 +684,23 @@ class TrashService:
         library = self._db.library_path(username)
         destination = self._db.trash_dir(username) / batch_id
         pending = [i for i in batch['items'] if i['state'] == ItemState.PENDING.value]
-        in_beets = self._present(username, sorted({i['subbox_id'] for i in pending}))
+        restoring = [i for i in batch['items'] if i['state'] == ItemState.RESTORING.value]
+        in_beets = self._present(username, sorted({i['subbox_id'] for i in pending + restoring}))
         updates, dropped = {}, []
+        # A restore that died: the file is where the restore got it to.
+        for item in restoring:
+            if (destination / item['relative_path']).is_file():
+                updates[item['id']] = {'state': ItemState.RESTORABLE.value}
+            elif (library / item['relative_path']).is_file() and item['subbox_id'] in in_beets:
+                updates[item['id']] = {
+                    'state': ItemState.RESTORED.value,
+                    'error': 'restore interrupted: the track is back, but its pymix rows may not be',
+                }
+            else:
+                updates[item['id']] = {
+                    'state': ItemState.FAILED.value,
+                    'error': 'restore interrupted: the file is back but beets does not have it',
+                }
         for item in pending:
             in_trash = (destination / item['relative_path']).is_file()
             if in_trash and item['subbox_id'] not in in_beets:
