@@ -137,12 +137,19 @@ routers and the watch poller — reads that; none walks the library.
   the user's beets write lock**, not before taking it. Staged outside it, a second
   job's files arrived mid-import, weren't imported (beets had already listed the
   dir), were counted as never landed, and were deleted by the first job's clean-up.
-- **Deletes** (`beet rm -df`, `beet duplicates -d`) list the files first under the
-  same beets write lock and wrap the delete in `record_removals`, which subtracts
-  only the files that are actually gone afterwards.
+- **Track deletes free nothing** (#200). DELETE /track moves each file into
+  `/private-music/_trash/<user>/<batch>/`, a rename within the same volume, so the
+  bytes are still on disk and `bytes_used` doesn't move. The trash counts against
+  the quota until it is purged. The purge (the reaper, `DELETE /trash[/{id}]`) wraps
+  the unlink in `record_removals`, so the counter drops by exactly what was
+  destroyed. `/user/storage_check` reports the trash's share as `trashBytes`, read
+  from `trash_batch_table` without a walk.
+- **`beet duplicates -d`** lists the files first under the same beets write lock and
+  wraps the delete in `record_removals`, which subtracts only the files that are
+  actually gone afterwards.
 - **Drift** (embedded art, BPM/cue write-backs, anything outside pymix) is corrected
-  by `library_usage_reconcile_loop`: a full walk per user under their beets write
-  lock, at startup and then every `library_usage.reconcile_interval_s` (default 24h).
+  by `library_usage_reconcile_loop`: a full walk of the user's library **and trash**
+  under their beets write lock, at startup and then every `library_usage.reconcile_interval_s` (default 24h).
   A NULL counter (every user before migration 021) is walked on first read.
 - Any new path that adds or removes library files must go through one of the two
   recorders, or the quota drifts until the next reconcile.

@@ -231,3 +231,76 @@ class WishlistRow(Base):
 
     created_at = Column(Float)
     updated_at = Column(Float)
+
+
+class TrashBatchRow(Base):
+    """
+    One delete the user can undo as a whole (migration 022, #200): a track delete of
+    any number of ids, and later a playlist/folder delete (#207) or a re-import's
+    replaced entries (#208).
+
+    The batch has no state of its own. Its verdict is computed from its items
+    (`pymix.services.trash.batch_state`), so the two can never disagree.
+    """
+    __tablename__ = 'trash_batch_table'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    batch_id = Column(String, unique=True, nullable=False)
+    user_id = Column(String, nullable=False, index=True)
+    # `track` | `nodes` | `playlist_entries` (pymix.services.trash.TrashKind).
+    kind = Column(String, nullable=False)
+    # What the Trash screen names the batch by: "40 tracks", "Folder House".
+    label = Column(String, nullable=False)
+    # Bytes the batch holds on disk, so the quota's trash figure is a DB read.
+    # Only track batches hold any.
+    bytes = Column(BigInteger, nullable=False, default=0)
+    created_at = Column(Float, nullable=False)
+    # When the reaper may purge it. Fixed at delete time from the retention knob.
+    expires_at = Column(Float, nullable=False, index=True)
+
+
+class TrashItemRow(Base):
+    """
+    One thing a trash batch holds, with everything its restore needs (#200).
+
+    For a `track`: the file's path in the library and in the trash, its size and
+    sha256, the Navidrome media_file id it had, and the pymix rows the delete
+    removed, in `snapshot`. `state` runs restorable -> restoring -> restored, or
+    restorable -> expired -> purged; `failed` and `lost` can follow any of them.
+    """
+    __tablename__ = 'trash_item_table'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    batch_id = Column(String, nullable=False, index=True)
+    user_id = Column(String, nullable=False)
+    kind = Column(String, nullable=False)
+    state = Column(String, nullable=False)
+    subbox_id = Column(String, nullable=True)
+    # Relative to the user's library root, and to the batch's trash directory: the
+    # file sits at the same relative path in both.
+    relative_path = Column(String, nullable=True)
+    size = Column(BigInteger, nullable=True)
+    sha256 = Column(String, nullable=True)
+    # Navidrome's id for the track when it was deleted. With PurgeMissing = "never"
+    # a restore at the same path gets it back (#210); a restore checks that it did.
+    # Null when Navidrome had not indexed the file, or could not be asked.
+    media_file_id = Column(String, nullable=True)
+    snapshot = Column(JSON, nullable=True)
+    # Why the item is failed or lost. Null otherwise.
+    error = Column(String, nullable=True)
+    updated_at = Column(Float, nullable=False)
+
+
+class TrashReaperRunRow(Base):
+    """
+    One pass of the trash reaper (#200). Nothing calls the reaper over HTTP, so it
+    reports itself here as well as in metrics: a failed pass leaves a row naming
+    what failed, not just a log line.
+    """
+    __tablename__ = 'trash_reaper_run_table'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    started_at = Column(Float, nullable=False)
+    finished_at = Column(Float, nullable=True)
+    n_batches_purged = Column(Integer, nullable=False, default=0)
+    n_missing_swept = Column(Integer, nullable=False, default=0)
+    n_failures = Column(Integer, nullable=False, default=0)
+    # One line per failure, "<user>: <what>". Null on a clean pass.
+    errors = Column(String, nullable=True)

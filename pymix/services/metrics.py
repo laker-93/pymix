@@ -331,6 +331,63 @@ library_reconcile_last_completed_timestamp_seconds = Gauge(
 )
 
 
+# The trash (#200). The reaper runs hourly and nothing calls it over HTTP, so these
+# are how anyone learns it has stopped: a purge counter that goes flat while the
+# trash gauges climb, or a failure counter that moves at all.
+TRASH_KINDS = ("track", "nodes", "playlist_entries")
+
+trash_batches_created_total = Counter(
+    "pymix_trash_batches_created_total",
+    "Deletes that moved something into a user's trash, by what was deleted.",
+    ["kind"],
+    registry=REGISTRY,
+)
+trash_purged_total = Counter(
+    "pymix_trash_purged_total",
+    "Items destroyed from a trash, by the reaper or an explicit empty, by kind.",
+    ["kind"],
+    registry=REGISTRY,
+)
+for _kind in TRASH_KINDS:
+    trash_batches_created_total.labels(kind=_kind)
+    trash_purged_total.labels(kind=_kind)
+
+trash_missing_swept_total = Counter(
+    "pymix_trash_missing_swept_total",
+    "Navidrome rows missing for over a day that no trash batch held, purged by the "
+    "reaper's sweep. Steady growth means files leave libraries by a path that is not "
+    "the trash.",
+    registry=REGISTRY,
+)
+trash_reaper_failures_total = Counter(
+    "pymix_trash_reaper_failures_total",
+    "Things the trash reaper failed to do: a batch it could not purge, a user it could "
+    "not sweep, a pass that died. Each is also a row in trash_reaper_run_table.",
+    registry=REGISTRY,
+)
+trash_reaper_last_completed_timestamp_seconds = Gauge(
+    "pymix_trash_reaper_last_completed_timestamp_seconds",
+    "Unix time the trash reaper last finished a pass.",
+    registry=REGISTRY,
+)
+
+
+def trash_batch_created(kind: str) -> None:
+    if kind in TRASH_KINDS:
+        trash_batches_created_total.labels(kind=kind).inc()
+
+
+def trash_purged(kind: str, n: int) -> None:
+    if kind in TRASH_KINDS:
+        trash_purged_total.labels(kind=kind).inc(n)
+
+
+def trash_reaper_completed(n_swept: int, n_failures: int) -> None:
+    trash_missing_swept_total.inc(n_swept)
+    trash_reaper_failures_total.inc(n_failures)
+    trash_reaper_last_completed_timestamp_seconds.set(time.time())
+
+
 def observe_quota_refusal(path: str) -> None:
     """Record one refusal. An unknown `path` is dropped, as for invite outcomes: the
     label set stays the one declared above."""
@@ -673,6 +730,33 @@ class PymixStateCollector:
             limit.add_metric([username], max_library_size)
         yield used
         yield limit
+        yield from self._trash_metrics()
+
+    def _trash_metrics(self):
+        """What each user's trash holds (#200), from the trash tables: no walk. Those
+        bytes are inside `pymix_user_storage_used_bytes` too, since the trash counts
+        against the quota until it is purged."""
+        try:
+            rows = self._db.trash_usage_by_user()
+        except Exception:
+            logger.exception("metrics: could not read trash usage")
+            return
+        held = GaugeMetricFamily(
+            "pymix_user_trash_bytes",
+            "Bytes in each user's trash, awaiting restore or the reaper.",
+            labels=["username"],
+        )
+        items = GaugeMetricFamily(
+            "pymix_user_trash_items",
+            "Items in each user's trash, by kind.",
+            labels=["username", "kind"],
+        )
+        for username, n_bytes, by_kind in rows:
+            held.add_metric([username], n_bytes)
+            for kind, n in sorted(by_kind.items()):
+                items.add_metric([username, kind], n)
+        yield held
+        yield items
 
     def _memory_metrics(self):
         """The numbers `handlers/mem_watch_handler` already logs, as metrics.

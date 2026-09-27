@@ -18,9 +18,11 @@ from pymix.handlers.filebrowser_file_handler import poll_watchdir, trigger_proce
 from pymix.handlers.mem_watch_handler import mem_watch_loop
 from pymix.handlers.sheet_sync_handler import sheet_sync_loop
 from pymix.handlers.library_usage_reconcile_handler import library_usage_reconcile_loop
+from pymix.handlers.trash_reaper_handler import trash_reaper_loop
+from pymix.services.trash import trash_setting
 from pymix.handlers.wishlist_reconcile_handler import wishlist_reconcile_loop
 from pymix.handlers.wishlist_resolve_handler import wishlist_resolve_loop
-from pymix.routers import admin, auth, maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, wishlist, invite_request, metrics
+from pymix.routers import admin, auth, maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, trash, wishlist, invite_request, metrics
 from pymix.services import metrics as metrics_service
 
 
@@ -132,6 +134,12 @@ async def lifespan(app: FastAPI, container):
     library_usage_config = container.config().get('library_usage') or {}
     library_usage_interval_s = library_usage_config.get('reconcile_interval_s', 24 * 60 * 60)
 
+    # Hourly: purges expired trash batches and sweeps each Navidrome for missing rows
+    # no batch holds (#200).
+    trash_service = await container.trash_service()
+    trash_reaper_interval_s = trash_setting(container.config(), 'reaper_interval_s')
+    trash_sweep_after_s = trash_setting(container.config(), 'sweep_after_s')
+
     async with anyio.create_task_group() as tg:
         tg.start_soon(poll_watchdir, user_root, watch_subdir, send_stream, db_controller)
         tg.start_soon(trigger_processing, receive_stream, rb_xml_controller, db_controller)
@@ -144,6 +152,9 @@ async def lifespan(app: FastAPI, container):
         )
         tg.start_soon(
             library_usage_reconcile_loop, db_controller, container.beets_exec(), library_usage_interval_s
+        )
+        tg.start_soon(
+            trash_reaper_loop, trash_service, db_controller, trash_reaper_interval_s, trash_sweep_after_s
         )
         if mem_watch_config.get('enabled', True):
             tg.start_soon(
@@ -179,6 +190,7 @@ def create_app(container):
     app.include_router(export_progress.router)
     app.include_router(sync.router)
     app.include_router(track.router)
+    app.include_router(trash.router)
     app.include_router(wishlist.router)
     app.include_router(invite_request.router)
     app.include_router(admin.router)
@@ -224,7 +236,7 @@ def create_container(environment="dev"):
     )
     container.wire(
         modules=[
-            auth, maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, wishlist, invite_request, admin, metrics, sys.modules[__name__]
+            auth, maintenance, create, user, beets_import, rb_import_export, serato_import_export, export_progress, sync, track, trash, wishlist, invite_request, admin, metrics, sys.modules[__name__]
         ]
     )
     return container
