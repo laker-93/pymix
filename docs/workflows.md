@@ -112,14 +112,28 @@ looked up once per playlist *and* again in each tail pass — ~4 sequential Subs
 round trips per track, which is invisible locally and 12-32 s on a prod RTT (#104).
 
 ## 3. Rekordbox export (`POST /rekordbox/export`)
-`create_rekordbox_xml_from_subsonic_playlists`:
-1. Fetch Navidrome playlists + their tracks.
-2. Optionally filter by `playlistIds`.
-3. Sort by name; enrich with stored `path_components` (from `playlist_path_table`)
-   so nested folder structure is rebuilt (Subsonic playlists are flat).
-4. Build the Rekordbox XML via `RekordboxXMLOrchestrator` (`pyrekordbox`).
-5. Tracks not in any playlist go into a `NOPLAYLIST` playlist (when not filtering).
-6. Save XML into the user's `downloads/` for the client to import into Rekordbox.
+`create_rekordbox_xml_from_subsonic_playlists`, for a `live` user (#204):
+1. `PlaylistTreeController.export_tree` reads the state under the tree lock,
+   reconciles, and takes the live nodes in tree order (trashed nodes, and everything
+   under one, are left out), then fetches the playlists' tracks.
+2. With `playlistIds`, only the selected playlists and the nodes on their path. A
+   playlist that is only on the path is exported as a folder, without its tracks.
+3. The walk writes a folder as a folder (`Type="0"`, empty ones included) and a
+   playlist as a playlist (`Type="1"`), under its Navidrome name. A playlist with
+   children (a Serato crate with its own tracks and sub-crates) becomes the
+   playlist, then a folder of the same name holding its children, side by side, as
+   the export by joined name always wrote it. That shape comes back whole through a
+   re-import and a Serato export; design §5.4's folder holding a same-named
+   playlist would come back as a crate `X/X`. Siblings come in the user's order,
+   which the sort by name never gave.
+
+For a `none` user, unchanged: fetch the Navidrome playlists and tracks, filter by
+`playlistIds`, sort by name, and rebuild folders from the stored `path_components`
+(from `playlist_path_table`), or else by splitting the name on ` / `.
+
+Either way, tracks in no playlist go into a `NOPLAYLIST` playlist (when not
+filtering), and the XML is saved into the user's `downloads/` for the client to
+import into Rekordbox.
 
 ## 4. Serato import/export (`/serato/import`, `/serato/export`)
 Import mirrors the Rekordbox flow but reads Serato `.crate` files via `pyserato`
@@ -139,7 +153,10 @@ and the next one parsed them as its own.
 
 Export does **not** mirror it: `/serato/export` returns the playlist and track
 structure and writes no files, because the client is the side that knows where
-the tracks are. See `docs/api.md`.
+the tracks are. See `docs/api.md`. For a `live` user a crate's `path_components` is
+its node's ancestry, from the same `export_tree` as §3, parents before children. A
+folder is only a path: one with no playlist under it has no crate. For a `none`
+user they come from `playlist_path_table` or the split name, as before.
 
 Where it does **not** mirror Rekordbox is track identity. An RB XML carries each
 track's metadata; a `.crate` carries only an absolute path on the user's machine,

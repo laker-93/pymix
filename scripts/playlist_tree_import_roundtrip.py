@@ -58,6 +58,55 @@ def write_xml(path, songs, tree):
     xml.save(str(path))
 
 
+def import_crates(stack, songs, crates, tag):
+    """A Serato import of `crates`: [(path components, [songs])], each song a
+    Navidrome native row from `songs`. A crate with no songs of its own is still
+    written if it has sub-crates."""
+    with tempfile.TemporaryDirectory() as tmp:
+        serato = Path(tmp) / '_Serato_'
+        serato.mkdir()
+        tops = {}
+        for components, members in crates:
+            parent = None
+            for depth, name in enumerate(components):
+                siblings = tops if parent is None else parent.children
+                if name not in siblings:
+                    siblings[name] = Crate(name)
+                parent = siblings[name]
+            for song in members:
+                parent.add_track(Track(path=Path(f"Users/dj/Music/{song['path']}")))
+        for crate in tops.values():
+            Builder().save(crate, serato, overwrite=True)
+        archive = Path(tmp) / 'all-crates.zip'
+        with zipfile.ZipFile(archive, 'w') as z:
+            for f in (serato / 'SubCrates').iterdir():
+                z.write(f, f.name)
+        # The paths exactly as the server will read them back out of the crates.
+        parsed = Builder().parse_crates_from_root_path(serato / 'SubCrates')
+        paths = set()
+
+        def walk(crate):
+            paths.update(str(t.path) for t in crate.tracks)
+            for child in crate.children.values():
+                walk(child)
+        for crate in parsed.values():
+            walk(crate)
+        by_path = {f"Users/dj/Music/{s['path']}": s['tags']['subboxid'][0] for s in songs}
+        identities = [{'crate_path': p, 'subbox_id': next(v for k, v in by_path.items() if p.endswith(k))}
+                      for p in paths]
+        subprocess.run(['docker', 'cp', str(archive), f'pymix:/user-updownloads/{stack.user}/uploads/all-crates.zip'],
+                       check=True, capture_output=True)
+    started = stack.pymix_call('POST', '/serato/import', {'track_identities': identities})
+    for _ in range(600):
+        progress = stack.pymix_call('GET', f"/beets/import/progress?job_id={started['job_id']}")
+        if progress['in_progress'] is False:
+            break
+        time.sleep(1)
+    print(f'serato import {tag}: result={progress["result"]} warnings={progress["warnings"]!r} '
+          f'reason={progress["reason"]!r}')
+    return progress
+
+
 def outline(stack, under):
     """The live subtree under the root node named `under`, as indented names."""
     nodes = stack.pymix_call('GET', '/playlists/tree')['nodes']
@@ -106,53 +155,6 @@ def main():
                            check=True, capture_output=True)
             progress = run_import(stack, path.name)
         print(f'rekordbox import {tag}: result={progress["result"]} warnings={progress["warnings"]!r}')
-        return progress
-
-    def import_crates(crates, tag):
-        """crates: [(path components, [songs])] -- a crate with no songs of its own
-        is still written if it has sub-crates."""
-        with tempfile.TemporaryDirectory() as tmp:
-            serato = Path(tmp) / '_Serato_'
-            serato.mkdir()
-            tops = {}
-            for components, members in crates:
-                parent = None
-                for depth, name in enumerate(components):
-                    siblings = tops if parent is None else parent.children
-                    if name not in siblings:
-                        siblings[name] = Crate(name)
-                    parent = siblings[name]
-                for song in members:
-                    parent.add_track(Track(path=Path(f"Users/dj/Music/{song['path']}")))
-            for crate in tops.values():
-                Builder().save(crate, serato, overwrite=True)
-            archive = Path(tmp) / 'all-crates.zip'
-            with zipfile.ZipFile(archive, 'w') as z:
-                for f in (serato / 'SubCrates').iterdir():
-                    z.write(f, f.name)
-            # The paths exactly as the server will read them back out of the crates.
-            parsed = Builder().parse_crates_from_root_path(serato / 'SubCrates')
-            paths = set()
-
-            def walk(crate):
-                paths.update(str(t.path) for t in crate.tracks)
-                for child in crate.children.values():
-                    walk(child)
-            for crate in parsed.values():
-                walk(crate)
-            by_path = {f"Users/dj/Music/{s['path']}": s['tags']['subboxid'][0] for s in songs[:4]}
-            identities = [{'crate_path': p, 'subbox_id': next(v for k, v in by_path.items() if p.endswith(k))}
-                          for p in paths]
-            subprocess.run(['docker', 'cp', str(archive), f'pymix:/user-updownloads/{args.user}/uploads/all-crates.zip'],
-                           check=True, capture_output=True)
-        started = stack.pymix_call('POST', '/serato/import', {'track_identities': identities})
-        for _ in range(600):
-            progress = stack.pymix_call('GET', f"/beets/import/progress?job_id={started['job_id']}")
-            if progress['in_progress'] is False:
-                break
-            time.sleep(1)
-        print(f'serato import {tag}: result={progress["result"]} warnings={progress["warnings"]!r} '
-              f'reason={progress["reason"]!r}')
         return progress
 
     psql(f"UPDATE user_table SET playlist_tree_state='live' WHERE user_id='{user_id}'")
@@ -207,7 +209,7 @@ def main():
 
         # --- a nested Serato import --------------------------------------------------------
         crates_root = f'{root} S'
-        import_crates([
+        import_crates(stack, songs[:4], [
             ([crates_root, 'Sets', 'House'], [a, b]),        # own tracks and a sub-crate
             ([crates_root, 'Sets', 'House', 'Deep'], [c]),
             ([crates_root, 'Techno', 'Peak'], [d]),         # Techno: sub-crates only

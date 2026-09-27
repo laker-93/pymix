@@ -348,14 +348,19 @@ class RekordboxXMLOrchestrator:
         return all_playlists
 
     def get_playlist(self, rekordbox_xml: RekordboxXml, name: str) -> Optional[Node]:
-        try:
-            playlist = rekordbox_xml.get_playlist(name)
-            # force an exception if the playlist does not exist
-            str(playlist)
-            assert playlist.is_playlist
-        except Exception:
-            playlist = None
-        return playlist
+        """The first playlist called `name`, at any depth, or None. Not pyrekordbox's
+        get_playlist: on no match, that adds an empty <NODE /> to the XML, which every
+        export without a NOPLAYLIST of the user's own used to carry."""
+        def find(folder: Node) -> Optional[Node]:
+            for node in folder.get_playlists():
+                if node.is_folder:
+                    found = find(node)
+                    if found is not None:
+                        return found
+                elif node.name == name:
+                    return node
+            return None
+        return find(rekordbox_xml.root_playlist_folder)
 
     def get_all_xml_tracks(self, rekordbox_xml: RekordboxXml) -> List[SubBoxTrack]:
         all_tracks = []

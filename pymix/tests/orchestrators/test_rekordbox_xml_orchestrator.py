@@ -197,3 +197,16 @@ class TestSubboxPlaylistsFromXml:
         # The per-entry walk took ~1s on this size on a laptop; the indexed one ~0.1s.
         # The bound is loose on purpose -- the get_track patch above is the real guard.
         assert elapsed < 5
+
+
+def test_get_playlist_finds_a_nested_playlist_and_adds_nothing_when_there_is_none():
+    """pyrekordbox's own get_playlist adds an empty <NODE /> when nothing matches,
+    and the export looks up NOPLAYLIST that way every time."""
+    orchestrator = RekordboxXMLOrchestrator(mock.Mock(), mock.Mock(), '/music')
+    xml = RekordboxXml(name='rekordbox', version='6.8.4', company='AlphaTheta')
+    xml.add_playlist_folder('Sets').add_playlist('NOPLAYLIST')
+
+    assert orchestrator.get_playlist(xml, 'NOPLAYLIST').name == 'NOPLAYLIST'
+    assert orchestrator.get_playlist(xml, 'Sets') is None
+    assert orchestrator.get_playlist(xml, 'Missing') is None
+    assert [n.name for n in xml.root_playlist_folder.get_playlists()] == ['Sets']
