@@ -4,7 +4,7 @@ import logging
 import datetime
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Dict, Iterable, Iterator, Union
+from typing import Optional, Dict, Iterable, Iterator, List, Union
 
 from sqlalchemy import case, func
 from sqlalchemy.exc import IntegrityError
@@ -136,8 +136,12 @@ class DbController:
             max_library_size: int,
             serving_music_path_base: str = '/private-music',
             staging_path: str = '/private-staged/{user}/',
+            new_user_playlist_tree_state: Optional[str] = None,
     ):
         self._session_factory = session_factory
+        # 'none' until #205's pass has migrated every user, then 'live' (§4.4).
+        self._new_user_tree_state = new_user_playlist_tree_state or 'none'
+        assert self._new_user_tree_state in ('none', 'live'), self._new_user_tree_state
         self._app_env = app_env
         self._max_library_size = max_library_size
         self._serving_music_path_base = serving_music_path_base.removesuffix('/')
@@ -795,6 +799,7 @@ class DbController:
                 beets_port=beets_port,
                 subsonic_port=subsonic_port,
                 max_library_size=self._max_library_size,
+                playlist_tree_state=self._new_user_tree_state,
             ))
             session.commit()
 
@@ -851,6 +856,10 @@ class DbController:
             results = session.query(UserRow).filter(UserRow.username == username).all()
             assert len(results) == 1, f'found {len(results)} users with username {username}'
             return _row_to_dict(results[0])
+
+    def usernames(self) -> List[str]:
+        with self._session_factory() as session:
+            return sorted(u for (u,) in session.query(UserRow.username).all())
 
     def playlist_tree_state(self, username: str) -> str:
         """'none' or 'live' (#201, design §4.4)."""

@@ -41,6 +41,30 @@ def expected(tree, above=()):
     return out
 
 
+def export_xml(stack, playlist_ids=()):
+    """The exported XML's playlists as (path, kind, [titles]) in order."""
+    response = stack.pymix_call('POST', '/rekordbox/export',
+                                {'user_root': '/Users/dj/Music', 'playlistIds': list(playlist_ids)})
+    assert response['success'], response
+    with tempfile.TemporaryDirectory() as tmp:
+        local = Path(tmp) / 'export.xml'
+        subprocess.run(['docker', 'cp', f'pymix:/user-updownloads/{stack.user}/downloads/subbox_rb_export.xml',
+                        str(local)], check=True, capture_output=True)
+        xml = RekordboxXml(str(local))
+    out = []
+
+    def walk(node, above):
+        for child in node.get_playlists():
+            path = above + (child.name,)
+            if child.is_folder:
+                out.append((path, 'folder', None))
+                walk(child, path)
+            else:
+                out.append((path, 'playlist', [xml.get_track(TrackID=t).Name for t in child.get_tracks()]))
+    walk(xml.root_playlist_folder, ())
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--user', required=True)
@@ -78,29 +102,6 @@ def main():
         print(f'rekordbox import {tag}: result={progress["result"]} warnings={progress["warnings"]!r}')
         return progress
 
-    def export_xml(playlist_ids=()):
-        """The exported XML's playlists as (path, kind, [titles]) in order."""
-        response = stack.pymix_call('POST', '/rekordbox/export',
-                                    {'user_root': '/Users/dj/Music', 'playlistIds': list(playlist_ids)})
-        assert response['success'], response
-        with tempfile.TemporaryDirectory() as tmp:
-            local = Path(tmp) / 'export.xml'
-            subprocess.run(['docker', 'cp', f'pymix:/user-updownloads/{args.user}/downloads/subbox_rb_export.xml',
-                            str(local)], check=True, capture_output=True)
-            xml = RekordboxXml(str(local))
-        out = []
-
-        def walk(node, above):
-            for child in node.get_playlists():
-                path = above + (child.name,)
-                if child.is_folder:
-                    out.append((path, 'folder', None))
-                    walk(child, path)
-                else:
-                    out.append((path, 'playlist', [xml.get_track(TrackID=t).Name for t in child.get_tracks()]))
-        walk(xml.root_playlist_folder, ())
-        return out
-
     def under(lines, top):
         return [line for line in lines if line[0][0] == top]
 
@@ -109,7 +110,7 @@ def main():
         # --- Rekordbox: import, export ---------------------------------------------------
         source = {root: {'House': {'2024': {'Deep': [a, b], 'Tech': [c]}, 'Warmup': [d]}, 'Loose': [a, d]}}
         import_xml(source, 'first')
-        exported = export_xml()
+        exported = export_xml(stack)
         for line in under(exported, root):
             print('  ' * (len(line[0]) - 1) + f'{line[0][-1]} [{line[1][0]}] {line[2] or ""}')
         check('the Rekordbox export has the imported structure, order and tracks',
@@ -123,13 +124,13 @@ def main():
         psql(f"UPDATE playlist_node_table SET position = position + 1 "
              f"WHERE parent_id='{top['node_id']}' AND position < {loose['position']} AND trash_batch_id IS NULL")
         psql(f"UPDATE playlist_node_table SET position = 0 WHERE node_id='{loose['node_id']}'")
-        exported = export_xml()
+        exported = export_xml(stack)
         check('the user\'s sibling order reaches Rekordbox',
               [line[0] for line in under(exported, root) if len(line[0]) == 2] == [(root, 'Loose'), (root, 'House')])
 
         # --- filtered to one playlist -------------------------------------------------------
         [tech] = [n for n in nodes if n['name'] == 'Tech']
-        exported = export_xml([tech['navidrome_playlist_id']])
+        exported = export_xml(stack, [tech['navidrome_playlist_id']])
         check('a filtered export is the playlist and its path, nothing else', exported == [
             ((root,), 'folder', None), ((root, 'House'), 'folder', None), ((root, 'House', '2024'), 'folder', None),
             ((root, 'House', '2024', 'Tech'), 'playlist', [c['title']])], str(exported))
@@ -158,7 +159,7 @@ def main():
             ((crates_root, 'Sets', 'House', 'Deep'), [Path(c['path']).name]),
             ((crates_root, 'Techno', 'Peak'), [Path(d['path']).name]),
         ], str(crates))
-        exported = export_xml()
+        exported = export_xml(stack)
         check('in Rekordbox a crate with its own tracks and sub-crates is the playlist, then a folder',
               [(line[0], line[1]) for line in under(exported, crates_root)] == [
                   ((crates_root,), 'folder'), ((crates_root, 'Sets'), 'folder'),

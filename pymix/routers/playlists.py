@@ -1,6 +1,7 @@
 """
 The playlist tree's routes (#201; design-playlists-and-undo §4). The write routes
-(create, move, delete, restore) arrive with #204 and #207.
+(create, move, delete, restore) arrive with #206 and #207. The migration into the
+tree is an admin route (#205, `routers/admin.py`).
 """
 import logging
 from typing import Any, Dict

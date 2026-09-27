@@ -88,6 +88,7 @@ class Container(containers.DeclarativeContainer):
         config.max_library_size,
         config.containers.subsonic.serving_music_path_base,
         config.containers.beets.data,
+        new_user_playlist_tree_state=config.new_user_playlist_tree_state,
     )
 
     compose_file_handler = providers.Singleton(

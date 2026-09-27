@@ -678,6 +678,21 @@ class SubsonicClient(BaseAPIClient):
         response = await self.get(url)
         return response['subsonic-response']['status'] == 'ok'
 
+    async def rename_playlist(self, user: dict, playlist_id: str, name: str) -> bool:
+        """updatePlaylist with only a name: the entries are untouched."""
+        username = user['username']
+        base_path = self._host.format(user=username, port=4533)
+        url = self._subsonic_format_url(
+            username, user['password'], f"{base_path}/rest/updatePlaylist",
+            params=[('playlistId', playlist_id), ('name', name)],
+        )
+        response = await self.get(url)
+        if response['subsonic-response']['status'] != 'ok':
+            logger.error(f"renaming playlist {playlist_id} of {username} failed: "
+                         f"{response['subsonic-response'].get('error')}")
+            return False
+        return True
+
     async def create_playlist(self, user: dict, name: str, tracks: List[SubBoxTrack]) -> Optional[str]:
         """Create a playlist, and return its Navidrome id (a playlist node needs it,
         #201), or None if Navidrome refused."""
