@@ -26,6 +26,7 @@ from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.handlers.rb_backup_file_handler import RBBackupFileHandler
 from pymix.model.db_tables import Base, UserRow
 from pymix.model.original_track_meta import OriginalTrackMeta, OriginalTracks, UploadAttempt
+from pymix.model.playlist_write_report import PlaylistWriteReport
 from pymix.routers import rb_import_export, serato_import_export
 from pymix.routers.sync import map_meta
 from pymix.services.import_progress import ImportPhase
@@ -106,7 +107,7 @@ def _files_in(directory: Path) -> set[str]:
     return {str(f.relative_to(directory)) for f in directory.rglob('*') if f.is_file()}
 
 
-def _controller_that_imports(record: dict, side_effect=None):
+def _controller_that_imports(record: dict, side_effect=None, playlists=None):
     """
     Stands in for RekordboxXMLController: remembers what it was asked to stage,
     and records a clean mapping phase so the verdict has evidence to go on.
@@ -118,6 +119,7 @@ def _controller_that_imports(record: dict, side_effect=None):
         progress.ok(len(kwargs['audio_files']) or 1)
         if side_effect:
             side_effect()
+        return playlists
     controller = mock.Mock()
     controller.create_subsonic_playlists_from_xml = mock.AsyncMock(side_effect=create)
     return controller
@@ -163,6 +165,20 @@ async def test_leftovers_from_an_abandoned_upload_are_not_imported(db, handler, 
     for leftover in leftovers:
         assert leftover not in record['audio_files']
     assert outcome.verdict is Verdict.SUCCESS
+
+
+@pytest.mark.anyio
+async def test_a_playlist_the_reimport_held_back_is_a_warning_on_the_job(db, handler, uploads):
+    # #203: the scan hadn't finished, so the user's existing playlist was left as it was.
+    (uploads / 'rekordbox.xml').write_text('<DJ_PLAYLISTS/>')
+    await _map_meta(db, handler)
+
+    _, outcome = await _rb_import(
+        db, handler, _controller_that_imports({}, playlists=PlaylistWriteReport(held_back=['Deep'])),
+    )
+
+    assert outcome.verdict is Verdict.PARTIAL
+    assert outcome.warnings == "`Deep` not updated: the library scan hadn't finished. Re-import to update it."
 
 
 @pytest.mark.anyio

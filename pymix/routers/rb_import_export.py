@@ -103,7 +103,7 @@ async def run_import_task(rekordbox_xml_controller, username, job_id, db_control
     # exceptions (#171). An escaping exception is still a failure -- it is just no
     # longer the *only* way to be one.
     escaped_reason = None
-    beets_output = ""
+    playlists = None
     progress = ImportProgressReporter(db_controller, job_id)
     attempt = attempt or UploadAttempt(files={})
     uploaded = []
@@ -120,7 +120,7 @@ async def run_import_task(rekordbox_xml_controller, username, job_id, db_control
         # reads a tag per file: off the event loop
         selected = await anyio.to_thread.run_sync(fb_file_handler.select_attempt_files, username, attempt)
         logger.info(f'starting RB import for user {username} on {xml_path} with {len(selected.files)} track(s)')
-        beets_output = await rekordbox_xml_controller.create_subsonic_playlists_from_xml(
+        playlists = await rekordbox_xml_controller.create_subsonic_playlists_from_xml(
             user=user,
             xml_path=xml_path,
             zip_path=None,
@@ -141,11 +141,13 @@ async def run_import_task(rekordbox_xml_controller, username, job_id, db_control
         #total_n_imported_tracks = await beets_client.count_tracks_on_disk(user)
         logger.info(f'finished RB import of {total_n_tracks_for_import} for user {username}')
     finally:
-        logger.info(f"beets output {beets_output}")
         # Before the job is marked complete, so the client's next attempt starts
         # on an empty directory.
         fb_file_handler.finish_upload_attempt(username, uploaded, attempt)
         outcome = progress.verdict(escaped_reason)
+        if playlists is not None:
+            # A playlist a re-import held back, shortened or couldn't write (#203).
+            outcome = with_warning(outcome, playlists.warning())
         if selected is not None:
             outcome = with_warning(outcome, selected.refused_warning())
         logger.info(f'marking RB import job for user {username} as {outcome.verdict.value}')

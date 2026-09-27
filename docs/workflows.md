@@ -34,11 +34,23 @@ On any failure the user + session are rolled back.
    `uploads/`. An audio zip there is ignored: its files were never tagged.
 3. If the attempt has audio → `_import_to_beets` (stage → `beet import --group-albums --set
    user=… -q /downloads` in `beets{user}` → cleanup → dedup tag → subbox_id↔beet map).
-4. `SubsonicOrchestrator.scan` triggers a Navidrome rescan.
+4. `SubsonicOrchestrator.scan_and_wait` triggers a Navidrome rescan and waits for it
+   to finish, up to `SCAN_WAIT_TIMEOUT_S`. Whether it finished decides step 5's
+   playlist write.
 5. `_set_data_from_xml`:
    - `_create_playlists_from_xml` — parse XML playlists → `SubBoxPlaylist`s →
      persist `path_components` → resolve each track's `sub_track_id` via Subsonic
      search → `create_playlists` in Navidrome.
+   - **A re-import updates in place (#203).** An incoming playlist whose name matches
+     one of the user's own playlists (not another user's public one, and not a smart
+     one) is rewritten with `createPlaylist` + `playlistId`. That keeps its Navidrome
+     id, name, comment and public flag; only the entries change. Nothing is deleted.
+     If step 4's wait gave up, matched playlists are left unchanged, because tracks
+     not yet indexed would drop out of them; new ones are still created. What was
+     held back, made shorter, left alone because none of its tracks matched, or
+     refused comes back as a `PlaylistWriteReport` and becomes the job's warnings.
+     Writes go in chunks of 1,000 ids (`updatePlaylist songIdToAdd` after the
+     first): Navidrome refuses a request with more than 10,000 query parameters.
    - `_set_metadata_from_xml` — set ratings, write BPM into beets, and store
      cue/loop metadata in `library_table` keyed by `subbox_id`.
 6. The router clears `uploads/` and the attempt, **whatever the outcome**, before it
@@ -88,7 +100,9 @@ round trips per track, which is invisible locally and 12-32 s on a prod RTT (#10
 ## 4. Serato import/export (`/serato/import`, `/serato/export`)
 Import mirrors the Rekordbox flow but reads Serato `.crate` files via `pyserato`
 (`SeratoController` + `SeratoCrateOrchestrator`). Crate folder hierarchy ↔
-`path_components` the same way. It is scoped to the upload attempt and clears
+`path_components` the same way, waits for the scan and writes playlists the same
+way (re-import in place, §2). The report's playlist warnings follow its own
+skipped-track warning. It is scoped to the upload attempt and clears
 `uploads/` (crates included) the same way as §2. `all-crates.zip` is extracted
 into a temporary directory, not beside itself: crates extracted into `uploads/`
 mid-job were not in the list the cleanup works from, so they outlived the import

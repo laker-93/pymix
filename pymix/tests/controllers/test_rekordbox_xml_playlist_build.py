@@ -60,4 +60,4 @@ async def test_playlists_are_built_once_off_the_event_loop_and_shared_by_both_pa
     assert built_on and built_on[0] != loop_thread
     assert create.call_args.args[4] is playlists
     assert metadata.call_args.args[5] is playlists
-    controller._subsonic_orchestrator.create_playlists.assert_awaited_once_with({"username": "demo"}, playlists)
+    controller._subsonic_orchestrator.create_playlists.assert_awaited_once_with({"username": "demo"}, playlists, scan_finished=True)

@@ -35,13 +35,13 @@ async def test_get_playlist():
     expected_playlists = [
         SubBoxPlaylist(name='ambient-light', n_of_songs=1, comment='',
                        last_updated=datetime.datetime(2022, 11, 29, 18, 23, 43, 311255, tzinfo=datetime.timezone.utc),
-                       duration_s=229, subsonic_id='e824f4a8-2815-4f9d-87aa-0b8a84d02845'),
+                       duration_s=229, subsonic_id='e824f4a8-2815-4f9d-87aa-0b8a84d02845', owner='lajp'),
         SubBoxPlaylist(name='grime', n_of_songs=1, comment='dark',
                        last_updated=datetime.datetime(2022, 11, 29, 18, 24, 3, 149269, tzinfo=datetime.timezone.utc),
-                       duration_s=210, subsonic_id='fc052e84-1ee7-4e26-8180-911cc928c759'),
+                       duration_s=210, subsonic_id='fc052e84-1ee7-4e26-8180-911cc928c759', owner='lajp'),
         SubBoxPlaylist(name='techno-dark', n_of_songs=0, comment='',
                        last_updated=datetime.datetime(2022, 11, 29, 18, 23, 8, 773248, tzinfo=datetime.timezone.utc),
-                       duration_s=0, subsonic_id='99015bb5-cc58-4492-a5ee-6108f3acba41')
+                       duration_s=0, subsonic_id='99015bb5-cc58-4492-a5ee-6108f3acba41', owner='lajp')
     ]
     playlists = await subsonic_client.get_playlists({"username": "lajp", "password": "pw"})
     assert expected_playlists == playlists

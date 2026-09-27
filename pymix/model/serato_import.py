@@ -19,6 +19,7 @@ import dataclasses
 from pydantic import BaseModel
 
 from pymix.model.beatgrid import BeatgridMarker
+from pymix.model.playlist_write_report import PlaylistWriteReport
 from pymix.model.serato_cue import SeratoCue
 
 
@@ -78,6 +79,8 @@ class CrateImportReport:
     playlists_built: int = 0
     matched: int = 0
     skipped: List[SkippedCrateTrack] = dataclasses.field(default_factory=list)
+    # What writing the playlists did to the ones the user already had (#203).
+    playlists: Optional[PlaylistWriteReport] = None
 
     @property
     def total(self) -> int:
@@ -85,11 +88,14 @@ class CrateImportReport:
 
     def warning(self) -> Optional[str]:
         """A single line fit to put in front of a user, or None if all is well."""
-        if not self.skipped:
-            return None
-        reasons = {s.reason for s in self.skipped}
-        detail = "; ".join(sorted(reasons))
-        return (
-            f"{len(self.skipped)} of {self.total} tracks in your crates could not be "
-            f"matched to your subbox library and were left out of the playlists ({detail})."
-        )
+        parts = []
+        if self.skipped:
+            reasons = {s.reason for s in self.skipped}
+            detail = "; ".join(sorted(reasons))
+            parts.append(
+                f"{len(self.skipped)} of {self.total} tracks in your crates could not be "
+                f"matched to your subbox library and were left out of the playlists ({detail})."
+            )
+        if self.playlists is not None and self.playlists.warning():
+            parts.append(self.playlists.warning())
+        return " ".join(parts) or None
