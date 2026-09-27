@@ -25,6 +25,7 @@ import anyio
 
 from pymix.clients.beets_exec import BeetsExec
 from pymix.clients.navidrome_native_client import NavidromeNativeClient
+from pymix.model.playlist_write_report import PlaylistSnapshot
 from pymix.controllers.db_controller import DbController
 from pymix.services import metrics
 from pymix.services.job_outcome import JobOutcome, with_warning
@@ -99,6 +100,8 @@ def batch_state(item_states: Iterable[str]) -> str:
 def batch_label(kind: str, n_items: int) -> str:
     if kind == TrashKind.TRACK.value:
         return f"{n_items} track" + ("" if n_items == 1 else "s")
+    if kind == TrashKind.PLAYLIST_ENTRIES.value:
+        return f"{n_items} playlist" + ("" if n_items == 1 else "s") + " before a re-import"
     return f"{n_items} item" + ("" if n_items == 1 else "s")
 
 
@@ -146,6 +149,22 @@ class TrashDeleteOutcome:
     removed: Set[str] = field(default_factory=set)
     # Ids still in beets, with why. Their files are back where they were.
     not_removed: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class PlaylistRestoreOutcome:
+    """What undoing a re-import did, playlist by playlist (#208)."""
+    batch_id: str
+    # {playlist_id, name, n_entries, n_in_trash, edits_discarded}. `n_in_trash`
+    # entries went back hidden: their track is in the trash, and they reappear when
+    # it is restored. `edits_discarded`: the playlist had changed since the import,
+    # and those changes are gone.
+    restored: List[dict] = field(default_factory=list)
+    # {playlist_id, name, reason}: a playlist that couldn't be put back at all.
+    failed: List[dict] = field(default_factory=list)
+    # {playlist, subbox_id, media_file_id, path}: an entry whose track no longer
+    # exists by any of the ways to find it. Never dropped silently (§8.3).
+    not_restored: List[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -559,6 +578,132 @@ class TrashService:
                 warnings.append(f'{name}: came back as a new track, without its star, rating, play count '
                                 'and playlist entries')
         return warnings
+
+    # --- re-import entries (#208) ------------------------------------------------
+
+    def trash_playlist_entries(self, username: str, snapshots: List[PlaylistSnapshot]) -> Optional[str]:
+        """
+        Keep what a re-import replaced, one item per playlist, so the import can be
+        undone. Returns the batch id, or None if the import replaced nothing.
+
+        Written after the replaces, from snapshots taken just before each one. A
+        pymix that dies in between loses the undo for that import; the replace itself
+        has happened, as it would have before #208.
+        """
+        if not snapshots:
+            return None
+        kind = TrashKind.PLAYLIST_ENTRIES.value
+        batch_id = self._db.create_trash_batch(
+            username, kind, batch_label(kind, len(snapshots)), self._retention_s,
+            [{'state': ItemState.RESTORABLE.value, 'snapshot': s.as_json()} for s in snapshots],
+        )
+        metrics.trash_batch_created(kind)
+        logger.info(f"re-import for {username} replaced {len(snapshots)} playlist(s); undo is trash batch {batch_id}")
+        return batch_id
+
+    def keep_replaced_entries(self, username: str, job_id: str, report) -> None:
+        """
+        The import routers' half: keep what an import's playlist write replaced, and
+        name the batch on the job, before the job is marked complete. A failure here
+        doesn't fail the import (the playlists are already written); the report then
+        says those updates can't be undone.
+        """
+        if report is None or not report.replaced:
+            return
+        try:
+            report.trash_batch_id = self.trash_playlist_entries(username, report.replaced)
+            self._db.set_job_trash_batch(job_id, report.trash_batch_id)
+        except Exception:
+            logger.error(f"could not keep the playlists job {job_id} replaced for {username}", exc_info=True)
+            report.not_undoable.extend(s.name for s in report.replaced)
+            report.replaced = []
+            report.trash_batch_id = None
+
+    async def restore_playlist_entries(self, batch_id: str, username: str) -> PlaylistRestoreOutcome:
+        """
+        Undo a re-import: rewrite each playlist it replaced back to its snapshot, in
+        one synchronous call per playlist (design §8.3).
+
+        This discards whatever changed in the playlist since the import, and says
+        so per playlist. Each entry's track is found by its subbox_id, then its
+        media_file id, then its path; one found by none of them is reported, not
+        dropped. A track now in the trash goes back as a hidden entry, and reappears
+        in its place when the track is restored.
+        """
+        user = self._db.get_user(username)
+        batch = self._db.get_trash_batch(batch_id, username)
+        outcome = PlaylistRestoreOutcome(batch_id=batch_id)
+        items = [i for i in batch['items'] if i['state'] == ItemState.RESTORABLE.value]
+        owned = {p.subsonic_id: p for p in await self._subsonic.owned_playlists(user)}
+        resolve = await self._entry_resolver(user, [e for i in items for e in i['snapshot']['entries']])
+        updates: Dict[int, dict] = {}
+        for item in items:
+            snapshot = item['snapshot']
+            playlist_id, name = snapshot['playlist_id'], snapshot['name']
+            if playlist_id not in owned:
+                reason = 'the playlist no longer exists'
+                outcome.failed.append({'playlist_id': playlist_id, 'name': name, 'reason': reason})
+                updates[item['id']] = {'state': ItemState.FAILED.value, 'error': reason}
+                continue
+            song_ids, n_in_trash = [], 0
+            for entry in snapshot['entries']:
+                found = resolve(entry)
+                if found is None:
+                    outcome.not_restored.append({'playlist': name, **entry})
+                    continue
+                song_ids.append(found[0])
+                n_in_trash += found[1]
+            current = [r['mediaFileId'] for r in await self._native.playlist_tracks(user, playlist_id)]
+            if not await self._subsonic.set_playlist_entries(user, playlist_id, song_ids):
+                reason = 'Navidrome refused the write'
+                outcome.failed.append({'playlist_id': playlist_id, 'name': name, 'reason': reason})
+                updates[item['id']] = {'state': ItemState.FAILED.value, 'error': reason}
+                continue
+            outcome.restored.append({
+                'playlist_id': playlist_id, 'name': name, 'n_entries': len(song_ids), 'n_in_trash': n_in_trash,
+                # Unknown (no `after`) is reported as discarded: the safe thing to tell a user.
+                'edits_discarded': snapshot.get('after') is None or current != snapshot['after'],
+            })
+            updates[item['id']] = {'state': ItemState.RESTORED.value}
+        self._db.update_trash_items(batch_id, updates)
+        if outcome.restored:
+            metrics.trash_restored(TrashKind.PLAYLIST_ENTRIES.value, len(outcome.restored))
+        for entry in outcome.not_restored:
+            logger.warning(f"undo of re-import {batch_id} for {username}: entry not restored {entry}")
+        return outcome
+
+    async def _entry_resolver(self, user: dict, entries: List[dict]):
+        """
+        A function from a snapshot entry to (media_file id, is it in the trash), or
+        None. It tries, in order (§8.3): the subbox_id, preferring the row the entry
+        had, then a live row; the media_file id the entry had, if that row still
+        exists; the path, among live rows. The lookups are batched up front: one
+        call per 50 ids, and the whole library only if some entry needs its path.
+        """
+        subbox_ids = {e['subbox_id'] for e in entries if e.get('subbox_id')}
+        by_subbox_id: Dict[str, List[dict]] = {}
+        for row in await self._native.songs_by_subbox_id(user, subbox_ids) if subbox_ids else []:
+            for tag in (row.get('tags') or {}).get('subboxid') or []:
+                by_subbox_id.setdefault(tag, []).append(row)
+
+        def by_tag(entry) -> Optional[dict]:
+            rows = by_subbox_id.get(entry.get('subbox_id') or '', [])
+            for row in rows:
+                if row['id'] == entry.get('media_file_id'):
+                    return row
+            return min(rows, key=lambda r: bool(r.get('missing')), default=None)
+
+        left = [e for e in entries if by_tag(e) is None]
+        by_id = {r['id']: r for r in await self._native.songs_by_id(
+            user, {e['media_file_id'] for e in left if e.get('media_file_id')})} if left else {}
+        by_path: Dict[str, dict] = {}
+        if any(e.get('path') and e.get('media_file_id') not in by_id for e in left):
+            by_path = {r['path']: r for r in await self._native.live_songs(user)}
+
+        def resolve(entry: dict) -> Optional[Tuple[str, bool]]:
+            row = by_tag(entry) or by_id.get(entry.get('media_file_id')) or by_path.get(entry.get('path'))
+            return None if row is None else (row['id'], bool(row.get('missing')))
+        return resolve
 
     # --- purge -------------------------------------------------------------------
 

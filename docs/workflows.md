@@ -51,6 +51,16 @@ On any failure the user + session are rolled back.
      refused comes back as a `PlaylistWriteReport` and becomes the job's warnings.
      Writes go in chunks of 1,000 ids (`updatePlaylist songIdToAdd` after the
      first): Navidrome refuses a request with more than 10,000 query parameters.
+   - **The update can be undone (#208).** Just before each replace, the orchestrator
+     reads the playlist's entries through Navidrome's native API, which, unlike
+     Subsonic, includes entries whose track is in the trash. Each entry is kept as
+     `{subbox_id, media_file_id, path}`, along with the entries left after the
+     replace. Before the job completes, the router writes them to one
+     `playlist_entries` trash batch (`TrashService.keep_replaced_entries`) and
+     names it on the job. POST `/trash/{id}/restore` rewrites each playlist back.
+     It finds each track by subbox_id, then media_file id, then path; reports what
+     it can't find; puts back trashed tracks as hidden entries; and says if the
+     playlist had changed since the import.
    - `_set_metadata_from_xml` — set ratings, write BPM into beets, and store
      cue/loop metadata in `library_table` keyed by `subbox_id`.
 6. The router clears `uploads/` and the attempt, **whatever the outcome**, before it

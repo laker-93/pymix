@@ -154,7 +154,7 @@ a zip that parses to zero crates, and a zip where nothing at all matched.
 | Method/Path | Purpose |
 |---|---|
 | POST `/beets/import` | Lower-level: import staged files from filebrowser into beets (`consume_from_filebrowser`). |
-| GET `/beets/import/progress` | Poll an import job's progress. Returns `phase` (`importing_audio`/`mapping_ids`/`applying_metadata`/`complete`) plus `phase_n_processed`/`phase_n_total`; `percentage_complete` composes them and only reads 100 once the job is finished (#51). `reason` is why a **failed** job failed; `warnings` is what a **succeeded** job still needs to say (e.g. a Serato import that left unmatched tracks out of the playlists) — they are separate so the client can render an error and a notice differently. |
+| GET `/beets/import/progress` | Poll an import job's progress. Returns `phase` (`importing_audio`/`mapping_ids`/`applying_metadata`/`complete`) plus `phase_n_processed`/`phase_n_total`; `percentage_complete` composes them and only reads 100 once the job is finished (#51). `reason` is why a **failed** job failed; `warnings` is what a **succeeded** job still needs to say (e.g. a Serato import that left unmatched tracks out of the playlists) — they are separate so the client can render an error and a notice differently. `trash_batch_id`, once the job has finished, names the batch that undoes the playlists a re-import replaced (POST `/trash/{id}/restore`, #208); null if it replaced none. |
 | GET `/beets/import/tracks_imported` | Count of tracks currently in beets (`BeetsClient.get_number_of_tracks`). |
 | GET `/beets/import/tracks_to_be_imported` | Count of staged tracks awaiting import. |
 | GET `/beets/duplicates` | List duplicate tracks (`beet duplicates`). |
@@ -187,10 +187,10 @@ Every route is `require_uploader`: `demo` has no trash. Design: `design-playlist
 
 | Method/Path | Purpose |
 |---|---|
-| GET `/trash` | The user's restorable batches, newest first: `batch_id`, `kind`, `label`, `bytes`, `deleted_at`, `expires_at`, `state` (computed from the items), and each item's `subbox_id`/`relative_path`/`size`/`state`. Plus `trash_bytes`. |
+| GET `/trash` | The user's restorable batches, newest first: `batch_id`, `kind`, `label`, `bytes`, `deleted_at`, `expires_at`, `state` (computed from the items), and each item's `subbox_id`/`relative_path`/`size`/`state`, plus `playlist_name` on a `playlist_entries` item. Plus `trash_bytes`. |
 | DELETE `/trash/{batch_id}` | Purge one batch now. 404 if it isn't the caller's. |
 | DELETE `/trash` | Purge everything restorable. |
-| POST `/trash/{batch_id}/restore` | Restore a `track` batch (#209). Starts a job, since it waits on a library scan: `{job_id, n_tracks}`. 409 while another job runs, or when nothing in the batch is restorable; 400 for other kinds (#207, #208). |
+| POST `/trash/{batch_id}/restore` | Restore a batch. A `track` batch (#209) starts a job, since it waits on a library scan: `{job_id, n_tracks}`. A `playlist_entries` batch (#208) **undoes a re-import, synchronously**: `{success, batch_id, restored[], failed[], not_restored[]}`. Each `restored` playlist has `n_entries`, `n_in_trash` (entries put back hidden because their track is in the trash; they reappear when it is restored) and `edits_discarded`, meaning the playlist had changed since the import and those changes are gone. `not_restored` lists entries whose track could not be found by subbox_id, media_file id or path. 409 while another job runs, or when nothing in the batch is restorable; 400 for `nodes` (#207). |
 | GET `/trash/restore/progress?job_id=` | A restore job's `in_progress`, `result`, `reason`, `warnings`, `phase` and `phases` (`checking`, `restoring_files`). |
 
 Purging a track batch unlinks its files (the quota drops by exactly their size), then purges the tracks' missing rows from Navidrome with `DELETE /api/missing` — Navidrome runs `PurgeMissing = "never"`, so nothing else would.

@@ -19,8 +19,9 @@ class NavidromeNativeClient(BaseAPIClient):
     """
     Navidrome's native API (the one its web UI and subbox-app's navidrome-controller
     use), for the few things Subsonic cannot do (design-playlists-and-undo §8.4):
-    listing and purging `media_file` rows that are marked missing, and finding a
-    track's row by its subboxid tag.
+    listing and purging `media_file` rows that are marked missing, finding a
+    track's row by its subboxid tag, and reading a playlist's entries with the
+    missing ones still in them.
 
     Unlike Subsonic, the native API takes a JWT: `POST /auth/login` with the
     credentials pymix already holds for the user, sent back as
@@ -96,19 +97,47 @@ class NavidromeNativeClient(BaseAPIClient):
             ))
         return rows
 
+    async def songs_by_id(self, user: dict, media_file_ids: Iterable[str]) -> List[dict]:
+        """The media_file rows with these ids, missing or not. The native `id` filter
+        is exact (measured on 0.60.3): an unknown id matches nothing."""
+        ids = list(dict.fromkeys(media_file_ids))
+        rows: List[dict] = []
+        for start in range(0, len(ids), _IDS_PER_REQUEST):
+            query = urllib.parse.urlencode([('id', i) for i in ids[start:start + _IDS_PER_REQUEST]])
+            rows.extend(await self._call('GET', user, f"/api/song?_start=0&_end={_PAGE}&{query}"))
+        return rows
+
+    async def live_songs(self, user: dict) -> List[dict]:
+        """Every media_file row that is not missing. The whole library: only for the
+        rare lookup nothing narrower serves (a path; `path=` makes Navidrome 500)."""
+        return await self._paged(user, "/api/song?missing=false&_sort=id&_order=ASC")
+
+    async def playlist_tracks(self, user: dict, playlist_id: str) -> List[dict]:
+        """
+        A playlist's entries in order, as rows carrying `mediaFileId`, `path`,
+        `missing` and `tags`, **with the missing entries in them**.
+
+        Subsonic's getPlaylist hides an entry whose track is missing (in the trash,
+        with PurgeMissing = "never"), so a snapshot taken through it would lose that
+        entry (#210). Not passing `missing=false` here is the point.
+        """
+        return await self._paged(user, f"/api/playlist/{urllib.parse.quote(playlist_id)}/tracks?")
+
     async def list_missing(self, user: dict) -> List[dict]:
         """
         Every media_file row Navidrome has marked missing: its file left the library
         and, with PurgeMissing = "never", nothing has purged the row. `updatedAt` is
         when it was marked. Any user can list them.
         """
+        return await self._paged(user, "/api/missing?_sort=updated_at&_order=ASC")
+
+    async def _paged(self, user: dict, path: str) -> List[dict]:
+        """Every row of a native list call, a page at a time."""
+        separator = '' if path.endswith('?') else '&'
         rows: List[dict] = []
         start = 0
         while True:
-            page = await self._call(
-                'GET', user,
-                f"/api/missing?_start={start}&_end={start + _PAGE}&_sort=updated_at&_order=ASC",
-            )
+            page = await self._call('GET', user, f"{path}{separator}_start={start}&_end={start + _PAGE}")
             rows.extend(page)
             if len(page) < _PAGE:
                 return rows

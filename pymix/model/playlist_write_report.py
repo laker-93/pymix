@@ -14,6 +14,25 @@ def _names(names: List[str]) -> str:
 
 
 @dataclasses.dataclass
+class PlaylistSnapshot:
+    """A playlist's entries just before a re-import replaced them, so the replace can
+    be undone (#208). Kept in a `playlist_entries` trash item's snapshot."""
+
+    playlist_id: str
+    name: str
+    # In order, each {subbox_id | None, media_file_id, path}: an undo finds each track
+    # by the first of those that still resolves (design §8.3).
+    entries: List[dict]
+    # The media_file ids the replace left, in order, or None if they couldn't be
+    # read. An undo compares them with the playlist then, to say whether it is
+    # discarding edits made since the import.
+    after: Optional[List[str]] = None
+
+    def as_json(self) -> dict:
+        return dataclasses.asdict(self)
+
+
+@dataclasses.dataclass
 class PlaylistWriteReport:
     """What an import did to the user's playlists (#203).
 
@@ -34,6 +53,12 @@ class PlaylistWriteReport:
     # (name, entries before, entries after) for an update that made it shorter.
     shortened: List[Tuple[str, int, int]] = dataclasses.field(default_factory=list)
     failed: List[str] = dataclasses.field(default_factory=list)
+    # What each update replaced, for the undo (#208). One per name in `updated`,
+    # except those in `not_undoable`, whose entries couldn't be read first.
+    replaced: List[PlaylistSnapshot] = dataclasses.field(default_factory=list)
+    not_undoable: List[str] = dataclasses.field(default_factory=list)
+    # The trash batch holding `replaced`, once the import has written it.
+    trash_batch_id: Optional[str] = None
 
     def warning(self) -> Optional[str]:
         """One line fit to put in front of a user, or None if all is well."""
@@ -51,4 +76,6 @@ class PlaylistWriteReport:
             parts.append(f"{len(self.shortened) - _MAX_NAMES} more playlists are shorter")
         if self.failed:
             parts.append(f"{_names(self.failed)} could not be written to your library")
+        if self.not_undoable:
+            parts.append(f"{_names(self.not_undoable)} updated, but the update can't be undone")
         return "; ".join(parts) + "." if parts else None

@@ -589,6 +589,12 @@ class DbController:
             job = session.query(JobRow).filter(JobRow.job_id == job_id).one()
             return _row_to_dict(job)
 
+    def set_job_trash_batch(self, job_id: str, batch_id: str) -> None:
+        """Name the trash batch holding what an import replaced (#208)."""
+        with self._session_factory() as session:
+            session.query(JobRow).filter(JobRow.job_id == job_id).update({'trash_batch_id': batch_id})
+            session.commit()
+
     def get_number_of_jobs(self, username: str, in_progress: bool) -> int:
         user = self.get_user(username)
         user_id = user['user_id']

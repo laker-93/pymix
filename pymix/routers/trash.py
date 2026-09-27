@@ -29,6 +29,8 @@ def _summary(batch: dict) -> Dict[str, Any]:
                 'relative_path': i['relative_path'],
                 'size': i['size'],
                 'state': i['state'],
+                # A re-import's replaced playlist (#208): which one.
+                'playlist_name': (i.get('snapshot') or {}).get('name') if batch['kind'] == TrashKind.PLAYLIST_ENTRIES.value else None,
             }
             for i in batch['items']
         ],
@@ -100,22 +102,41 @@ async def restore_trash_batch(
         trash_service: TrashService = Depends(Provide[Container.trash_service]),
 ) -> Dict[str, Any]:
     """
-    Put a track batch back (#209). A job, because it waits on a library scan: poll
-    GET /trash/restore/progress with the job_id. `nodes` and `playlist_entries`
-    batches restore synchronously, and arrive with #207 and #208.
+    Put a batch back.
+
+    A **track** batch (#209) restores as a job, because it waits on a library scan:
+    poll GET /trash/restore/progress with the job_id.
+
+    A **playlist_entries** batch (#208) undoes a re-import, synchronously: each
+    playlist it replaced is rewritten to what it was. That **discards any change
+    made to the playlist since the import**; `restored[].edits_discarded` says
+    which. An entry whose track can't be found any more is listed in
+    `not_restored`, never dropped silently.
+
+    `nodes` batches arrive with #207.
     """
     username = user['username']
     batch = db_controller.get_trash_batch(batch_id, username)
     if batch is None:
         raise HTTPException(status_code=404, detail=f"no trash batch {batch_id}")
-    if batch['kind'] != TrashKind.TRACK.value:
+    if batch['kind'] not in (TrashKind.TRACK.value, TrashKind.PLAYLIST_ENTRIES.value):
         raise HTTPException(status_code=400, detail=f"cannot restore a {batch['kind']} batch yet")
     n_restorable = sum(1 for i in batch['items'] if i['state'] == ItemState.RESTORABLE.value)
     if n_restorable == 0:
         raise HTTPException(status_code=409, detail="nothing in this batch can be restored")
-    # One job per user at a time, as for imports: the job table asserts it.
+    # One job per user at a time, as for imports: the job table asserts it. An undo
+    # waits too: an import running now may be writing the same playlists.
     if db_controller.get_number_of_jobs(username, in_progress=True):
         raise HTTPException(status_code=409, detail="another job is running; try again when it finishes")
+    if batch['kind'] == TrashKind.PLAYLIST_ENTRIES.value:
+        outcome = await trash_service.restore_playlist_entries(batch_id, username)
+        return {
+            'success': not outcome.failed and not outcome.not_restored,
+            'batch_id': batch_id,
+            'restored': outcome.restored,
+            'failed': outcome.failed,
+            'not_restored': outcome.not_restored,
+        }
     job_id = db_controller.create_restore_job(username, n_restorable)
     background_tasks.add_task(_run_restore, trash_service, db_controller, batch_id, username, job_id)
     return {'success': True, 'job_id': job_id, 'n_tracks': n_restorable}

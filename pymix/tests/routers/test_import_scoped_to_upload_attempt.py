@@ -182,6 +182,29 @@ async def test_a_playlist_the_reimport_held_back_is_a_warning_on_the_job(db, han
 
 
 @pytest.mark.anyio
+async def test_what_a_reimport_replaced_is_kept_before_the_job_completes(db, handler, uploads):
+    # #208: the client learns of the undo from the finished job, so the batch has to
+    # be named on it by then.
+    (uploads / 'rekordbox.xml').write_text('<DJ_PLAYLISTS/>')
+    await _map_meta(db, handler)
+    report = PlaylistWriteReport(updated=['Deep'])
+    order = []
+    trash_service = mock.Mock()
+    trash_service.keep_replaced_entries.side_effect = lambda *args: order.append('kept')
+    job_db = _job_db(db)
+    job_db.job_completed.side_effect = lambda *args: order.append('completed')
+    attempt = db.get_upload_attempt('dj')
+
+    await rb_import_export.run_import_task(
+        _controller_that_imports({}, playlists=report), 'dj', 'job-1', job_db, handler, 0, USER, None, attempt,
+        None, trash_service,
+    )
+
+    trash_service.keep_replaced_entries.assert_called_once_with('dj', 'job-1', report)
+    assert order == ['kept', 'completed']
+
+
+@pytest.mark.anyio
 async def test_the_import_uses_the_xml_it_names_beside_a_leftover_one(db, handler, uploads):
     # The #192 shape: an earlier attempt uploaded its XML and stopped before it
     # started a job, so its XML was never cleared.

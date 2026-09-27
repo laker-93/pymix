@@ -110,7 +110,9 @@ class Container(containers.DeclarativeContainer):
 
     subsonic_orchestrator = providers.Singleton(
         SubsonicOrchestrator,
-        subsonic_client
+        subsonic_client,
+        # to snapshot a playlist before a re-import replaces it (#208)
+        native_client=navidrome_native_client,
     )
 
     rekordbox_xml_orchestrator = providers.Singleton(

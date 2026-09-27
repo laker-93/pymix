@@ -18,6 +18,7 @@ from pymix.model.original_track_meta import UploadAttempt
 from pymix.services import metrics
 from pymix.services.import_progress import failure_reason, ImportProgressReporter
 from pymix.services.job_outcome import with_warning
+from pymix.services.trash import TrashService
 
 router = APIRouter()
 
@@ -42,6 +43,7 @@ async def rekordbox_import(
     rekordbox_xml_controller: RekordboxXMLController = Depends(Provide[Container.rekordbox_xml_controller]),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
     config: Dict = Depends(Provide[Container.config]),
+    trash_service: TrashService = Depends(Provide[Container.trash_service]),
 )-> dict:
     job_id = ""
     reason = ""
@@ -83,7 +85,7 @@ async def rekordbox_import(
     requested_playlists = [p for p in request.playlistNames if p] if request.playlistNames else None
     background_tasks.add_task(run_import_task, rekordbox_xml_controller, username, job_id, db_controller,
                   fb_file_handler, total_n_tracks_for_import, user, requested_playlists, attempt,
-                  request.xmlName)
+                  request.xmlName, trash_service)
     success = True
 
     return {
@@ -97,7 +99,8 @@ async def rekordbox_import(
 
 async def run_import_task(rekordbox_xml_controller, username, job_id, db_controller, fb_file_handler,
                           total_n_tracks_for_import, user, playlist_names: Optional[list[list[str]]],
-                          attempt: Optional[UploadAttempt] = None, xml_name: Optional[str] = None):
+                          attempt: Optional[UploadAttempt] = None, xml_name: Optional[str] = None,
+                          trash_service: Optional[TrashService] = None):
     # No `success = True` to start with: the verdict is computed at the end from
     # what the passes actually recorded, not asserted here and defended against
     # exceptions (#171). An escaping exception is still a failure -- it is just no
@@ -145,6 +148,9 @@ async def run_import_task(rekordbox_xml_controller, username, job_id, db_control
         # on an empty directory.
         fb_file_handler.finish_upload_attempt(username, uploaded, attempt)
         outcome = progress.verdict(escaped_reason)
+        if trash_service is not None:
+            # What the re-import replaced, so it can be undone (#208).
+            trash_service.keep_replaced_entries(username, job_id, playlists)
         if playlists is not None:
             # A playlist a re-import held back, shortened or couldn't write (#203).
             outcome = with_warning(outcome, playlists.warning())

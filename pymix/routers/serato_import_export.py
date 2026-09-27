@@ -16,6 +16,7 @@ from pymix.model.serato_import import SeratoImportRequest
 from pymix.routers.auth import require_reader, require_uploader
 from pymix.services import metrics
 from pymix.services.import_progress import failure_reason
+from pymix.services.trash import TrashService
 
 router = APIRouter()
 
@@ -32,7 +33,8 @@ async def serato_import(
     fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
     serato_controller: SeratoController = Depends(Provide[Container.serato_controller]),
     db_controller: DbController = Depends(Provide[Container.db_controller]),
-    config: Dict = Depends(Provide[Container.config])
+    config: Dict = Depends(Provide[Container.config]),
+    trash_service: TrashService = Depends(Provide[Container.trash_service]),
 )-> dict:
     job_id = ""
     total_n_tracks_for_import = 0
@@ -82,7 +84,8 @@ async def serato_import(
         f'({n_with_cues} carrying cues)'
     )
     background_tasks.add_task(run_import_task, serato_controller, username, job_id, db_controller,
-                              fb_file_handler, total_n_tracks_for_import, user, identities, attempt)
+                              fb_file_handler, total_n_tracks_for_import, user, identities, attempt,
+                              trash_service)
     return {
         'success': True,
         'job_id': job_id,
@@ -94,7 +97,8 @@ async def serato_import(
 
 async def run_import_task(serato_controller, username, job_id, db_controller, fb_file_handler,
                           total_n_tracks_for_import, user, identities=None,
-                          attempt: Optional[UploadAttempt] = None):
+                          attempt: Optional[UploadAttempt] = None,
+                          trash_service: Optional[TrashService] = None):
     success = True
     reason = ""
     warnings = None
@@ -138,6 +142,9 @@ async def run_import_task(serato_controller, username, job_id, db_controller, fb
         # A crate track we could not place is not a failure, but it is also not
         # nothing: the user asked for a playlist and got a shorter one. Carry it
         # back so the import screen can say so rather than reporting a clean win.
+        if trash_service is not None:
+            # What the re-import replaced, so it can be undone (#208).
+            trash_service.keep_replaced_entries(username, job_id, report.playlists)
         warnings = report.warning()
         for skipped in report.skipped:
             logger.info(f'skipped crate entry for {username}: {skipped.crate_path} ({skipped.reason})')

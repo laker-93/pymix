@@ -185,6 +185,11 @@ def extract_track_name(full_string: str, artist: str, album=None) -> None | str:
     return cleaned.strip() if cleaned.strip() else None
 
 
+def _song_ids(tracks: List[SubBoxTrack]) -> List[str]:
+    """The Navidrome ids of the tracks that matched one."""
+    return [t.sub_track_id for t in tracks if t.sub_track_id is not None]
+
+
 class SubsonicClient(BaseAPIClient):
     def __init__(self, host: str, session: aiohttp.ClientSession, version: str,
                  music_path_base_to_remove: str, serving_music_path_base: str, local_user_music_stem: Optional[str], app_env: str):
@@ -674,7 +679,7 @@ class SubsonicClient(BaseAPIClient):
         return response['subsonic-response']['status'] == 'ok'
 
     async def create_playlist(self, user: dict, name: str, tracks: List[SubBoxTrack]) -> bool:
-        return await self._write_playlist(user, [('name', name)], tracks)
+        return await self._write_playlist(user, [('name', name)], _song_ids(tracks))
 
     async def replace_playlist(self, user: dict, playlist_id: str, tracks: List[SubBoxTrack]) -> bool:
         """
@@ -686,23 +691,48 @@ class SubsonicClient(BaseAPIClient):
         changes nothing, so it can't empty a playlist. And it silently drops any entry
         whose track is missing (in the trash): those memberships are gone.
         """
-        return await self._write_playlist(user, [('playlistId', playlist_id)], tracks)
+        return await self._write_playlist(user, [('playlistId', playlist_id)], _song_ids(tracks))
 
-    async def _write_playlist(self, user: dict, target: list, tracks: List[SubBoxTrack]) -> bool:
+    async def set_playlist_entries(self, user: dict, playlist_id: str, song_ids: List[str]) -> bool:
+        """
+        Make a playlist's entries exactly these, in order: an undo of a re-import
+        (#208). Unlike `replace_playlist`, this can empty it.
+
+        Ids of missing tracks (in the trash) are accepted and kept as hidden entries
+        that come back with the track (measured on 0.60.3).
+        """
+        if song_ids:
+            return await self._write_playlist(user, [('playlistId', playlist_id)], song_ids)
+        # createPlaylist with no ids changes nothing, so remove each visible entry.
+        username = user['username']
+        base_path = self._host.format(user=username, port=4533)
+        # Last chunk first, so the indexes still to remove don't shift.
+        n = len(await self.get_playlist_tracks(user, playlist_id))
+        for end in range(n, 0, -PLAYLIST_WRITE_CHUNK):
+            url = self._subsonic_format_url(
+                username, user['password'], f"{base_path}/rest/updatePlaylist",
+                params=[('playlistId', playlist_id),
+                        *(('songIndexToRemove', i) for i in range(max(0, end - PLAYLIST_WRITE_CHUNK), end))],
+            )
+            response = await self.get(url)
+            if response['subsonic-response']['status'] != 'ok':
+                logger.error(f"updatePlaylist failed for {username}: {response['subsonic-response'].get('error')}")
+                return False
+        return True
+
+    async def _write_playlist(self, user: dict, target: list, song_ids: List[str]) -> bool:
         """
         `createPlaylist` with the first chunk of song ids, then `updatePlaylist
         songIdToAdd` for the rest, in order.
 
         One request can't carry them all: Navidrome (Go's net/url) refuses a request
         with more than 10,000 query parameters, GET or form POST alike, so a playlist of
-        ~10,000 tracks failed outright. Tracks that matched nothing have no id and are
-        left out.
+        ~10,000 tracks failed outright.
         """
         username = user['username']
         password = user['password']
         port = 4533 # since we're inside the same docker network, can call the private port
         base_path = self._host.format(user=username, port=port)
-        song_ids = [t.sub_track_id for t in tracks if t.sub_track_id is not None]
         chunks = [song_ids[i:i + PLAYLIST_WRITE_CHUNK] for i in range(0, len(song_ids), PLAYLIST_WRITE_CHUNK)] or [[]]
 
         url = self._subsonic_format_url(
