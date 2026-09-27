@@ -312,6 +312,11 @@ class SubsonicOrchestrator:
         playlists = await self._subsonic_client.get_playlists(user) or []
         return [p for p in playlists if p.owner == user['username']]
 
+    async def rename_playlist(self, user: dict, playlist_id: str, name: str) -> bool:
+        """Rename one playlist. Unlocked: its only caller, the tree migration (#205),
+        already holds the user's tree lock, which isn't reentrant."""
+        return await self._subsonic_client.rename_playlist(user, playlist_id, name)
+
     async def set_playlist_entries(self, user: dict, playlist_id: str, song_ids: List[str]) -> bool:
         return await self._subsonic_client.set_playlist_entries(user, playlist_id, song_ids)
 
