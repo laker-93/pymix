@@ -4,7 +4,7 @@ import os
 from typing import List, Set, AsyncIterator, Optional
 
 from pymix.clients.subsonic_client import SubsonicClient
-from pymix.model.playlist_write_report import PlaylistWriteReport
+from pymix.model.playlist_write_report import PlaylistSnapshot, PlaylistWriteReport
 from pymix.model.subboxplaylist import SubBoxPlaylist
 from pymix.model.subboxtrack import SubBoxTrack
 from pymix.services.track_matcher import TrackMatcher
@@ -25,9 +25,20 @@ SCAN_WAIT_TIMEOUT_S = float(os.environ.get("SCAN_WAIT_TIMEOUT_S", "300"))
 SCAN_WAIT_POLL_INTERVAL_S = float(os.environ.get("SCAN_WAIT_POLL_INTERVAL_S", "0.25"))
 
 
+def snapshot_entry(row: dict) -> dict:
+    """One playlist entry as a re-import's undo keeps it (#208): every way there is
+    to find its track again. `subboxid` is a custom tag, so it comes as a list."""
+    subbox_ids = (row.get('tags') or {}).get('subboxid') or [None]
+    return {'subbox_id': subbox_ids[0], 'media_file_id': row.get('mediaFileId'), 'path': row.get('path')}
+
+
 class SubsonicOrchestrator:
-    def __init__(self, subsonic_client: SubsonicClient):
+    def __init__(self, subsonic_client: SubsonicClient, native_client=None):
         self._subsonic_client = subsonic_client
+        # Navidrome's native API, to snapshot a playlist's entries before a re-import
+        # replaces them (#208): only it lists the entries whose track is in the trash.
+        # Without it, updates still happen but can't be undone.
+        self._native = native_client
 
     async def _get_subsonic_playlists(
         self, user: dict, playlist_ids: Optional[Set[str]] = None
@@ -196,12 +207,19 @@ class SubsonicOrchestrator:
                 report.held_back.append(playlist.name)
             elif n_after == 0:
                 report.unmatched.append(playlist.name)
-            elif await self._subsonic_client.replace_playlist(user, match.subsonic_id, playlist.tracks):
-                report.updated.append(playlist.name)
-                if match.n_of_songs is not None and n_after < match.n_of_songs:
-                    report.shortened.append((playlist.name, match.n_of_songs, n_after))
             else:
-                report.failed.append(playlist.name)
+                snapshot = await self._snapshot(user, match)
+                if await self._subsonic_client.replace_playlist(user, match.subsonic_id, playlist.tracks):
+                    report.updated.append(playlist.name)
+                    if match.n_of_songs is not None and n_after < match.n_of_songs:
+                        report.shortened.append((playlist.name, match.n_of_songs, n_after))
+                    if snapshot is None:
+                        report.not_undoable.append(playlist.name)
+                    else:
+                        snapshot.after = await self._entry_ids(user, match.subsonic_id)
+                        report.replaced.append(snapshot)
+                else:
+                    report.failed.append(playlist.name)
 
         logger.info(
             f"playlists for {username}: {len(report.created)} created, {len(report.updated)} updated in place, "
@@ -209,6 +227,36 @@ class SubsonicOrchestrator:
             f"{len(report.failed)} failed"
         )
         return report
+
+    async def _snapshot(self, user: dict, playlist: SubBoxPlaylist) -> Optional[PlaylistSnapshot]:
+        """The playlist's entries as they are, for the undo, or None if they can't be
+        read. None doesn't stop the update: it goes ahead, as it did before #208,
+        and the report says it can't be undone."""
+        if self._native is None:
+            return None
+        try:
+            rows = await self._native.playlist_tracks(user, playlist.subsonic_id)
+        except Exception:
+            logger.warning(f"could not snapshot playlist {playlist.subsonic_id} before replacing it", exc_info=True)
+            return None
+        return PlaylistSnapshot(
+            playlist_id=playlist.subsonic_id, name=playlist.name, entries=[snapshot_entry(r) for r in rows],
+        )
+
+    async def _entry_ids(self, user: dict, playlist_id: str) -> Optional[List[str]]:
+        try:
+            return [r['mediaFileId'] for r in await self._native.playlist_tracks(user, playlist_id)]
+        except Exception:
+            logger.warning(f"could not read playlist {playlist_id} after replacing it", exc_info=True)
+            return None
+
+    async def owned_playlists(self, user: dict) -> List[SubBoxPlaylist]:
+        """The user's own playlists, without their tracks."""
+        playlists = await self._subsonic_client.get_playlists(user) or []
+        return [p for p in playlists if p.owner == user['username']]
+
+    async def set_playlist_entries(self, user: dict, playlist_id: str, song_ids: List[str]) -> bool:
+        return await self._subsonic_client.set_playlist_entries(user, playlist_id, song_ids)
 
     async def set_ratings(self, user: dict, tracks: List[SubBoxTrack]):
         """

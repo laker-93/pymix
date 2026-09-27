@@ -18,6 +18,13 @@ What it checks, after the re-import:
   - the job warned that it got shorter;
   - a smart playlist with an incoming playlist's name was never touched, and the
     incoming one was created beside it (and updated in place on the re-import).
+
+Then it undoes the re-import (#208) through the trash batch the job names, and checks
+the playlist is back to the user's edited state, under the same id.
+
+`--with-trash` also deletes one of the playlist's tracks into the trash before the
+undo, and restores it after: the undo puts its entry back hidden, and the track's
+restore brings it back into place. That writes to the user's library.
 """
 import argparse
 import hashlib
@@ -29,6 +36,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -127,6 +135,7 @@ def main():
     parser.add_argument('--user', required=True)
     parser.add_argument('--password', required=True)
     parser.add_argument('--navidrome-url', help="default: the port navidrome<user> publishes on localhost")
+    parser.add_argument('--with-trash', action='store_true')
     args = parser.parse_args()
     navidrome_url = args.navidrome_url
     if not navidrome_url:
@@ -198,6 +207,52 @@ def main():
     check('incoming playlist created beside the smart one, then updated in place',
           len(ordinary) == 1 and stack.entries(ordinary[0]['id']) == [b['id']],
           f'{len(ordinary)} ordinary')
+
+    # --- undo the re-import (#208) -----------------------------------------------------
+    batch_id = progress.get('trash_batch_id')
+    check('the job names an undo batch', bool(batch_id), repr(batch_id))
+    edited = [a['id'], b['id'], c['id'], d['id']]
+    track_batch = None
+    if args.with_trash:
+        subbox_id = (d.get('tags') or {}).get('subboxid', [None])[0]
+        deleted = stack.pymix_call('DELETE', '/track', {'ids': [subbox_id]})
+        track_batch = deleted.get('trash_batch_id')
+        for _ in range(60):
+            if any(r['id'] == d['id'] for r in stack.native('GET', '/api/missing?_start=0&_end=500')):
+                break
+            time.sleep(1)
+        print(f'trashed {d["title"]} into batch {track_batch}')
+    if batch_id:
+        undone = stack.pymix_call('POST', f'/trash/{batch_id}/restore')
+        print(f'undo: {json.dumps(undone)}')
+        restored = {r['name']: r for r in undone['restored']}
+        after_undo = stack.playlists(deep)
+        check('undo keeps the one playlist and its id',
+              [p['id'] for p in after_undo] == [first['id']], str([p['id'] for p in after_undo]))
+        native_ids = [r['mediaFileId'] for r in stack.native('GET', f'/api/playlist/{first["id"]}/tracks?_start=0&_end=100')]
+        check("undo puts back the user's edited entries, in order", native_ids == edited, str(native_ids))
+        check('undo says the playlist had no edits since the import to discard',
+              restored.get(deep, {}).get('edits_discarded') is False, str(restored.get(deep)))
+        check('undo left nothing unrestored', undone['not_restored'] == [] and undone['failed'] == [])
+        check('undo kept the comment', stack.playlists(deep)[0].get('comment') == 'edited in subbox')
+        if args.with_trash:
+            check('the trashed track went back as a hidden entry',
+                  restored.get(deep, {}).get('n_in_trash') == 1
+                  and stack.entries(first['id']) == edited[:3], str(stack.entries(first['id'])))
+        try:
+            stack.pymix_call('POST', f'/trash/{batch_id}/restore')
+            check('a second undo is refused', False)
+        except urllib.error.HTTPError as ex:
+            check('a second undo is refused', ex.code == 409, str(ex.code))
+    if track_batch:
+        job_id = stack.pymix_call('POST', f'/trash/{track_batch}/restore')['job_id']
+        for _ in range(300):
+            job = stack.pymix_call('GET', f'/trash/restore/progress?job_id={job_id}')
+            if not job['in_progress']:
+                break
+            time.sleep(1)
+        check('restoring the track brings its entry back into place',
+              stack.entries(first['id']) == edited, str(stack.entries(first['id'])))
 
     for playlist_id in dict.fromkeys(made):
         try:

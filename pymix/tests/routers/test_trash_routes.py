@@ -73,7 +73,7 @@ def test_the_trash_lists_only_what_can_still_be_restored(client, db_controller):
     assert [b['batch_id'] for b in body['batches']] == ['live']
     [batch] = body['batches']
     assert batch['label'] == '2 tracks' and batch['deleted_at'] == 1.0 and batch['expires_at'] == 2.0
-    assert batch['items'][0] == {'subbox_id': 's0', 'relative_path': 'A/0.mp3', 'size': 50, 'state': 'restorable'}
+    assert batch['items'][0] == {'subbox_id': 's0', 'relative_path': 'A/0.mp3', 'size': 50, 'state': 'restorable', 'playlist_name': None}
     assert body['trash_bytes'] == 100
 
 
@@ -171,6 +171,41 @@ def test_a_restore_that_raises_still_completes_its_job(client, db_controller, tr
 
     outcome = db_controller.job_completed.call_args.args[1]
     assert outcome.result is False and 'beets gone' in outcome.reason
+
+
+def test_undoing_a_reimport_is_synchronous(client, db_controller, trash_service):
+    from pymix.services.trash import PlaylistRestoreOutcome
+    db_controller.get_trash_batch.return_value = _batch('b1', ['restorable'], kind='playlist_entries')
+    db_controller.get_number_of_jobs.return_value = 0
+    restored = {'playlist_id': 'pl-1', 'name': 'Deep', 'n_entries': 3, 'n_in_trash': 0, 'edits_discarded': True}
+    missing = {'playlist': 'Deep', 'subbox_id': None, 'media_file_id': 'm-x', 'path': 'x.mp3'}
+    trash_service.restore_playlist_entries = mock.AsyncMock(return_value=PlaylistRestoreOutcome(
+        batch_id='b1', restored=[restored], not_restored=[missing]))
+
+    body = _as(client, 'dj').post('/trash/b1/restore').json()
+
+    assert body == {'success': False, 'batch_id': 'b1', 'restored': [restored], 'failed': [], 'not_restored': [missing]}
+    trash_service.restore_playlist_entries.assert_awaited_once_with('b1', 'dj')
+    db_controller.create_restore_job.assert_not_called()
+
+
+def test_a_reimport_undo_waits_for_a_running_job(client, db_controller, trash_service):
+    db_controller.get_trash_batch.return_value = _batch('b1', ['restorable'], kind='playlist_entries')
+    db_controller.get_number_of_jobs.return_value = 1
+    trash_service.restore_playlist_entries = mock.AsyncMock()
+
+    assert _as(client, 'dj').post('/trash/b1/restore').status_code == 409
+    trash_service.restore_playlist_entries.assert_not_called()
+
+
+def test_a_reimport_batch_names_its_playlists_in_the_listing(client, db_controller):
+    batch = _batch('b1', ['restorable'], kind='playlist_entries')
+    batch['items'][0].update(subbox_id=None, relative_path=None, size=None, snapshot={'name': 'House / Deep'})
+    db_controller.get_trash_batches.return_value = [batch]
+
+    [listed] = _as(client, 'dj').get('/trash').json()['batches']
+
+    assert listed['items'][0]['playlist_name'] == 'House / Deep'
 
 
 @pytest.mark.parametrize('batch, jobs, status', [

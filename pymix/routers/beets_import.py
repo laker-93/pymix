@@ -283,7 +283,10 @@ async def import_progress(
         'phase_n_total': phase_n_total,
         'phases': phases,
         'result': result,
-        'warnings': warnings
+        'warnings': warnings,
+        # The trash batch that undoes the playlists this import replaced (#208):
+        # POST /trash/{id}/restore. Null when it replaced none.
+        'trash_batch_id': job.get('trash_batch_id') if in_progress is False else None,
     }
 
 @router.get("/beets/import/tracks_imported", tags=["import"])

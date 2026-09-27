@@ -39,9 +39,18 @@ def client():
     return client
 
 
-async def _write(client, existing, incoming, scan_finished=True):
+@pytest.fixture
+def native():
+    native = mock.Mock()
+    native.playlist_tracks = mock.AsyncMock(return_value=[])
+    return native
+
+
+async def _write(client, existing, incoming, scan_finished=True, native=None):
     client.get_playlists.return_value = existing
-    report = await SubsonicOrchestrator(client).create_playlists(USER, incoming, scan_finished=scan_finished)
+    if native is None:
+        native = mock.Mock(playlist_tracks=mock.AsyncMock(return_value=[]))
+    report = await SubsonicOrchestrator(client, native).create_playlists(USER, incoming, scan_finished=scan_finished)
     client.delete_playlist.assert_not_called()
     return report
 
@@ -152,6 +161,55 @@ async def test_a_user_with_no_playlists_gets_them_created(client):
     assert report.created == ['Deep']
 
 
+@pytest.mark.anyio
+async def test_the_entries_are_snapshotted_before_the_replace_and_read_back_after(client):
+    # #208: the snapshot comes from the native API, which lists entries whose track
+    # is in the trash (Subsonic hides them), and carries every way to find a track.
+    calls = []
+    rows = [
+        {'mediaFileId': 'm-1', 'path': 'A/1.mp3', 'missing': False, 'tags': {'subboxid': ['s-1']}},
+        {'mediaFileId': 'm-2', 'path': 'A/2.mp3', 'missing': True, 'tags': {}},
+    ]
+    native = mock.Mock()
+    native.playlist_tracks = mock.AsyncMock(side_effect=lambda user, pid: calls.append('read') or (
+        rows if calls.count('read') == 1 else [{'mediaFileId': 'm-9'}]))
+    client.replace_playlist.side_effect = lambda *a: calls.append('replace') or True
+
+    report = await _write(client, [_existing('Deep', 'pl-1', n=1)], [_incoming('Deep', 'm-9')], native=native)
+
+    assert calls == ['read', 'replace', 'read']
+    [snapshot] = report.replaced
+    assert (snapshot.playlist_id, snapshot.name) == ('pl-1', 'Deep')
+    assert snapshot.entries == [
+        {'subbox_id': 's-1', 'media_file_id': 'm-1', 'path': 'A/1.mp3'},
+        {'subbox_id': None, 'media_file_id': 'm-2', 'path': 'A/2.mp3'},
+    ]
+    assert snapshot.after == ['m-9']
+    assert report.warning() is None
+
+
+@pytest.mark.anyio
+async def test_a_snapshot_that_cannot_be_read_still_updates_but_says_it_cannot_be_undone(client):
+    native = mock.Mock(playlist_tracks=mock.AsyncMock(side_effect=RuntimeError('native API down')))
+
+    report = await _write(client, [_existing('Deep', 'pl-1', n=1)], [_incoming('Deep', 's1')], native=native)
+
+    client.replace_playlist.assert_awaited_once()
+    assert report.updated == ['Deep'] and report.replaced == [] and report.not_undoable == ['Deep']
+    assert report.warning() == "`Deep` updated, but the update can't be undone."
+
+
+@pytest.mark.anyio
+async def test_created_and_held_back_playlists_take_no_snapshot(client):
+    native = mock.Mock(playlist_tracks=mock.AsyncMock(return_value=[]))
+
+    report = await _write(client, [_existing('Deep', 'pl-1')], [_incoming('Deep', 's1'), _incoming('New', 's2')],
+                          scan_finished=False, native=native)
+
+    native.playlist_tracks.assert_not_called()
+    assert report.replaced == []
+
+
 def test_a_crate_report_carries_the_playlist_warning_after_its_own():
     report = CrateImportReport(skipped=[SkippedCrateTrack(crate_path='x', reason='no match')], matched=1)
     report.playlists = PlaylistWriteReport(held_back=['A', 'B'])
@@ -220,6 +278,29 @@ async def test_a_long_playlist_is_written_in_chunks_in_order(subsonic, monkeypat
         ('updatePlaylist.view', [('playlistId', 'pl-9'), ('songIdToAdd', 's2'), ('songIdToAdd', 's3')]),
         ('updatePlaylist.view', [('playlistId', 'pl-9'), ('songIdToAdd', 's4')]),
     ]
+
+
+@pytest.mark.anyio
+async def test_setting_no_entries_empties_the_playlist_last_chunk_first(subsonic, monkeypatch):
+    # createPlaylist with no ids changes nothing, so an undo to an empty playlist
+    # removes each visible entry by index, from the end so the indexes don't shift.
+    monkeypatch.setattr('pymix.clients.subsonic_client.PLAYLIST_WRITE_CHUNK', 2)
+    subsonic.get_playlist_tracks = mock.AsyncMock(return_value=_songs(3))
+
+    assert await subsonic.set_playlist_entries(USER, 'pl-1', []) is True
+
+    assert _calls(subsonic.get) == [
+        ('updatePlaylist.view', [('playlistId', 'pl-1'), ('songIndexToRemove', '1'), ('songIndexToRemove', '2')]),
+        ('updatePlaylist.view', [('playlistId', 'pl-1'), ('songIndexToRemove', '0')]),
+    ]
+
+
+@pytest.mark.anyio
+async def test_setting_entries_writes_the_ids_as_given(subsonic):
+    assert await subsonic.set_playlist_entries(USER, 'pl-1', ['m-1', 'm-2', 'm-1']) is True
+
+    assert _calls(subsonic.get) == [('createPlaylist.view', [
+        ('playlistId', 'pl-1'), ('songId', 'm-1'), ('songId', 'm-2'), ('songId', 'm-1')])]
 
 
 @pytest.mark.anyio

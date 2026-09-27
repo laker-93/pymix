@@ -104,6 +104,9 @@ class JobRow(Base):
     # prose; these are the counts a screen can do arithmetic on. Null while the
     # job runs, on a job completed without a ledger, and before migration 019.
     phases = Column(JSON, nullable=True)
+    # The trash batch holding the playlist entries a re-import replaced, so the
+    # import can be undone (#208, migration 023). Null for every other job.
+    trash_batch_id = Column(String, nullable=True)
 
 
 class OriginalTrackMetaRow(Base):
