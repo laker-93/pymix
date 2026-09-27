@@ -191,3 +191,28 @@ def test_real_env_configs_render_and_parse():
         ))
         assert nav['services']['navidrome']['container_name'] == 'navidromelajp'
         assert beets['services']['beets']['container_name'] == 'beetslajp'
+
+
+# --- navidrome.toml -----------------------------------------------------------
+
+def _navidrome_toml() -> dict:
+    import tomllib
+
+    from pymix.orchestrators.services_orchestrator import navidrome_template
+
+    return tomllib.loads(navidrome_template.render())
+
+
+def test_navidrome_toml_keeps_the_subboxid_aliases():
+    """Every track's identity in pymix is read back from Navidrome through this tag."""
+    tags = _navidrome_toml()['Tags']['subboxid']
+    assert tags['Aliases'] == ['subbox_id', 'subboxid']
+
+
+def test_navidrome_toml_never_purges_missing_files():
+    """
+    "never" keeps a deleted file's media_file row, marked missing, so restoring the file
+    at its path brings back the same id with its star, rating, play count and playlist
+    entries (#210). "always" purges all of that within seconds of the delete.
+    """
+    assert _navidrome_toml()['Scanner']['PurgeMissing'] == 'never'
