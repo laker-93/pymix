@@ -465,3 +465,22 @@ async def test_set_rating_retry_is_budgeted_so_it_cannot_stall_a_large_import(mo
     # pass still visits every track rather than giving up at the budget.
     assert client.get.await_count == tracks + budget
 
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("targets, expected", [
+    (None, []),
+    (["1:Artist/Album", "1:Other/EP"], ["1:Artist/Album", "1:Other/EP"]),
+])
+async def test_scan_sends_one_target_param_per_folder(targets, expected):
+    from urllib.parse import parse_qs, urlparse
+    subsonic_client = SubsonicClient(
+        "http://{user}:{port}", MagicMock(), "mock_version", "foo", "bar", None, "test"
+    )
+    subsonic_client.get = AsyncMock(return_value={'subsonic-response': {'status': 'ok'}})
+
+    assert await subsonic_client.scan({'username': 'dj', 'password': 'pw'}, targets=targets)
+
+    url = subsonic_client.get.await_args.args[0]
+    assert urlparse(url).path.endswith('/rest/startScan.view')
+    assert parse_qs(urlparse(url).query).get('target', []) == expected

@@ -31,6 +31,7 @@ from pymix.services import metrics
 from pymix.services.job_outcome import JobOutcome, with_warning
 from pymix.utils.beets_items import build_add_command, build_dump_command, parse_json_lines
 from pymix.utils.beets_query import or_query
+from pymix.utils.navidrome_scan import scan_targets
 
 logger = logging.getLogger(__name__)
 
@@ -188,7 +189,7 @@ class TrashService:
         self._beets_exec = beets_exec
         self._native = native_client
         self._retention_s = retention_s
-        # For scan_and_wait after a restore. Typed loosely: importing
+        # For the scan after a delete, and scan_and_wait after a restore. Typed loosely: importing
         # SubsonicOrchestrator here would pull the whole Subsonic client in.
         self._subsonic = subsonic_orchestrator
         # The purge of a `nodes` batch deletes playlists and node rows (#207).
@@ -225,7 +226,30 @@ class TrashService:
         outcome.not_removed = not_removed
         if batch_id is not None:
             metrics.trash_batch_created(TrashKind.TRACK.value)
+            await self._scan_after_delete(user, batch_id)
         return outcome
+
+    async def _scan_after_delete(self, user: dict, batch_id: str) -> None:
+        """
+        Tell Navidrome the files have gone, by scanning just their folders. Nothing
+        else would: scheduled scans can be off, and a watcher can miss the move, so
+        the tracks stayed listed for 80s+ on the dev stack. A targeted scan marks them
+        missing in under a second, where a full scan walks the whole library.
+
+        Best effort, and not waited on: the delete has happened either way, and the
+        client polls until the library reflects it (subbox-app#152).
+        """
+        if self._subsonic is None:
+            return
+        paths = [item['relative_path'] for item in self._db.get_trash_batch(batch_id)['items']
+                 if item['state'] == ItemState.RESTORABLE.value]
+        if not paths:
+            return
+        try:
+            await self._subsonic.scan(user, targets=scan_targets(paths))
+        except Exception:
+            logger.warning(f"{user['username']}: could not start a scan after deleting {len(paths)} track(s)",
+                           exc_info=True)
 
     def _container(self, username: str) -> str:
         return f"beets{username}"
@@ -558,7 +582,10 @@ class TrashService:
         when deleted. Returns a warning per track that is not, naming what it lost.
         """
         if self._subsonic is not None:
-            finished = await self._subsonic.scan_and_wait(user)
+            # Only the folders the tracks went back to: a full scan would walk the
+            # whole library while the restore job waits on it.
+            finished = await self._subsonic.scan_and_wait(
+                user, targets=scan_targets(item['relative_path'] for item in items))
             if not finished:
                 return ['the library scan had not finished, so whether stars, ratings, play counts '
                         'and playlist entries came back was not checked']

@@ -302,9 +302,14 @@ class SubsonicClient(BaseAPIClient):
 
         return list(await asyncio.gather(*(_build(entry) for entry in resp_playlist)))
 
-    async def scan(self, user: dict) -> bool:
+    async def scan(self, user: dict, targets: Optional[List[str]] = None) -> bool:
+        """
+        ``startScan``. With ``targets`` (pymix.utils.navidrome_scan.scan_targets),
+        only those folders are scanned (Navidrome >= 0.59); without, the whole
+        library, as before.
+        """
         username = user['username']
-        logger.info(f'starting scan of subsonic for user {username}')
+        logger.info(f'starting scan of subsonic for user {username}' + (f' of {targets}' if targets else ''))
         password = user['password']
         port = 4533 # since we're inside the same docker network, can call the private port
         base_path = self._host.format(user=username, port=port)
@@ -312,6 +317,7 @@ class SubsonicClient(BaseAPIClient):
             username,
             password,
             f"{base_path}/rest/startScan",
+            params=[('target', target) for target in targets or []],
         )
         response = await self.get(url)
         logger.info(f'completed scan of subsonic for user {username} with response {response}')

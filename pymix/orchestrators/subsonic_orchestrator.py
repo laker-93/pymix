@@ -110,7 +110,16 @@ class SubsonicOrchestrator:
                 )
         return subsonic_tracks
 
-    async def scan(self, user: dict):
+    async def scan(self, user: dict, targets: Optional[List[str]] = None):
+        if targets:
+            # Navidrome refuses a target whose library id it doesn't have ("Library
+            # with ID n not found"). Scan the whole library rather than scan nothing.
+            try:
+                if await self._subsonic_client.scan(user, targets=targets):
+                    return
+            except Exception:
+                logger.warning(f"targeted scan for {user['username']} failed", exc_info=True)
+            logger.warning(f"targeted scan of {targets} refused for {user['username']}; scanning everything")
         result = await self._subsonic_client.scan(user)
         assert result
 
@@ -119,6 +128,7 @@ class SubsonicOrchestrator:
         user: dict,
         timeout_s: float = SCAN_WAIT_TIMEOUT_S,
         poll_interval_s: float = SCAN_WAIT_POLL_INTERVAL_S,
+        targets: Optional[List[str]] = None,
     ) -> bool:
         """
         Trigger a Navidrome scan and return once it has actually finished.
@@ -143,6 +153,10 @@ class SubsonicOrchestrator:
         nothing. ``seen_scanning`` is the belt-and-braces path for a Navidrome that
         doesn't move ``lastScan`` the way we expect.
 
+        ``targets`` (``scan_targets``) scans only those folders. A targeted scan
+        moves ``lastScan`` on just as a full one does (measured on 0.60.3), so the
+        wait below holds for both.
+
         Returns True if it saw the scan finish, False if it gave up. False is not
         fatal and does not raise: the caller carries on and may match against a
         partially indexed library, which is strictly what the old sleep did every
@@ -152,7 +166,7 @@ class SubsonicOrchestrator:
         before = await self._subsonic_client.get_scan_status(user)
         baseline_last_scan = (before or {}).get('lastScan')
 
-        await self.scan(user)
+        await self.scan(user, targets=targets)
 
         deadline = asyncio.get_running_loop().time() + timeout_s
         seen_scanning = False
