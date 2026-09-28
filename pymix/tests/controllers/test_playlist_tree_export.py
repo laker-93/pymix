@@ -12,7 +12,7 @@ import pytest
 from pymix.controllers.playlist_tree_controller import TreeNotEnabled
 from pymix.model.db_tables import PlaylistNodeRow
 from pymix.tests.fixtures.playlist_tree import (  # noqa: F401 (fixtures)
-    USER, _import, _incoming, _node, _playlists, _xml, db_controller, navidrome, rekordbox, serato, sessions,
+    USER, _import, _incoming, _node, _playlists, _xml, add_batch, db_controller, navidrome, rekordbox, serato, sessions,
     set_tree_state, tree,
 )
 
@@ -95,6 +95,7 @@ async def test_a_trashed_folder_and_everything_under_it_are_left_out(tree, rekor
     await _import(tree, *(_incoming(*path, songs=('1',)) for path in NESTED))
     with sessions() as session:
         # Only the folder: its live children are unreachable through it.
+        add_batch(session)
         session.query(PlaylistNodeRow).filter(PlaylistNodeRow.name == '2024').update({'trash_batch_id': 'batch-1'})
         session.commit()
 

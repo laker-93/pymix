@@ -7,7 +7,7 @@ id, which #203's in-place update keeps. The database is real (SQLite); Navidrome
 one fake answering both the native calls and the orchestrator's Subsonic ones.
 """
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -63,6 +63,7 @@ class FakeNavidrome:
 @pytest.fixture
 def db_controller(tmp_path):
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    event.listen(engine, 'connect', lambda conn, _: conn.execute('PRAGMA foreign_keys=ON'))
     Base.metadata.create_all(engine)
     controller = DbController(
         session_factory=sessionmaker(bind=engine), app_env="test", max_library_size=10_000,

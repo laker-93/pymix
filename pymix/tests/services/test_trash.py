@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -145,6 +145,7 @@ def library_base(tmp_path):
 @pytest.fixture
 def db_controller(library_base, tmp_path):
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    event.listen(engine, 'connect', lambda conn, _: conn.execute('PRAGMA foreign_keys=ON'))
     Base.metadata.create_all(engine)
     controller = DbController(
         session_factory=sessionmaker(bind=engine),

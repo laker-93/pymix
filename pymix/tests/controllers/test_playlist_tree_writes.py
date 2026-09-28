@@ -15,7 +15,7 @@ from pymix.controllers.playlist_tree_controller import (
 )
 from pymix.model.db_tables import PlaylistNodeRow
 from pymix.tests.fixtures.playlist_tree import (  # noqa: F401 (fixtures)
-    USER, _import, _incoming, _nodes, _outline, _xml, db_controller, navidrome, rekordbox, serato, sessions,
+    USER, _import, _incoming, _nodes, _outline, _xml, add_batch, db_controller, navidrome, rekordbox, serato, sessions,
     set_tree_state, tree,
 )
 
@@ -239,6 +239,7 @@ async def test_a_node_moved_under_itself_is_refused(tree):
 async def test_a_trashed_or_unknown_node_is_not_found(tree, sessions, target):
     a, b, c = await _abc(tree)
     with sessions() as session:
+        add_batch(session)
         session.get(PlaylistNodeRow, b).trash_batch_id = 'batch-1'
         session.commit()
 

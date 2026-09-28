@@ -6,7 +6,7 @@ import asyncio
 from unittest import mock
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -48,6 +48,7 @@ class FakeNavidrome:
 @pytest.fixture
 def sessions():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    event.listen(engine, 'connect', lambda conn, _: conn.execute('PRAGMA foreign_keys=ON'))
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
     with factory() as session:

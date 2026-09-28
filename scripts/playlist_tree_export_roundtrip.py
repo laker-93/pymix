@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from playlist_tree_import_roundtrip import TreeRun, import_crates, write_xml  # noqa: E402
+from playlist_tree_import_roundtrip import TreeRun, import_crates, outline, write_xml  # noqa: E402
 from reimport_in_place_roundtrip import Stack, run_import  # noqa: E402
 
 from pyrekordbox.rbxml import RekordboxXml  # noqa: E402
@@ -120,7 +120,7 @@ def main():
               [line[0] for line in under(exported, root) if len(line[0]) == 2] == [(root, 'Loose'), (root, 'House')])
 
         # --- filtered to one playlist -------------------------------------------------------
-        [tech] = [n for n in nodes if n['name'] == 'Tech']
+        [tech] = [n for n in outline(stack, root)[1] if n['name'] == 'Tech']
         exported = export_xml(stack, [tech['navidrome_playlist_id']])
         check('a filtered export is the playlist and its path, nothing else', exported == [
             ((root,), 'folder', None), ((root, 'House'), 'folder', None), ((root, 'House', '2024'), 'folder', None),

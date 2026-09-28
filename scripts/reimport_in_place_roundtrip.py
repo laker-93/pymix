@@ -7,8 +7,10 @@ and check that the playlist was updated in place (#203's "done when").
 
 Local dev stack only: it refuses any host that is not localhost or *.docker.localhost.
 The import is metadata-only (no audio), matching tracks already in the user's library,
-so it needs at least four. It writes an XML into the user's uploads through `docker
-cp`, creates playlists under a folder named for the run, and deletes them again.
+so it needs at least four, and a user with a playlist tree (every user but demo, since
+#211). It writes an XML into the user's uploads through `docker cp`, imports under a
+root folder named for the run, finds its playlists there by their leaf names, and
+removes what it made at the end, whatever happened (TreeRun).
 
 What it checks, after the re-import:
   - the playlist kept its Navidrome id, its comment and its public flag;
@@ -16,8 +18,8 @@ What it checks, after the re-import:
     that is what a re-import is for);
   - there is still exactly one of it;
   - the job warned that it got shorter;
-  - a smart playlist with an incoming playlist's name was never touched, and the
-    incoming one was created beside it (and updated in place on the re-import).
+  - a smart playlist with an incoming playlist's leaf name was never touched, and the
+    incoming one was created in the folder (and updated in place on the re-import).
 
 Then it undoes the re-import (#208) through the trash batch the job names, and checks
 the playlist is back to the user's edited state, under the same id.
@@ -151,15 +153,34 @@ def main():
     if len(songs) < 4:
         sys.exit('needs four tracks in the library')
     a, b, c, d = songs[:4]
-    folder = f'Reimport {time.strftime("%H%M%S")}'
-    deep, smart_name = f'{folder} / Deep', f'{folder} / Smart'
-    made = []
+    # Imported here, not at the top: that module imports this one's helpers.
+    from playlist_tree_import_roundtrip import TreeRun
+    run = TreeRun(stack, args.user)
+    try:
+        ok = drive(stack, args, songs, a, b, c, d)
+    finally:
+        run.cleanup()
+    sys.exit(0 if ok else 1)
 
-    # A smart playlist with the name an incoming playlist will have.
+
+def drive(stack, args, songs, a, b, c, d):
+    """The checks. Every user has a tree since #211, so an imported playlist is
+    named by its leaf and found by where it sits: under this run's own root folder."""
+    folder = f'Reimport {time.strftime("%H%M%S")}'
+
+    def under_folder(name):
+        """The run folder's children called `name`, as Navidrome playlists."""
+        nodes = stack.pymix_call('GET', '/playlists/tree')['nodes']
+        roots = [n['node_id'] for n in nodes if n['parent_id'] is None and n['name'] == folder]
+        ids = {n['navidrome_playlist_id'] for n in nodes
+               if n['parent_id'] in roots and n['kind'] == 'playlist' and n['name'] == name}
+        return [p for p in stack.subsonic('getPlaylists')['playlists'].get('playlist', []) if p['id'] in ids]
+
+    # A smart playlist named like an incoming playlist. It sits at the root, so it
+    # can't be the import's match, but it's the playlist a name match would take.
     smart = stack.native('POST', '/api/playlist', {
-        'name': smart_name, 'public': False, 'rules': {'all': [{'contains': {'title': ''}}], 'limit': 2},
+        'name': 'Smart', 'public': False, 'rules': {'all': [{'contains': {'title': ''}}], 'limit': 2},
     })['id']
-    made.append(smart)
     smart_before = stack.entries(smart)
 
     def import_xml(playlists, tag):
@@ -174,16 +195,14 @@ def main():
 
     # --- first import, then the user's edits in subbox ----------------------------------
     import_xml({'Deep': [a, b, c], 'Smart': [a]}, 'first')
-    [first] = stack.playlists(deep)
-    made += [p['id'] for p in stack.playlists(deep) + stack.playlists(smart_name) if p['id'] != smart]
+    [first] = under_folder('Deep')
     stack.subsonic('updatePlaylist', playlistId=first['id'], songIdToAdd=d['id'],
                    comment='edited in subbox', public='true')
-    print(f'first import made {deep} ({first["id"]}): {stack.entries(first["id"])}; user added a track and a comment')
+    print(f'first import made {folder} / Deep ({first["id"]}): {stack.entries(first["id"])}; user added a track and a comment')
 
     # --- the re-import --------------------------------------------------------------------
     progress = import_xml({'Deep': [c, a, b], 'Smart': [b]}, 'second')
-    after = stack.playlists(deep)
-    made += [p['id'] for p in after if p['id'] not in made]
+    after = under_folder('Deep')
 
     checks = []
 
@@ -191,7 +210,7 @@ def main():
         checks.append(ok)
         print(f"{'PASS' if ok else 'FAIL'}  {label}{': ' + detail if detail else ''}")
 
-    check('exactly one playlist of that name', len(after) == 1, f'{len(after)}')
+    check('exactly one playlist at that path', len(after) == 1, f'{len(after)}')
     if after:
         [second] = after
         check('kept its Navidrome id', second['id'] == first['id'], f'{first["id"]} -> {second["id"]}')
@@ -200,12 +219,11 @@ def main():
         check("entries are the XML's, in its order",
               stack.entries(second['id']) == [c['id'], a['id'], b['id']], str(stack.entries(second['id'])))
     check('the job warned it got shorter',
-          f'`{deep}` now has 3 tracks, down from 4' in (progress['warnings'] or ''), repr(progress['warnings']))
-    same_name = stack.playlists(smart_name)
-    ordinary = [p for p in same_name if p['id'] != smart]
-    check('smart playlist untouched', stack.entries(smart) == smart_before and any(p['id'] == smart for p in same_name))
-    check('incoming playlist created beside the smart one, then updated in place',
-          len(ordinary) == 1 and stack.entries(ordinary[0]['id']) == [b['id']],
+          'now has 3 tracks, down from 4' in (progress['warnings'] or ''), repr(progress['warnings']))
+    ordinary = under_folder('Smart')
+    check('smart playlist untouched', stack.entries(smart) == smart_before)
+    check('incoming playlist created in the folder, then updated in place',
+          len(ordinary) == 1 and ordinary[0]['id'] != smart and stack.entries(ordinary[0]['id']) == [b['id']],
           f'{len(ordinary)} ordinary')
 
     # --- undo the re-import (#208) -----------------------------------------------------
@@ -225,19 +243,19 @@ def main():
     if batch_id:
         undone = stack.pymix_call('POST', f'/trash/{batch_id}/restore')
         print(f'undo: {json.dumps(undone)}')
-        restored = {r['name']: r for r in undone['restored']}
-        after_undo = stack.playlists(deep)
+        restored = {r['playlist_id']: r for r in undone['restored']}
+        after_undo = under_folder('Deep')
         check('undo keeps the one playlist and its id',
               [p['id'] for p in after_undo] == [first['id']], str([p['id'] for p in after_undo]))
         native_ids = [r['mediaFileId'] for r in stack.native('GET', f'/api/playlist/{first["id"]}/tracks?_start=0&_end=100')]
         check("undo puts back the user's edited entries, in order", native_ids == edited, str(native_ids))
         check('undo says the playlist had no edits since the import to discard',
-              restored.get(deep, {}).get('edits_discarded') is False, str(restored.get(deep)))
+              restored.get(first['id'], {}).get('edits_discarded') is False, str(restored.get(first['id'])))
         check('undo left nothing unrestored', undone['not_restored'] == [] and undone['failed'] == [])
-        check('undo kept the comment', stack.playlists(deep)[0].get('comment') == 'edited in subbox')
+        check('undo kept the comment', under_folder('Deep')[0].get('comment') == 'edited in subbox')
         if args.with_trash:
             check('the trashed track went back as a hidden entry',
-                  restored.get(deep, {}).get('n_in_trash') == 1
+                  restored.get(first['id'], {}).get('n_in_trash') == 1
                   and stack.entries(first['id']) == edited[:3], str(stack.entries(first['id'])))
         try:
             stack.pymix_call('POST', f'/trash/{batch_id}/restore')
@@ -254,12 +272,7 @@ def main():
         check('restoring the track brings its entry back into place',
               stack.entries(first['id']) == edited, str(stack.entries(first['id'])))
 
-    for playlist_id in dict.fromkeys(made):
-        try:
-            stack.subsonic('deletePlaylist', id=playlist_id)
-        except RuntimeError as ex:
-            print(f'cleanup: {ex}')
-    sys.exit(0 if all(checks) else 1)
+    return all(checks)
 
 
 if __name__ == '__main__':
