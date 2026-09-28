@@ -78,7 +78,7 @@ async def test_a_playlist_is_created_in_navidrome_and_placed_in_its_folder_in_on
                     'name': 'Sunday', 'navidrome_playlist_id': playlist_id}
     with sessions() as session:
         row = session.get(PlaylistNodeRow, node['node_id'])
-        assert (row.origin, row.source_path, row.name) == ('subbox', None, None)
+        assert (row.origin, row.source_path, row.name, row.navidrome_name) == ('subbox', None, 'Sunday', 'Sunday')
     # Where it was put, not adopted at the root.
     assert await _outline(tree) == [('House', 'folder'), ('  Deep', 'folder'), ('  Sunday', 'playlist')]
 
@@ -142,12 +142,13 @@ async def test_a_folder_is_renamed_where_it_is(tree):
 
 
 @pytest.mark.anyio
-async def test_a_playlist_is_not_renamed_in_the_tree(tree, navidrome):
+async def test_a_playlist_is_renamed_through_the_tree(tree, navidrome):
     node = await tree.create_playlist(USER, 'Sunday')
 
-    with pytest.raises(TreeInvariantError, match='renamed in Navidrome'):
-        await tree.update_node(USER, node['node_id'], name='Monday')
-    assert [p.name for p in navidrome.playlists.values()] == ['Sunday']
+    body = await tree.update_node(USER, node['node_id'], name=' Monday ')
+
+    assert body['name'] == 'Monday'
+    assert [p.name for p in navidrome.playlists.values()] == ['Monday']
 
 
 @pytest.mark.anyio

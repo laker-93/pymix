@@ -24,6 +24,11 @@ class UserRow(Base):
     # Every user is 'live' since #211 but `demo`, who never has a tree (§4.3); a
     # 'none' user gets 409 from the tree routes and can't import or export.
     playlist_tree_state = Column(String, nullable=False, default='live', server_default='live')
+    # How the user's playlists are named in Navidrome (#229, design §18): 'leaf', the
+    # playlist's own name, or 'path', the full path through its folders ("Bass /
+    # House"), so third-party Subsonic clients see the tree. Moved per user by
+    # POST /admin/playlists/names.
+    playlist_names = Column(String, nullable=False, default='leaf', server_default='leaf')
     wishlist_sheet_id = Column(String, nullable=True)
     wishlist_sheet_status = Column(String, nullable=True)
     wishlist_sheet_error = Column(String, nullable=True)
@@ -310,9 +315,10 @@ class PlaylistNodeRow(Base):
     A playlist or folder in a user's playlist tree (#201, design §1, §4.1): an
     identity pymix mints and never reuses, as `subbox_id` is for a track.
 
-    A playlist's **name is not here**: it lives only in Navidrome, and a rename is
-    still the client's own call to Navidrome. A folder has no Navidrome row, so its
-    name is. `pymix.controllers.playlist_tree_controller` holds the invariants.
+    `name` is the node's own name, a playlist's as well as a folder's (#229): a
+    playlist's Navidrome name is written from the tree, as its leaf or its full path
+    (`UserRow.playlist_names`). `pymix.controllers.playlist_tree_controller` holds
+    the invariants.
     """
     __tablename__ = 'playlist_node_table'
     __table_args__ = (UniqueConstraint('user_id', 'navidrome_playlist_id'),)
@@ -326,11 +332,17 @@ class PlaylistNodeRow(Base):
     # 'folder' | 'playlist'. A playlist may have children (a Serato crate with its
     # own tracks and sub-crates).
     kind = Column(String, nullable=False)
-    # Folders only.
+    # The node's own name: the leaf, never the path. Null only on a playlist node
+    # from before #229, until reconciliation fills it from Navidrome.
     name = Column(String, nullable=True)
     # Playlists only, and kept while trashed: a trashed playlist is hidden, not
     # deleted, until its batch is purged.
     navidrome_playlist_id = Column(String, nullable=True)
+    # Playlists only: the Navidrome name pymix last wrote or accepted (#229). Navidrome
+    # showing anything else is an edit from outside pymix; the tree expecting
+    # anything else is a rename pymix still owes. Null on a playlist whose name is
+    # waiting for #230 to read a path out of it.
+    navidrome_name = Column(String, nullable=True)
     # The node's full path in Rekordbox/Serato at import, e.g. ["House", "Deep"].
     # Written once; a move or rename in subbox never changes it. Null for a node made
     # in subbox. What a re-import matches on (#202). A JSON list rather than a

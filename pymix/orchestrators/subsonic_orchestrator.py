@@ -324,6 +324,15 @@ class SubsonicOrchestrator:
         except Exception:
             logger.warning(f"deletePlaylist {playlist_id} for {user['username']} failed", exc_info=True)
 
+    async def rename_playlist(self, user: dict, playlist_id: str, name: str) -> bool:
+        """Rename one playlist, from the tree (#229). Unlocked: the caller holds the
+        tree lock, which isn't reentrant. False if Navidrome refused or didn't answer."""
+        try:
+            return await self._subsonic_client.rename_playlist(user, playlist_id, name)
+        except Exception:
+            logger.warning(f"renaming playlist {playlist_id} of {user['username']} failed", exc_info=True)
+            return False
+
     async def set_playlist_entries(self, user: dict, playlist_id: str, song_ids: List[str]) -> bool:
         return await self._subsonic_client.set_playlist_entries(user, playlist_id, song_ids)
 

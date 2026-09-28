@@ -2,18 +2,21 @@
 The playlist tree (#201; design-playlists-and-undo §1, §4).
 
 Each playlist and folder a `live` user has is a node: an identity pymix mints and
-never reuses, carrying the nesting (`parent_id`, `position`) that joined names like
-"House / Deep" encode today. Navidrome stays the source of truth for which playlists
-exist; the tree is the source of truth for where they sit and whether they're in the
-trash. Playlists still get created and deleted without pymix knowing (upstream
-Feishin's create modal, an old client's delete), so every tree read first reconciles
-against one getPlaylists call (§4.2).
+never reuses, carrying its name and the nesting (`parent_id`, `position`). Navidrome
+stays the source of truth for which playlists exist; the tree is the source of truth
+for what they're called, where they sit and whether they're in the trash. A
+playlist's Navidrome name is written from the tree (#229, §18): its leaf, or for a
+`path` user its full path, so third-party Subsonic clients see the folders.
+Playlists still get created, renamed and deleted without pymix knowing (upstream
+Feishin's create modal, an old client's delete, a mobile client), so every tree read
+first reconciles against one getPlaylists call (§4.2).
 
 This module holds the invariants (§4.1), in one place:
   - no cycles: a node can't move into its own subtree;
   - `position` is dense, 0..n-1, among a node's live siblings; a trashed node keeps
     its old position, so a restore can put it back;
   - a folder never has a Navidrome id; a playlist always has one, trashed or not;
+  - `name` is the node's own name, never a path;
   - a playlist may have children (a Serato crate with its own tracks and sub-crates).
 
 Every write, and reconciliation, runs under the user's tree lock
@@ -31,7 +34,8 @@ from pymix.controllers.db_controller import DbController
 from pymix.model.db_tables import PlaylistNodeRow, TrashBatchRow, TrashItemRow, UserRow
 from pymix.model.playlist_write_report import PlaylistWriteReport
 from pymix.model.subboxplaylist import SubBoxPlaylist
-from pymix.services import metrics
+from pymix.services import metrics, playlist_names
+from pymix.services.playlist_names import LEAF, PATH
 from pymix.services.trash import TRASH_DEFAULTS, ItemState, TrashKind
 from pymix.services.tree_lock import TreeLocks
 
@@ -72,6 +76,8 @@ class ReconcileOutcome:
     dropped: List[str] = field(default_factory=list)
     # Trashed nodes whose playlist had gone: their trash item is `lost`.
     lost: List[str] = field(default_factory=list)
+    # Live nodes renamed from a name written outside pymix (#229).
+    renamed: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -103,15 +109,18 @@ class PlaylistTreeController:
         """
         GET /playlists/tree: reconcile, then the live nodes in tree order and the
         Navidrome ids of the hidden (trashed) playlists, which the client leaves out
-        of its lists. A playlist's `name` is Navidrome's, read in the same call and
-        never stored.
+        of its lists. A node's `name` is its own, never the path Navidrome may show.
+
+        Any Navidrome name the tree still owes -- a write that stopped part way -- is
+        written here too: after the one getPlaylists it costs nothing when there's
+        none.
         """
         username = user['username']
         async with self._locks.hold(username):
             user_id = self._require_live(username)
             playlists = await self._subsonic.owned_playlists(user)
             self._reconcile(user_id, username, playlists)
-            names = {p.subsonic_id: p.name for p in playlists}
+            await self._sync_names(user, user_id, owned=playlists)
             with self._sessions() as session:
                 rows = session.query(PlaylistNodeRow).filter(PlaylistNodeRow.user_id == user_id).all()
         live = [r for r in rows if r.trash_batch_id is None]
@@ -125,7 +134,7 @@ class PlaylistTreeController:
                     'parent_id': r.parent_id,
                     'position': r.position,
                     'kind': r.kind,
-                    'name': r.name if r.kind == FOLDER else names.get(r.navidrome_playlist_id),
+                    'name': r.name,
                     'navidrome_playlist_id': r.navidrome_playlist_id,
                     'child_count': child_count.get(r.node_id, 0),
                 }
@@ -188,14 +197,18 @@ class PlaylistTreeController:
             position: Optional[int] = None,
     ) -> dict:
         """
-        PATCH /playlists/nodes/{id} (#206): rename a folder, move a node, reorder it,
-        or any of them at once, in one commit. Returns the node as the tree gives it.
+        PATCH /playlists/nodes/{id} (#206): rename a node, move it, reorder it, or
+        any of them at once, in one commit. Returns the node as the tree gives it.
 
         ``parent_id`` is UNCHANGED to stay under the current parent, None for the
         root. ``position`` is where the node ends up among its new siblings, not
         counting itself, clamped to the end; None is the end on a move and no change
-        on a reorder or rename. A playlist is renamed in Navidrome, not here: its
-        name isn't stored (§4.1).
+        on a reorder or rename.
+
+        A playlist is renamed here too (#229): ``name`` is its leaf, and Navidrome's
+        name is written from the tree afterwards, as is every playlist's under a
+        renamed or moved folder. Those writes follow the commit: one that fails
+        leaves the tree right and is retried by the next tree read.
         """
         username = user['username']
         async with self._locks.hold(username):
@@ -203,9 +216,7 @@ class PlaylistTreeController:
             with self._sessions() as session:
                 node = self._live(session, user_id, node_id)
                 if name is not None:
-                    if node.kind != FOLDER:
-                        raise TreeInvariantError("a playlist is renamed in Navidrome, not the tree")
-                    node.name = self._folder_name(name)
+                    node.name = self._clean_name(name, node.kind)
                 moving = parent_id is not UNCHANGED and parent_id != node.parent_id
                 if parent_id is UNCHANGED:
                     parent_id = node.parent_id
@@ -222,17 +233,19 @@ class PlaylistTreeController:
                     node.position = self._open_gap(session, user_id, parent_id, position, exclude=node_id)
                 node.updated_at = _now()
                 session.commit()
-                return self._node_body(node, None)
+                body = self._node_body(node)
+            await self._sync_names(user, user_id)
+        return body
 
     async def create_folder(
             self, user: dict, name: str, *, parent_id: Optional[str] = None, position: Optional[int] = None,
     ) -> dict:
         """POST /playlists/folders (#206): a folder made in subbox, so no
         `source_path`, and an import never takes it over. Returns the node."""
-        node_id = await self.create_node(user, FOLDER, name=self._folder_name(name), parent_id=parent_id,
+        node_id = await self.create_node(user, FOLDER, name=self._clean_name(name, FOLDER), parent_id=parent_id,
                                          position=position)
         with self._sessions() as session:
-            return self._node_body(session.get(PlaylistNodeRow, node_id), None)
+            return self._node_body(session.get(PlaylistNodeRow, node_id))
 
     async def create_playlist(
             self, user: dict, name: str, *, parent_id: Optional[str] = None, song_ids: Optional[List[str]] = None,
@@ -246,56 +259,60 @@ class PlaylistTreeController:
         bad one creates nothing. If the node write fails after Navidrome has the
         playlist, the next tree read adopts it at the root: the playlist is never
         lost, only misplaced.
+
+        Navidrome gets the name the tree gives it (#229): the full path, for a `path`
+        user, so it's never seen under its bare leaf.
         """
         username = user['username']
-        name = name.strip()
-        if not name:
-            raise TreeInvariantError("a playlist needs a name")
+        name = self._clean_name(name, PLAYLIST)
         async with self._locks.hold(username):
             user_id = self._require_live(username)
-            if parent_id is not None:
-                with self._sessions() as session:
+            with self._sessions() as session:
+                prefix = []
+                if parent_id is not None:
                     self._live(session, user_id, parent_id)
-            playlist_id = await self._subsonic.new_playlist(user, name, list(song_ids or []))
+                    prefix = self._prefix(parent_id, self._nodes_by_id(session, user_id)) + [
+                        session.get(PlaylistNodeRow, parent_id).name]
+                navidrome_name = self._projected(name, prefix, self._name_style(session, user_id), readonly=False)
+            playlist_id = await self._subsonic.new_playlist(user, navidrome_name, list(song_ids or []))
             if not playlist_id:
                 raise PlaylistNotCreated(name)
             with self._sessions() as session:
-                node_id = self._add(session, user_id, PLAYLIST, parent_id, None, None, playlist_id, None, 'subbox')
+                node_id = self._add(session, user_id, PLAYLIST, parent_id, None, name, playlist_id, None, 'subbox',
+                                    navidrome_name=navidrome_name)
                 session.commit()
-                return self._node_body(session.get(PlaylistNodeRow, node_id), name)
+                return self._node_body(session.get(PlaylistNodeRow, node_id))
 
     @staticmethod
-    def _folder_name(name: str) -> str:
+    def _clean_name(name: str, kind: str) -> str:
         name = (name or '').strip()
         if not name:
-            raise TreeInvariantError("a folder needs a name")
+            raise TreeInvariantError(f"a {kind} needs a name")
         return name
 
     @staticmethod
-    def _node_body(row: PlaylistNodeRow, playlist_name: Optional[str]) -> dict:
-        """One node as GET /playlists/tree returns it, minus `child_count`. A
-        playlist's name is Navidrome's: the caller passes it when it knows it."""
+    def _node_body(row: PlaylistNodeRow) -> dict:
+        """One node as GET /playlists/tree returns it, minus `child_count`."""
         return {
             'node_id': row.node_id,
             'parent_id': row.parent_id,
             'position': row.position,
             'kind': row.kind,
-            'name': row.name if row.kind == FOLDER else playlist_name,
+            'name': row.name,
             'navidrome_playlist_id': row.navidrome_playlist_id,
         }
 
     def _add(self, session, user_id, kind, parent_id, position, name, navidrome_playlist_id, source_path,
-             origin) -> str:
+             origin, navidrome_name: Optional[str] = None) -> str:
         if kind == FOLDER:
-            if navidrome_playlist_id is not None:
+            if navidrome_playlist_id is not None or navidrome_name is not None:
                 raise TreeInvariantError("a folder has no Navidrome playlist")
             if not name:
                 raise TreeInvariantError("a folder needs a name")
         elif kind == PLAYLIST:
+            # A name left None is filled from Navidrome by the next reconciliation.
             if not navidrome_playlist_id:
                 raise TreeInvariantError("a playlist needs its Navidrome playlist id")
-            if name is not None:
-                raise TreeInvariantError("a playlist's name lives in Navidrome, not the tree")
         else:
             raise TreeInvariantError(f"unknown node kind {kind!r}")
         if origin not in ORIGINS:
@@ -307,7 +324,7 @@ class PlaylistTreeController:
         session.add(PlaylistNodeRow(
             node_id=node_id, user_id=user_id, parent_id=parent_id,
             position=self._open_gap(session, user_id, parent_id, position),
-            kind=kind, name=name, navidrome_playlist_id=navidrome_playlist_id,
+            kind=kind, name=name, navidrome_playlist_id=navidrome_playlist_id, navidrome_name=navidrome_name,
             source_path=source_path, origin=origin,
             created_at=now, updated_at=now,
         ))
@@ -348,8 +365,7 @@ class PlaylistTreeController:
 
     def _drop(self, session, user_id: str, node: PlaylistNodeRow) -> None:
         """Remove a live node whose playlist has gone. Its live children move up to
-        its parent, in its place and in their own order: pymix never stored the
-        playlist's name, so the node can't become a folder instead."""
+        its parent, in its place and in their own order."""
         children = self._siblings(session, user_id, node.node_id)
         later = [s for s in self._siblings(session, user_id, node.parent_id, node.node_id) if s.position > node.position]
         for sibling in later:
@@ -461,7 +477,7 @@ class PlaylistTreeController:
         n_playlists = sum(1 for r in rows.values() if r.kind == PLAYLIST)
         if len(tops) == 1:
             [top] = tops
-            name = top.name if top.kind == FOLDER else playlists[top.navidrome_playlist_id].name
+            name = top.name
             under = n_playlists - (top.kind == PLAYLIST)
             return f"{top.kind.capitalize()} {name}" + (f" · {plural(under, 'playlist')}" if under else "")
         n_folders = len(rows) - n_playlists
@@ -475,10 +491,7 @@ class PlaylistTreeController:
         which keeps it while trashed. The parent's name is for the restore to say
         where it would have gone, if that parent is gone by then."""
         def name_of(node):
-            if node is None:
-                return None
-            return node.name if node.kind == FOLDER else getattr(
-                playlists.get(node.navidrome_playlist_id), 'name', None)
+            return None if node is None else node.name
         playlist = playlists.get(row.navidrome_playlist_id)
         return {
             'node_id': row.node_id,
@@ -512,7 +525,6 @@ class PlaylistTreeController:
             user_id = self._require_live(username)
             owned = await self._subsonic.owned_playlists(user)
             self._reconcile(user_id, username, owned)
-            playlists = {p.subsonic_id: p for p in owned}
             with self._sessions() as session:
                 batch = session.query(TrashBatchRow).filter(
                     TrashBatchRow.batch_id == batch_id, TrashBatchRow.user_id == user_id,
@@ -550,13 +562,11 @@ class PlaylistTreeController:
                     node.updated_at = now
                     session.flush()
                     item.state, item.error, item.updated_at = ItemState.RESTORED.value, None, now
-                    name = node.name if node.kind == FOLDER else getattr(
-                        playlists.get(node.navidrome_playlist_id), 'name', snapshot.get('name'))
-                    restored.append(self._node_body(node, name))
+                    name = node.name or snapshot.get('name')
+                    restored.append(self._node_body(node))
                     if is_moved:
                         to = None if target is None else session.get(PlaylistNodeRow, target)
-                        to_name = None if to is None else (
-                            to.name if to.kind == FOLDER else getattr(playlists.get(to.navidrome_playlist_id), 'name', None))
+                        to_name = None if to is None else to.name
                         gone = snapshot.get('parent_name') or 'its folder'
                         moved.append({
                             'node_id': node.node_id, 'name': name, 'parent_id': target, 'parent_name': to_name,
@@ -572,6 +582,8 @@ class PlaylistTreeController:
                             if item.snapshot.get('n_entries') is not None}
                 session.commit()
 
+            # A restored playlist's folder may have been renamed or moved meanwhile.
+            await self._sync_names(user, user_id)
             # Counted after the commit: a count that fails can't stop the restore.
             counts = await self._subsonic.entry_counts(user, sorted(recorded))
         shrunk = []
@@ -682,6 +694,9 @@ class PlaylistTreeController:
         Nodes made in subbox have no `source_path`, so an import never takes over
         something the user built. `source_path` doesn't say which library it came
         from: a Serato crate `House/Deep` is the Rekordbox playlist `House/Deep`.
+
+        A new playlist is created under its leaf and renamed to its full path, for a
+        `path` user, once they're all placed: its folders may be ones the user renamed.
         """
         username = user['username']
         async with self._locks.hold(username):
@@ -719,6 +734,9 @@ class PlaylistTreeController:
                 then=lambda playlist_id, path=path: self._place(user_id, playlist_id, path, origin),
             )
         self._subsonic.log_report(username, report)
+        if report.created:
+            async with self._locks.hold(username):
+                await self._sync_names(user, user_id)
         return report
 
     def _place(self, user_id: str, playlist_id: str, path: Tuple[str, ...], origin: str) -> None:
@@ -728,7 +746,8 @@ class PlaylistTreeController:
         try:
             with self._sessions() as session:
                 parent_id = self._resolve_parent(session, user_id, path[:-1], origin)
-                self._add(session, user_id, PLAYLIST, parent_id, None, None, playlist_id, list(path), origin)
+                self._add(session, user_id, PLAYLIST, parent_id, None, path[-1], playlist_id, list(path), origin,
+                          navidrome_name=path[-1])
                 session.commit()
         except Exception:
             logger.exception(f"could not add a node for imported playlist {playlist_id} ({' / '.join(path)})")
@@ -799,14 +818,11 @@ class PlaylistTreeController:
             if node.node_id not in keep:
                 continue
             playlist = None
-            if node.kind == PLAYLIST:
-                name = by_id[node.navidrome_playlist_id].name
-                if playlist_ids is None or node.navidrome_playlist_id in playlist_ids:
-                    playlist = by_id[node.navidrome_playlist_id]
-                    playlists.append(playlist)
-            else:
-                name = node.name
-            built[node.node_id] = ExportNode(name, playlist)
+            # The leaf, never the path Navidrome may show (#229).
+            if node.kind == PLAYLIST and (playlist_ids is None or node.navidrome_playlist_id in playlist_ids):
+                playlist = by_id[node.navidrome_playlist_id]
+                playlists.append(playlist)
+            built[node.node_id] = ExportNode(node.name, playlist)
             # Tree order puts a parent before its children.
             (built[node.parent_id].children if node.parent_id else roots).append(built[node.node_id])
         await self._subsonic.fetch_tracks(user, playlists)
@@ -826,26 +842,39 @@ class PlaylistTreeController:
         | no               | a live node   | drop it, children up; orphaned metric    |
         | no               | a trashed one | its trash item is lost (or, mid-purge,   |
         |                  |               | purged), the node goes                   |
+
+        Then the names (#229, §18). A playlist node from before #229 takes the name
+        Navidrome has, which is its leaf. A live playlist whose Navidrome name is
+        neither the one pymix last wrote (`navidrome_name`) nor the one the tree
+        expects was renamed outside pymix, and that name wins if it names a leaf in
+        the same place: a bare name, or the node's own path with a new leaf. One
+        that puts the playlist somewhere else is a move, left for #230: the node's
+        `navidrome_name` is cleared, so nothing overwrites it meanwhile.
         """
         outcome = ReconcileOutcome()
-        in_navidrome = [p.subsonic_id for p in playlists]
-        present = set(in_navidrome)
+        in_navidrome = {p.subsonic_id: p for p in playlists}
         with self._sessions() as session:
+            style = self._name_style(session, user_id)
             nodes = session.query(PlaylistNodeRow).filter(
                 PlaylistNodeRow.user_id == user_id, PlaylistNodeRow.kind == PLAYLIST).all()
             known = {n.navidrome_playlist_id for n in nodes}
             for node in nodes:
-                if node.navidrome_playlist_id in present:
+                if node.navidrome_playlist_id in in_navidrome:
                     continue
                 if node.trash_batch_id is None:
                     self._drop(session, user_id, node)
                     outcome.dropped.append(node.navidrome_playlist_id)
                 elif self._lose(session, node):
                     outcome.lost.append(node.navidrome_playlist_id)
-            for playlist_id in in_navidrome:
+            for playlist_id, playlist in in_navidrome.items():
                 if playlist_id not in known:
-                    self._add(session, user_id, PLAYLIST, None, None, None, playlist_id, None, 'subbox')
+                    # At the root, so its name is its leaf, unless it names a path.
+                    leaf = self._accepted_leaf(playlist, [], style)
+                    self._add(session, user_id, PLAYLIST, None, None, playlist.name if leaf is None else leaf,
+                              playlist_id, None, 'subbox', navidrome_name=None if leaf is None else playlist.name)
                     outcome.adopted.append(playlist_id)
+            session.flush()
+            self._reconcile_names(session, user_id, style, in_navidrome, outcome)
             session.commit()
         for playlist_id in outcome.dropped:
             logger.warning(f"playlist {playlist_id} of {username} was deleted outside pymix; its node is dropped")
@@ -856,7 +885,154 @@ class PlaylistTreeController:
             metrics.playlist_nodes_orphaned(len(outcome.dropped) + len(outcome.lost))
         if outcome.adopted:
             logger.info(f"adopted {len(outcome.adopted)} playlist(s) of {username} at the root of their tree")
+        if outcome.renamed:
+            logger.info(f"took the name of {len(outcome.renamed)} playlist(s) of {username} renamed outside pymix: "
+                        f"{outcome.renamed}")
+            metrics.playlists_renamed_outside(len(outcome.renamed))
         return outcome
+
+    def _reconcile_names(self, session, user_id: str, style: str, in_navidrome: dict,
+                         outcome: ReconcileOutcome) -> None:
+        by_id = self._nodes_by_id(session, user_id)
+        present = [n for n in by_id.values() if n.kind == PLAYLIST and n.navidrome_playlist_id in in_navidrome]
+        # Every name first: a path is built from the names above it.
+        for node in present:
+            if node.name is None:
+                node.name = node.navidrome_name = in_navidrome[node.navidrome_playlist_id].name
+        for node in present:
+            playlist = in_navidrome[node.navidrome_playlist_id]
+            if node.trash_batch_id is not None or playlist.name == node.navidrome_name:
+                continue
+            prefix = self._prefix(node.node_id, by_id)
+            if playlist.name == self._projected(node.name, prefix, style, playlist.readonly):
+                # pymix's own write, whose commit didn't happen: not an outside rename.
+                node.navidrome_name = playlist.name
+                continue
+            leaf = self._accepted_leaf(playlist, prefix, style)
+            if leaf is None:
+                if node.navidrome_name is not None:
+                    logger.info(f"playlist {node.navidrome_playlist_id} was renamed outside pymix to "
+                                f"{playlist.name!r}, a path elsewhere in the tree: left as it is")
+                    node.navidrome_name = None
+                continue
+            node.name, node.navidrome_name, node.updated_at = leaf, playlist.name, _now()
+            outcome.renamed.append(node.navidrome_playlist_id)
+
+    # --- names (#229, §18) ------------------------------------------------------------
+
+    @staticmethod
+    def _name_style(session, user_id: str) -> str:
+        return session.query(UserRow.playlist_names).filter(UserRow.user_id == user_id).scalar() or LEAF
+
+    @staticmethod
+    def _nodes_by_id(session, user_id: str) -> Dict[str, PlaylistNodeRow]:
+        return {n.node_id: n for n in session.query(PlaylistNodeRow).filter(PlaylistNodeRow.user_id == user_id)}
+
+    @staticmethod
+    def _prefix(node_id: str, by_id: Dict[str, PlaylistNodeRow]) -> List[str]:
+        """The names of the nodes above ``node_id``, root first."""
+        names = []
+        parent_id = by_id[node_id].parent_id
+        while parent_id is not None:
+            parent = by_id[parent_id]
+            names.append(parent.name or '')
+            parent_id = parent.parent_id
+        return names[::-1]
+
+    @staticmethod
+    def _projected(name: str, prefix: List[str], style: str, readonly: bool) -> str:
+        """The Navidrome name the tree gives a playlist. A smart playlist keeps its
+        own: pymix never made it, and its rules file names it."""
+        if style == PATH and not readonly:
+            return playlist_names.join(prefix + [name])
+        return name
+
+    @staticmethod
+    def _accepted_leaf(playlist: SubBoxPlaylist, prefix: List[str], style: str) -> Optional[str]:
+        """The leaf a name written outside pymix gives a playlist under ``prefix``,
+        or None if it names another place (#230)."""
+        if style != PATH or playlist.readonly:
+            return playlist.name
+        return playlist_names.leaf_under(playlist.name, prefix)
+
+    async def _sync_names(self, user: dict, user_id: str, *, owned: Optional[list] = None,
+                          style: Optional[str] = None, dry_run: bool = False) -> dict:
+        """
+        Write each live playlist's Navidrome name from the tree, where it differs.
+        Called with the lock held, after every tree write and read. Idempotent: a
+        run that stops part way is finished by the next.
+
+        ``owned`` is a getPlaylists the caller has just reconciled against; without
+        it, it's read and reconciled here. ``style`` overrides the user's, for the
+        admin pass's dry run. A playlist renamed outside pymix to a path elsewhere
+        (`navidrome_name` null) isn't touched: #230 reads it.
+
+        Each rename is committed as it succeeds. One that fails is logged and left
+        owed; one that succeeded but wasn't committed is recognised by the next
+        reconciliation.
+        """
+        username = user['username']
+        if owned is None:
+            owned = await self._subsonic.owned_playlists(user)
+            self._reconcile(user_id, username, owned)
+        current = {p.subsonic_id: p for p in owned}
+        with self._sessions() as session:
+            style = style or self._name_style(session, user_id)
+            by_id = self._nodes_by_id(session, user_id)
+            owed = []
+            for node in self._tree_order([n for n in by_id.values() if n.trash_batch_id is None]):
+                playlist = current.get(node.navidrome_playlist_id)
+                # After the reconciliation, a name is either pymix's (`navidrome_name`)
+                # or waiting for #230 (null).
+                if node.kind != PLAYLIST or playlist is None or node.navidrome_name is None:
+                    continue
+                expected = self._projected(node.name, self._prefix(node.node_id, by_id), style, playlist.readonly)
+                if expected != playlist.name:
+                    owed.append((node.node_id, node.navidrome_playlist_id, playlist.name, expected))
+        result = {'owed': len(owed), 'renamed': 0, 'failed': []}
+        if dry_run:
+            result['renames'] = [{'from': before, 'to': after} for _, _, before, after in owed]
+            return result
+        for node_id, playlist_id, _, expected in owed:
+            if not await self._subsonic.rename_playlist(user, playlist_id, expected):
+                result['failed'].append(playlist_id)
+                continue
+            with self._sessions() as session:
+                node = session.get(PlaylistNodeRow, node_id)
+                if node is not None:
+                    node.navidrome_name = expected
+                    session.commit()
+            result['renamed'] += 1
+        if owed:
+            logger.info(f"renamed {result['renamed']} of {len(owed)} playlist(s) of {username} from the tree"
+                        + (f"; failed: {result['failed']}" if result['failed'] else ""))
+        return result
+
+    async def set_name_style(self, user: dict, style: str, *, dry_run: bool = False) -> dict:
+        """
+        POST /admin/playlists/names (#229): name the user's playlists in Navidrome by
+        their full path ('path') or their leaf ('leaf'), and rename them to match.
+        The style is set first, so a run that stops part way is finished by the
+        user's next tree read, or by running this again. Reversible: 'leaf' puts
+        back the names they had before.
+        """
+        if style not in playlist_names.STYLES:
+            raise TreeInvariantError(f"unknown playlist name style {style!r}")
+        username = user['username']
+        async with self._locks.hold(username):
+            user_id = self._require_live(username)
+            with self._sessions() as session:
+                before = self._name_style(session, user_id)
+                if not dry_run and before != style:
+                    session.query(UserRow).filter(UserRow.user_id == user_id).update({'playlist_names': style})
+                    session.commit()
+            result = await self._sync_names(user, user_id, style=style, dry_run=dry_run)
+            with self._sessions() as session:
+                # Renamed outside pymix to a path elsewhere: waiting for #230.
+                result['waiting'] = session.query(PlaylistNodeRow).filter(
+                    PlaylistNodeRow.user_id == user_id, PlaylistNodeRow.kind == PLAYLIST,
+                    PlaylistNodeRow.trash_batch_id.is_(None), PlaylistNodeRow.navidrome_name.is_(None)).count()
+        return {'username': username, 'from': before, 'to': style, 'dry_run': dry_run, **result}
 
     def _lose(self, session, node: PlaylistNodeRow) -> bool:
         """A hidden playlist whose Navidrome playlist has gone. If its item is

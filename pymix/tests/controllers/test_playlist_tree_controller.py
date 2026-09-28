@@ -148,8 +148,8 @@ async def test_a_read_is_idempotent_and_picks_up_a_new_playlist_and_a_rename(tre
 
     assert _shape(body) == _shape(again) == [('Deeper', None, 0), ('New', None, 1)]
     assert len(_rows(sessions)) == 2
-    # The name was never stored.
-    assert all(r.name is None for r in _rows(sessions))
+    # The leaf is stored (#229), taken from Navidrome: a rename outside pymix wins.
+    assert sorted(r.name for r in _rows(sessions)) == ['Deeper', 'New']
 
 
 @pytest.mark.anyio
@@ -269,7 +269,6 @@ async def test_a_write_waits_for_a_read_in_progress(tree, navidrome, locks):
     ({'kind': FOLDER, 'name': 'X', 'navidrome_playlist_id': 'pl'}, 'a folder has no Navidrome playlist'),
     ({'kind': FOLDER}, 'a folder needs a name'),
     ({'kind': PLAYLIST}, 'needs its Navidrome playlist id'),
-    ({'kind': PLAYLIST, 'navidrome_playlist_id': 'pl', 'name': 'X'}, "name lives in Navidrome"),
     ({'kind': 'crate', 'name': 'X'}, 'unknown node kind'),
     ({'kind': FOLDER, 'name': 'X', 'origin': 'itunes'}, 'unknown origin'),
     ({'kind': FOLDER, 'name': 'X', 'parent_id': 'no-such-node'}, 'no live node'),

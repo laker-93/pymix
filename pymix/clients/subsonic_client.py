@@ -705,6 +705,21 @@ class SubsonicClient(BaseAPIClient):
         """
         return bool(await self._write_playlist(user, [('playlistId', playlist_id)], _song_ids(tracks)))
 
+    async def rename_playlist(self, user: dict, playlist_id: str, name: str) -> bool:
+        """updatePlaylist with only a name: the entries are untouched."""
+        username = user['username']
+        base_path = self._host.format(user=username, port=4533)
+        url = self._subsonic_format_url(
+            username, user['password'], f"{base_path}/rest/updatePlaylist",
+            params=[('playlistId', playlist_id), ('name', name)],
+        )
+        response = await self.get(url)
+        if response['subsonic-response']['status'] != 'ok':
+            logger.error(f"renaming playlist {playlist_id} of {username} failed: "
+                         f"{response['subsonic-response'].get('error')}")
+            return False
+        return True
+
     async def set_playlist_entries(self, user: dict, playlist_id: str, song_ids: List[str]) -> bool:
         """
         Make a playlist's entries exactly these, in order: an undo of a re-import
