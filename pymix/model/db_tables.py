@@ -340,8 +340,8 @@ class PlaylistNodeRow(Base):
     navidrome_playlist_id = Column(String, nullable=True)
     # Playlists only: the Navidrome name pymix last wrote or accepted (#229). Navidrome
     # showing anything else is an edit from outside pymix; the tree expecting
-    # anything else is a rename pymix still owes. Null on a playlist whose name is
-    # waiting for #230 to read a path out of it.
+    # anything else is a rename pymix still owes. Null only between a playlist's
+    # adoption under a path name and the move along it, in one reconciliation (#230).
     navidrome_name = Column(String, nullable=True)
     # The node's full path in Rekordbox/Serato at import, e.g. ["House", "Deep"].
     # Written once; a move or rename in subbox never changes it. Null for a node made

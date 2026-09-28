@@ -207,8 +207,7 @@ async def set_playlist_names(
     'leaf' puts back the names from before. A user's run that stops part way is
     finished by their next tree read, or by running it again.
 
-    Per user: `{from, to, owed, renamed, failed, waiting}`, where `waiting` counts
-    playlists renamed outside pymix to a path elsewhere in the tree, left for #230.
+    Per user: `{from, to, owed, renamed, failed}`; a dry run adds `renames`.
     """
     if request.names not in ('path', 'leaf'):
         raise HTTPException(status_code=400, detail="names is 'path' or 'leaf'")
