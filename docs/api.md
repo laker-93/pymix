@@ -229,7 +229,7 @@ z.object({
     parent_id: z.string().uuid().nullable(),   // null = root
     position: z.number().int(),                // 0..n-1 among its siblings
     kind: z.enum(['folder', 'playlist']),
-    name: z.string().nullable(),               // a folder's; a playlist's is Navidrome's, read live
+    name: z.string().nullable(),               // the node's own name, never the path (#229)
     navidrome_playlist_id: z.string().nullable(), // playlists only
     child_count: z.number().int(),
   })),
