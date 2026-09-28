@@ -234,6 +234,7 @@ z.object({
     child_count: z.number().int(),
   })),
   hidden_playlist_ids: z.array(z.string()),  // trashed playlists: leave them out of every list
+  playlist_names: z.enum(['leaf', 'path']),  // whether Navidrome's names carry the folder path
 })
 ```
 
