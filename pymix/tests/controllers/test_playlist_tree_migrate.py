@@ -15,7 +15,7 @@ from pymix.controllers.playlist_tree_controller import TreeInvariantError
 from pymix.model.db_tables import PlaylistNodeRow
 from pymix.routers.admin import PlaylistMigrateRequest, migrate_playlists
 from pymix.tests.fixtures.playlist_tree import (  # noqa: F401 (fixtures)
-    USER, _node, _nodes, _outline, _xml, db_controller, navidrome, rekordbox, serato, sessions, tree,
+    USER, _node, _nodes, _outline, _xml, add_batch, db_controller, navidrome, rekordbox, serato, sessions, tree,
 )
 
 
@@ -246,6 +246,7 @@ async def test_a_rollback_is_refused_once_anything_is_in_the_trash(tree, navidro
     _library(navidrome, db_controller)
     await tree.migrate(USER)
     with sessions() as session:
+        add_batch(session, 'b')
         session.query(PlaylistNodeRow).filter(PlaylistNodeRow.name == 'House').update({'trash_batch_id': 'b'})
         session.commit()
 
@@ -290,6 +291,7 @@ async def test_the_route_rolls_back_a_trashed_tree_as_409(tree, navidrome, db_co
     navidrome.add('House / Deep')
     await tree.migrate(USER)
     with sessions() as session:
+        add_batch(session, 'b')
         session.query(PlaylistNodeRow).update({'trash_batch_id': 'b'})
         session.commit()
 
