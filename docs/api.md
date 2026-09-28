@@ -180,7 +180,7 @@ a zip that parses to zero crates, and a zip where nothing at all matched.
 | POST `/tracks/presence` | Given `subbox_ids` (≤1000), return `{id: bool}` of which are already in the user's library. Lets the client skip re-uploading. |
 | POST `/track/metadata/update` | Versioned update of a track's cue/loop metadata (`cuedata` validated against `cue_schema`). `source_app` ∈ {serato, rekordbox}, `change_type` ∈ {upload, edit, sync, merge}. |
 | GET `/track/metadata/{track_id}` | Fetch latest cue/loop metadata for a track. |
-| DELETE `/track` | Delete tracks (by `subbox_id` list) into the user's **trash** (#200): each file is moved to `/private-music/_trash/{user}/{batch_id}/` after a snapshot, `beet rm -f`, then the DB rows. The response carries `trash_batch_id` (null when nothing moved). See `services/trash.py`. |
+| DELETE `/track` | Delete tracks (by `subbox_id` list) into the user's **trash** (#200): each file is moved to `/private-music/_trash/{user}/{batch_id}/` after a snapshot, `beet rm -f`, then the DB rows. The response carries `trash_batch_id` (null when nothing moved). It then starts a Navidrome scan of just the deleted files' folders (`startScan?target=1:<folder>`, `utils/navidrome_scan.py`), so the tracks read as missing in under a second: nothing else would tell Navidrome, whose scheduled scans can be off. See `services/trash.py`. |
 
 ## Trash — `routers/trash.py`
 Every route is `require_uploader`: `demo` has no trash. Design: `design-playlists-and-undo.md` §8, §12 in `subbox-workspace`.
@@ -200,7 +200,7 @@ Restoring one (`TrashService.restore_tracks`):
 - moves each file back to its exact path and checks its sha256;
 - re-adds it to beets **in place** with a plugin-free script (`utils/beets_items.py`) that only reads the file and writes back every field the item and its album had, rejoining the item's own album by id or recreating it;
 - writes back the pymix rows, which brings back cues and beat grids;
-- scans, and checks each track has its old Navidrome `media_file.id`.
+- scans just the folders it put tracks back into (a targeted scan, not the whole library), and checks each track has its old Navidrome `media_file.id`.
 
 With that id come its star, rating, play count and playlist entries. A track that came back under a new id is named in `warnings` with what it lost. `scripts/trash_restore_roundtrip.py` checks every row of the design's §13 contract against the local dev stack.
 
