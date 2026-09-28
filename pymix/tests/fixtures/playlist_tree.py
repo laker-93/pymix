@@ -42,6 +42,9 @@ class FakeNavidrome:
         self.purged: set[str] = set()
         self.refuse_delete: set[str] = set()
         self.deleted: list[str] = []
+        # #229: every rename pymix made, in order.
+        self.renamed: list[tuple] = []
+        self.refuse_rename: set[str] = set()
         self._next = 0
 
     def add(self, name, owner='dj', readonly=False, songs=('x',)):
@@ -75,6 +78,13 @@ class FakeNavidrome:
 
     async def get_playlist_tracks(self, user, playlist_id):
         return [_track(s) for s in self.entries[playlist_id]]
+
+    async def rename_playlist(self, user, playlist_id, name):
+        if playlist_id in self.refuse_rename:
+            return False
+        self.renamed.append((playlist_id, name))
+        self.playlists[playlist_id].name = name
+        return True
 
     async def delete_playlist(self, user, playlist_id):
         if playlist_id in self.refuse_delete:

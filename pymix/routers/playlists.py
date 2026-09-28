@@ -2,9 +2,10 @@
 The playlist tree's routes (#201, #206; design-playlists-and-undo §4, §10).
 
 These are the structural verbs: read the tree, create a folder, create a playlist
-inside one, rename (folders), move and reorder a node, and delete (#207). The
-content verbs (rename a playlist, add, reorder or remove its tracks) stay client ->
-Navidrome: the tree is keyed by Navidrome id, not by name, so they don't disturb it.
+inside one, rename a node, move and reorder it, and delete (#207). A playlist's
+Navidrome name is written from the tree (#229, §18), so a rename comes here too. The
+content verbs (add, reorder or remove a playlist's tracks) stay client -> Navidrome:
+the tree is keyed by Navidrome id, so they don't disturb it.
 A delete's restore is `POST /trash/{id}/restore` (`routers/trash.py`).
 
 Every route is `require_uploader` (demo gets 403) and answers 409
@@ -135,18 +136,20 @@ async def update_node(
         tree: PlaylistTreeController = Depends(Provide[Container.playlist_tree_controller]),
 ) -> Dict[str, Any]:
     """
-    Rename a folder (`name`), move a node with its subtree (`parent_id`, null for the
-    root), reorder it among its siblings (`position`), or any of them at once.
+    Rename a node (`name`, a playlist's leaf too), move it with its subtree
+    (`parent_id`, null for the root), reorder it among its siblings (`position`), or
+    any of them at once. The Navidrome names of the playlists it touches are written
+    afterwards: the playlist's own, or for a `path` user every one under a renamed or
+    moved folder (#229).
 
     `position` is where the node ends up among its siblings, not counting itself,
     clamped to the end. On a move, absent means the end; without `parent_id`, it's a
     reorder under the current parent. Moving a node under the parent it already
     has, with no `position`, changes nothing.
 
-    A playlist is renamed through Navidrome, not here: 400. So is a move into the
-    node's own subtree, and a body with nothing in it. 404 for a node or parent that
-    isn't one of the user's live nodes. Returns the node; a playlist's `name` is
-    null, since it lives in Navidrome.
+    A blank name is 400. So is a move into the node's own subtree, and a body with
+    nothing in it. 404 for a node or parent that isn't one of the user's live nodes.
+    Returns the node, with its leaf name.
     """
     fields = request.model_fields_set
     if not fields & {'name', 'parent_id', 'position'}:

@@ -9,12 +9,15 @@ public API from letting anyone recreate any user's beets container.
 import logging
 import os
 import secrets
+from typing import Optional
 
 from dependency_injector.wiring import Provide, inject
 from fastapi import APIRouter, Depends, Header, HTTPException
+from pydantic import BaseModel
 
 from pymix.containers import Container
 from pymix.controllers.db_controller import DbController
+from pymix.controllers.playlist_tree_controller import PlaylistTreeController, TreeNotEnabled
 from pymix.orchestrators.services_orchestrator import ServicesOrchestrator
 from pymix.routers.auth import DEMO_USERNAME
 from pymix.utils import memdiag
@@ -179,3 +182,59 @@ async def playlist_tree_states(
     until that's zero. The migration that moved users to `live` (#205) is gone with it."""
     states = {u: db_controller.playlist_tree_state(u) for u in db_controller.usernames() if u != DEMO_USERNAME}
     return {'users': states, 'still_none': sum(s == 'none' for s in states.values())}
+
+
+class PlaylistNamesRequest(BaseModel):
+    # 'path' (full path, "Bass / House") or 'leaf' (own name only).
+    names: str
+    # One user, or every user but demo.
+    username: Optional[str] = None
+    all_users: bool = False
+    # Report the renames without making them or changing the user's style.
+    dry_run: bool = False
+
+
+@router.post("/playlists/names", dependencies=[Depends(require_admin_token)])
+@inject
+async def set_playlist_names(
+        request: PlaylistNamesRequest,
+        db_controller: DbController = Depends(Provide[Container.db_controller]),
+        tree: PlaylistTreeController = Depends(Provide[Container.playlist_tree_controller]),
+) -> dict:
+    """Name users' playlists in Navidrome by their full path or their leaf, and rename
+    them to match (#229, design-playlists-and-undo §18). It writes to each user's
+    Navidrome, so it runs only from here, deliberately. Idempotent, and reversible:
+    'leaf' puts back the names from before. A user's run that stops part way is
+    finished by their next tree read, or by running it again.
+
+    Per user: `{from, to, owed, renamed, failed, waiting}`, where `waiting` counts
+    playlists renamed outside pymix to a path elsewhere in the tree, left for #230.
+    """
+    if request.names not in ('path', 'leaf'):
+        raise HTTPException(status_code=400, detail="names is 'path' or 'leaf'")
+    if bool(request.username) == request.all_users:
+        raise HTTPException(status_code=400, detail="give exactly one of username and all_users")
+    if request.username == DEMO_USERNAME:
+        raise HTTPException(status_code=400, detail="demo has no playlist tree")
+    if request.all_users:
+        usernames = [u for u in db_controller.usernames() if u != DEMO_USERNAME]
+    else:
+        usernames = [request.username]
+    logger.info(f"admin: playlist names -> {request.names} for {len(usernames)} user(s), dry_run={request.dry_run}")
+    results = []
+    for username in usernames:
+        try:
+            user = db_controller.get_user(username)
+        except AssertionError:
+            raise HTTPException(status_code=404, detail=f"no such user: {username}")
+        try:
+            results.append(await tree.set_name_style(user, request.names, dry_run=request.dry_run))
+        except TreeNotEnabled:
+            results.append({'username': username, 'skipped': 'no playlist tree'})
+        except Exception as ex:
+            # One user's Navidrome being down doesn't stop the rest.
+            logger.exception(f"admin: playlist names for {username} failed")
+            results.append({'username': username, 'error': str(ex)})
+    if not request.all_users:
+        return results[0]
+    return {'users': results, 'failed': sum(1 for r in results if r.get('error') or r.get('failed'))}
