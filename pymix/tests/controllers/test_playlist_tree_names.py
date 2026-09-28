@@ -79,6 +79,7 @@ async def test_everyone_starts_on_leaf_names_and_nothing_is_renamed(tree, navidr
 
     assert _names(navidrome) == ['Deep', 'Loose', 'Warm']
     assert navidrome.renamed == []
+    assert (await tree.get_tree(USER))['playlist_names'] == 'leaf'
 
 
 @pytest.mark.anyio
@@ -100,6 +101,8 @@ async def test_the_admin_pass_names_every_playlist_by_its_path_and_back(tree, na
     assert await _outline(tree) == [
         ('House', 'folder'), ('  Deep Stuff', 'folder'), ('    Warm', 'playlist'), ('  Deep', 'playlist'),
         ('Loose', 'playlist')]
+
+    assert (await tree.get_tree(USER))['playlist_names'] == 'path'
 
     back = await tree.set_name_style(USER, 'leaf')
     assert back['renamed'] == 2

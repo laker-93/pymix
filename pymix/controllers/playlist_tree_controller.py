@@ -113,7 +113,8 @@ class PlaylistTreeController:
         """
         GET /playlists/tree: reconcile, then the live nodes in tree order and the
         Navidrome ids of the hidden (trashed) playlists, which the client leaves out
-        of its lists. A node's `name` is its own, never the path Navidrome may show.
+        of its lists. A node's `name` is its own, never the path Navidrome may show;
+        `playlist_names` says whether it shows one.
 
         Any Navidrome name the tree still owes -- a write that stopped part way -- is
         written here too: after the one getPlaylists it costs nothing when there's
@@ -127,6 +128,7 @@ class PlaylistTreeController:
             await self._sync_names(user, user_id, owned=playlists)
             with self._sessions() as session:
                 rows = session.query(PlaylistNodeRow).filter(PlaylistNodeRow.user_id == user_id).all()
+                style = self._name_style(session, user_id)
         live = [r for r in rows if r.trash_batch_id is None]
         child_count: Dict[Optional[str], int] = {}
         for row in live:
@@ -144,6 +146,9 @@ class PlaylistTreeController:
                 }
                 for r in self._tree_order(live)
             ],
+            # How Navidrome names the playlists (#229): with 'path', a name read from
+            # getPlaylists already carries its folders.
+            'playlist_names': style,
             'hidden_playlist_ids': sorted(
                 r.navidrome_playlist_id for r in rows if r.trash_batch_id is not None and r.navidrome_playlist_id
             ),
