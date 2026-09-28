@@ -9,7 +9,7 @@ from unittest import mock
 
 import pytest
 from pyrekordbox.rbxml import RekordboxXml
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -17,7 +17,7 @@ from pymix.controllers.db_controller import DbController
 from pymix.controllers.playlist_tree_controller import PlaylistTreeController
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.controllers.serato_controller import SeratoController
-from pymix.model.db_tables import Base, PlaylistNodeRow, UserRow
+from pymix.model.db_tables import Base, PlaylistNodeRow, TrashBatchRow, UserRow
 from pymix.model.subboxplaylist import SubBoxPlaylist
 from pymix.model.subboxtrack import SubBoxTrack
 from pymix.orchestrators.subsonic_orchestrator import SubsonicOrchestrator
@@ -103,6 +103,9 @@ class FakeNavidrome:
 @pytest.fixture
 def sessions():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    # Postgres enforces foreign keys and SQLite doesn't unless told to: without this a
+    # flush that writes a child before its parent passes here and fails in production.
+    event.listen(engine, 'connect', lambda conn, _: conn.execute('PRAGMA foreign_keys=ON'))
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
     with factory() as session:
@@ -110,6 +113,14 @@ def sessions():
                             beets_port=1, subsonic_port=2, max_library_size=0))
         session.commit()
     return factory
+
+
+def add_batch(session, batch_id='batch-1', user_id='user-1'):
+    """A bare `nodes` batch, for a test that trashes a node by hand: the node's
+    trash_batch_id is a foreign key, so the batch has to exist."""
+    session.add(TrashBatchRow(batch_id=batch_id, user_id=user_id, kind='nodes', label='test',
+                              bytes=0, created_at=0.0, expires_at=0.0))
+    session.flush()
 
 
 @pytest.fixture

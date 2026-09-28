@@ -410,6 +410,10 @@ class PlaylistTreeController:
                 session.add(TrashBatchRow(batch_id=batch_id, user_id=user_id, kind=TrashKind.NODES.value,
                                           label=label, bytes=0, created_at=now,
                                           expires_at=now + self._retention_s))
+                # The nodes' trash_batch_id is a foreign key with no relationship(), so
+                # the unit of work doesn't know to INSERT the batch before it UPDATEs
+                # the nodes. Postgres refuses the other order.
+                session.flush()
                 for row in rows.values():
                     session.add(TrashItemRow(
                         batch_id=batch_id, user_id=user_id, kind=TrashKind.NODES.value,
