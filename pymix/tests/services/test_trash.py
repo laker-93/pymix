@@ -496,10 +496,20 @@ class FakeScanner:
     def __init__(self, finishes=True):
         self.finishes = finishes
         self.calls = 0
+        # The targets of each scan_and_wait (a restore) and each scan (a delete).
+        self.waited_on = []
+        self.scanned = []
+        self.scan_fails = False
 
-    async def scan_and_wait(self, user):
+    async def scan_and_wait(self, user, targets=None):
         self.calls += 1
+        self.waited_on.append(targets)
         return self.finishes
+
+    async def scan(self, user, targets=None):
+        if self.scan_fails:
+            raise AssertionError('startScan refused')
+        self.scanned.append(targets)
 
 
 @pytest.fixture
@@ -722,3 +732,55 @@ async def test_undoing_a_delete_keeps_the_track_in_its_playlist(restorer, db_con
     assert not outcome.warnings
     live = [r['id'] for r in native.rows.values() if not r['missing']]
     assert playlist_entries[0] in live
+
+
+# --- telling Navidrome (targeted scans) ---------------------------------------------
+
+@pytest.mark.anyio
+async def test_a_delete_scans_only_the_folders_it_emptied(
+        restorer, db_controller, beets, native, library_base, scanner):
+    """Nothing else tells Navidrome: with scheduled scans off and no watcher event,
+    the tracks stayed listed for 80s+ on the dev stack."""
+    for subbox_id, relative in (('a', 'Artist/Album/01 a.mp3'), ('b', 'Artist/Album/02 b.mp3'),
+                                ('c', 'Other/EP/01 c.mp3')):
+        _track(db_controller, beets, native, library_base, subbox_id, relative, media_id=f'mf-{subbox_id}')
+
+    outcome = await restorer.trash_tracks('dj', ['a', 'b', 'c'])
+
+    assert outcome.removed == {'a', 'b', 'c'}
+    # One scan, of each album folder once, even though both were pruned away.
+    assert scanner.scanned == [['1:Artist/Album', '1:Other/EP']]
+    assert not (library_base / 'dj' / 'Artist/Album').exists()
+
+
+@pytest.mark.anyio
+async def test_a_delete_that_moved_nothing_scans_nothing(restorer, scanner):
+    outcome = await restorer.trash_tracks('dj', ['not-in-beets'])
+
+    assert outcome.batch_id is None
+    assert scanner.scanned == []
+
+
+@pytest.mark.anyio
+async def test_a_scan_that_fails_does_not_fail_the_delete(
+        restorer, db_controller, beets, native, library_base, scanner):
+    scanner.scan_fails = True
+    _track(db_controller, beets, native, library_base, 'a', 'Artist/Album/01 a.mp3', media_id='mf-a')
+
+    outcome = await restorer.trash_tracks('dj', ['a'])
+
+    assert outcome.removed == {'a'} and outcome.batch_id is not None
+    assert [i['state'] for i in db_controller.get_trash_batch(outcome.batch_id)['items']] == ['restorable']
+
+
+@pytest.mark.anyio
+async def test_a_restore_waits_on_a_scan_of_just_its_folders(
+        restorer, db_controller, beets, native, library_base, scanner):
+    batch_id = await _deleted(restorer, db_controller, beets, native, library_base,
+                              ('a', 'Artist/Album/01 a.mp3'), ('b', 'Other/EP/01 b.mp3'))
+    _navidrome_sees_it_back(native, 'Artist/Album/01 a.mp3')
+    _navidrome_sees_it_back(native, 'Other/EP/01 b.mp3')
+
+    await restorer.restore_tracks(batch_id, 'dj', _reporter())
+
+    assert scanner.waited_on == [['1:Artist/Album', '1:Other/EP']]

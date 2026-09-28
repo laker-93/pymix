@@ -127,3 +127,29 @@ async def test_still_triggers_the_scan_when_the_baseline_read_fails():
 
     assert await orchestrator.scan_and_wait(USER, poll_interval_s=0) is True
     client.scan.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_a_targeted_scan_is_waited_on_like_a_full_one():
+    # A targeted scan moves lastScan on as a full scan does (measured on 0.60.3).
+    orchestrator, client = _orchestrator([_status(False, 0, "T0"), _status(False, 99, "T1")])
+
+    assert await orchestrator.scan_and_wait(USER, poll_interval_s=0, targets=["1:A/EP"]) is True
+    client.scan.assert_awaited_once_with(USER, targets=["1:A/EP"])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("refusal", [mock.AsyncMock(return_value=False),
+                                     mock.AsyncMock(side_effect=RuntimeError("Library with ID 1 not found"))])
+async def test_a_refused_target_falls_back_to_a_full_scan(refusal):
+    orchestrator, client = _orchestrator([_status(False, 0, "T0")])
+    full = mock.AsyncMock(return_value=True)
+
+    async def scan(user, targets=None):
+        return await (refusal(user, targets=targets) if targets else full(user))
+
+    client.scan = mock.AsyncMock(side_effect=scan)
+
+    await orchestrator.scan(USER, targets=["1:A/EP"])
+
+    full.assert_awaited_once_with(USER)
