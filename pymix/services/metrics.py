@@ -396,14 +396,22 @@ def playlist_nodes_orphaned(n: int) -> None:
 playlists_renamed_outside_total = Counter(
     "pymix_playlists_renamed_outside_total",
     "Playlists renamed outside pymix (a third-party Subsonic client, an old subbox-app) "
-    "whose new name reconciliation took into the tree (#229). Expected to keep rising "
-    "for users of mobile clients; a jump for one user is worth a look.",
+    "whose new name reconciliation took into the tree. `outcome` is `renamed` (a new "
+    "leaf in the same place, #229), `moved` (a path elsewhere, #230) or `refused` (a "
+    "path into its own subtree, or with an empty name: rewritten from the tree). "
+    "Expected to keep rising for users of mobile clients; a jump for one user is "
+    "worth a look.",
+    ["outcome"],
     registry=REGISTRY,
 )
+RENAMED_OUTSIDE_OUTCOMES = ("renamed", "moved", "refused")
+for _outcome in RENAMED_OUTSIDE_OUTCOMES:
+    playlists_renamed_outside_total.labels(outcome=_outcome)
 
 
-def playlists_renamed_outside(n: int) -> None:
-    playlists_renamed_outside_total.inc(n)
+def playlists_renamed_outside(outcome: str, n: int) -> None:
+    if outcome in RENAMED_OUTSIDE_OUTCOMES:
+        playlists_renamed_outside_total.labels(outcome=outcome).inc(n)
 
 
 def trash_batch_created(kind: str) -> None:

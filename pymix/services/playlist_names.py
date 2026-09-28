@@ -35,6 +35,11 @@ def join(names: List[str]) -> str:
     return SEPARATOR.join(escape(n) for n in names)
 
 
+def split(navidrome_name: str) -> List[str]:
+    """The names a path was joined from, root first (#230)."""
+    return [unescape(n) for n in navidrome_name.split(SEPARATOR)]
+
+
 def leaf_under(navidrome_name: str, prefix: List[str]) -> Optional[str]:
     """
     The one name ``navidrome_name`` gives a node under ``prefix``, or None if it says
@@ -43,7 +48,7 @@ def leaf_under(navidrome_name: str, prefix: List[str]) -> Optional[str]:
     "UK / Deep House" under ["UK"] is "Deep House". A bare "Deep House", with no
     separator, is also "Deep House", wherever the node is: that's what a client that
     only knows the leaf writes (upstream Feishin's edit modal). "Bass / House" under
-    ["UK"] is None: a move, which #230 reads.
+    ["UK"] is None: a move, which `split` reads (#230).
     """
     if SEPARATOR not in navidrome_name:
         return unescape(navidrome_name)

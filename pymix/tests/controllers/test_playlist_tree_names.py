@@ -17,6 +17,10 @@ from pymix.tests.fixtures.playlist_tree import (  # noqa: F401 (fixtures)
 )
 
 
+def _outside(outcome):
+    return metrics.playlists_renamed_outside_total.labels(outcome=outcome)._value.get()
+
+
 def _names(navidrome):
     return sorted(p.name for p in navidrome.playlists.values())
 
@@ -75,6 +79,7 @@ async def test_everyone_starts_on_leaf_names_and_nothing_is_renamed(tree, navidr
 
     assert _names(navidrome) == ['Deep', 'Loose', 'Warm']
     assert navidrome.renamed == []
+    assert (await tree.get_tree(USER))['playlist_names'] == 'leaf'
 
 
 @pytest.mark.anyio
@@ -96,6 +101,8 @@ async def test_the_admin_pass_names_every_playlist_by_its_path_and_back(tree, na
     assert await _outline(tree) == [
         ('House', 'folder'), ('  Deep Stuff', 'folder'), ('    Warm', 'playlist'), ('  Deep', 'playlist'),
         ('Loose', 'playlist')]
+
+    assert (await tree.get_tree(USER))['playlist_names'] == 'path'
 
     back = await tree.set_name_style(USER, 'leaf')
     assert back['renamed'] == 2
@@ -189,12 +196,12 @@ async def test_a_rename_written_but_never_committed_is_recognised_as_pymixs_own(
         session.query(PlaylistNodeRow).filter(PlaylistNodeRow.node_id == house['node_id']).update({'name': 'Bass'})
         session.commit()
     navidrome.playlists[deep['navidrome_playlist_id']].name = 'Bass / Deep'
-    outside = metrics.playlists_renamed_outside_total._value.get()
+    outside = [_outside(k) for k in ('renamed', 'moved', 'refused')]
 
     await tree.get_tree(USER)
 
     assert _row(sessions, deep['navidrome_playlist_id']).navidrome_name == 'Bass / Deep'
-    assert metrics.playlists_renamed_outside_total._value.get() == outside
+    assert [_outside(k) for k in ('renamed', 'moved', 'refused')] == outside
     assert _names(navidrome) == ['Bass / Deep', 'Bass / Deep Stuff / Warm', 'Loose']
 
 
@@ -240,11 +247,11 @@ async def test_a_bare_name_from_an_old_client_renames_the_leaf_in_place(tree, na
     await _to_path(tree)
     # Upstream Feishin's edit modal only knows the leaf.
     navidrome.playlists[deep['navidrome_playlist_id']].name = 'Deeper'
-    outside = metrics.playlists_renamed_outside_total._value.get()
+    outside = _outside('renamed')
 
     body = await tree.get_tree(USER)
 
-    assert metrics.playlists_renamed_outside_total._value.get() == outside + 1
+    assert _outside('renamed') == outside + 1
 
     assert [n['name'] for n in body['nodes'] if n['node_id'] == deep['node_id']] == ['Deeper']
     assert navidrome.playlists[deep['navidrome_playlist_id']].name == 'House / Deeper'
@@ -261,34 +268,117 @@ async def test_a_new_leaf_under_the_same_path_renames_the_leaf(tree, navidrome):
     assert navidrome.renamed == before
 
 
+# --- moves made outside pymix (#230) ----------------------------------------------------------
+
 @pytest.mark.anyio
-async def test_a_path_elsewhere_is_left_alone_for_230(tree, navidrome, sessions):
+async def test_a_path_elsewhere_moves_the_playlist_there_creating_the_folder(tree, navidrome, sessions):
     house, stuff, deep, warm, loose = await _house_deep(tree)
     await _to_path(tree)
-    navidrome.playlists[deep['navidrome_playlist_id']].name = 'Bass / Deep'
-    before = list(navidrome.renamed)
+    navidrome.playlists[deep['navidrome_playlist_id']].name = 'Bass / Deeper'
+    moved = _outside('moved')
 
     await tree.get_tree(USER)
-    # Not even by a rename of the folder it's still in.
-    await tree.update_node(USER, house['node_id'], name='Garage')
 
-    assert navidrome.playlists[deep['navidrome_playlist_id']].name == 'Bass / Deep'
-    assert [r for r in navidrome.renamed[len(before):] if r[0] == deep['navidrome_playlist_id']] == []
-    assert (await _to_path(tree))['waiting'] == 1
-    # Nothing in the tree moved, and its leaf is unchanged.
-    assert ('  Deep', 'playlist') in await _outline(tree)
+    assert await _outline(tree) == [
+        ('House', 'folder'), ('  Deep Stuff', 'folder'), ('    Warm', 'playlist'),
+        ('Loose', 'playlist'), ('Bass', 'folder'), ('  Deeper', 'playlist')]
+    assert _outside('moved') == moved + 1
+    with sessions() as session:
+        bass = session.query(PlaylistNodeRow).filter(PlaylistNodeRow.name == 'Bass').one()
+        assert (bass.kind, bass.origin, bass.source_path) == ('folder', 'subbox', None)
+    # Already the name the tree gives it: nothing to write back.
+    assert navidrome.playlists[deep['navidrome_playlist_id']].name == 'Bass / Deeper'
 
 
 @pytest.mark.anyio
-async def test_a_playlist_made_with_a_path_elsewhere_is_adopted_but_not_renamed(tree, navidrome):
+async def test_a_path_to_an_existing_folder_moves_it_to_the_end_of_that_folder(tree, navidrome):
+    house, stuff, deep, warm, loose = await _house_deep(tree)
+    await _to_path(tree)
+    navidrome.playlists[loose['navidrome_playlist_id']].name = 'House / Deep Stuff / Loose'
+
+    assert await _outline(tree) == [
+        ('House', 'folder'), ('  Deep Stuff', 'folder'), ('    Warm', 'playlist'), ('    Loose', 'playlist'),
+        ('  Deep', 'playlist')]
+
+
+@pytest.mark.anyio
+async def test_an_escaped_slash_is_one_name_renamed_in_place(tree, navidrome):
+    house, stuff, deep, warm, loose = await _house_deep(tree)
+    await _to_path(tree)
+    # No separator, so a bare name: a leaf rename where it is, not a folder "Drum".
+    # A move to the root can't be written from outside (design §18.5).
+    navidrome.playlists[warm['navidrome_playlist_id']].name = 'Drum \u2215 Bass'
+
+    outline = await _outline(tree)
+
+    assert ('    Drum / Bass', 'playlist') in outline and ('Drum', 'folder') not in outline
+    assert navidrome.playlists[warm['navidrome_playlist_id']].name == 'House / Deep Stuff / Drum \u2215 Bass'
+
+
+@pytest.mark.anyio
+async def test_a_playlist_made_with_a_path_is_adopted_along_it(tree, navidrome):
+    await _house_deep(tree)
     await _to_path(tree)
     garage = navidrome.add('UK / Garage')
 
     await tree.get_tree(USER)
-    await tree.get_tree(USER)
+    again = await _outline(tree)
 
+    assert again[-2:] == [('UK', 'folder'), ('  Garage', 'playlist')]
     assert navidrome.playlists[garage].name == 'UK / Garage'
-    assert await _outline(tree) == [('UK / Garage', 'playlist')]
+
+
+@pytest.mark.anyio
+async def test_a_path_resolves_through_a_crate_with_sub_crates(tree, navidrome):
+    await _import(tree, _incoming('Crate'), _incoming('Crate', 'Sub'), origin='serato')
+    loose = await tree.create_playlist(USER, 'Loose')
+    await _to_path(tree)
+    navidrome.playlists[loose['navidrome_playlist_id']].name = 'Crate / Loose'
+
+    assert await _outline(tree) == [('Crate', 'playlist'), ('  Sub', 'playlist'), ('  Loose', 'playlist')]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('name', ['Crate / Sub / Crate', 'Crate / Crate', ' / Crate', 'Somewhere /  '])
+async def test_a_path_into_its_own_subtree_or_with_an_empty_name_is_refused(tree, navidrome, name):
+    await _import(tree, _incoming('Crate'), _incoming('Crate', 'Sub'), origin='serato')
+    await _to_path(tree)
+    [crate] = [pid for pid, p in navidrome.playlists.items() if p.name == 'Crate']
+    navidrome.playlists[crate].name = name
+    refused = _outside('refused')
+
+    outline = await _outline(tree)
+
+    assert outline == [('Crate', 'playlist'), ('  Sub', 'playlist')]
+    assert _outside('refused') == refused + 1
+    # Written back from the tree, and nothing created.
+    assert navidrome.playlists[crate].name == 'Crate'
+
+
+@pytest.mark.anyio
+async def test_a_hidden_playlist_renamed_outside_is_not_moved(tree, navidrome):
+    house, stuff, deep, warm, loose = await _house_deep(tree)
+    await _to_path(tree)
+    await tree.delete_nodes(USER, [deep['node_id']])
+    navidrome.playlists[deep['navidrome_playlist_id']].name = 'Bass / Deep'
+
+    assert ('Bass', 'folder') not in await _outline(tree)
+
+
+@pytest.mark.anyio
+async def test_a_move_empties_a_folder_and_the_folder_stays(tree, navidrome):
+    house, stuff, deep, warm, loose = await _house_deep(tree)
+    await _to_path(tree)
+    navidrome.playlists[warm['navidrome_playlist_id']].name = 'Warm'
+    navidrome.playlists[deep['navidrome_playlist_id']].name = 'Deep'
+
+    # Bare names are leaf renames in place (#229), not moves to the root.
+    assert await _outline(tree) == [
+        ('House', 'folder'), ('  Deep Stuff', 'folder'), ('    Warm', 'playlist'), ('  Deep', 'playlist'),
+        ('Loose', 'playlist')]
+    navidrome.playlists[warm['navidrome_playlist_id']].name = 'House / Warm'
+    outline = await _outline(tree)
+    assert ('  Deep Stuff', 'folder') in outline and ('  Warm', 'playlist') in outline
 
 
 @pytest.mark.anyio
