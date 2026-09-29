@@ -116,6 +116,15 @@ _TRASH_STATES_ON_DISK = ('pending', 'restorable', 'expired', 'restoring')
 _TRASH_STATES_PURGEABLE = ('restorable', 'expired')
 
 
+# The job_table name, and its one phase, of a /sync/map_meta job (#237).
+MAP_META_JOB = 'map_meta'
+MAP_META_PHASE = 'tagging'
+# The map_meta job runs beside the user's import/export/restore job, so the
+# helpers that assume one job per user must not see it. `name` is null on rows
+# written before names were set, hence the explicit null check.
+_NOT_MAP_META = (JobRow.name.is_(None)) | (JobRow.name != MAP_META_JOB)
+
+
 def _row_to_dict(row, exclude=('id',)):
     return {c.key: getattr(row, c.key) for c in row.__table__.columns if c.key not in exclude}
 
@@ -626,6 +635,60 @@ class DbController:
         metrics.job_started(job_id, 'export')
         return job_id
 
+    def create_map_meta_job(self, username: str, n_tracks: int) -> str:
+        """
+        A job row for /sync/map_meta tagging an upload's files (#237). It runs
+        alongside the user's other jobs rather than instead of them -- the watch
+        dir can be importing while an upload is tagged -- so the one-job-per-user
+        helpers (get_number_of_jobs, get_in_progress_job) leave it out.
+        """
+        user_id = self.get_user(username)['user_id']
+        job_id = uuid.uuid4().hex
+        self._add_user_job(user_id, job_id)
+        with self._session_factory() as session:
+            session.add(JobRow(
+                job_id=job_id, name=MAP_META_JOB, in_progress=True, result=None,
+                phase=MAP_META_PHASE, phase_n_processed=0, phase_n_total=n_tracks,
+            ))
+            session.commit()
+        metrics.job_started(job_id, MAP_META_JOB)
+        return job_id
+
+    def get_in_progress_map_meta_job(self, username: str) -> Optional[dict]:
+        """The user's map_meta job still tagging, if there is one."""
+        user_id = self.get_user(username)['user_id']
+        with self._session_factory() as session:
+            job = session.query(JobRow).join(
+                UserJobRow, UserJobRow.job_id == JobRow.job_id,
+            ).filter(
+                UserJobRow.user_id == user_id,
+                JobRow.name == MAP_META_JOB,
+                JobRow.in_progress.is_(True),
+            ).first()
+            return _row_to_dict(job) if job else None
+
+    def set_job_detail(self, job_id: str, detail: Optional[dict]) -> None:
+        with self._session_factory() as session:
+            session.query(JobRow).filter(JobRow.job_id == job_id).update({'detail': detail})
+            session.commit()
+
+    def fail_interrupted_map_meta_jobs(self) -> int:
+        """
+        Fail every map_meta job still marked running. Called at startup: pymix is
+        one process, so any such job died with the last one. Left running, it
+        would refuse the user's import for ever.
+        """
+        with self._session_factory() as session:
+            n = session.query(JobRow).filter(
+                JobRow.name == MAP_META_JOB, JobRow.in_progress.is_(True),
+            ).update({
+                'in_progress': False,
+                'result': False,
+                'reason': 'pymix restarted while tagging the upload; upload again to finish it',
+            })
+            session.commit()
+            return n
+
     def get_job_by_id(self, username: str, job_id: str) -> dict:
         user = self.get_user(username)
         user_id = user['user_id']
@@ -657,6 +720,7 @@ class DbController:
                 count = session.query(JobRow).filter(
                     JobRow.job_id == uj.job_id,
                     JobRow.in_progress == in_progress,
+                    _NOT_MAP_META,
                 ).count()
                 assert count <= 1, f'have {count} in progress? {in_progress} jobs for user {user_id}'
                 n_in_progress_jobs += count
@@ -676,6 +740,7 @@ class DbController:
                 job = session.query(JobRow).filter(
                     JobRow.job_id == uj.job_id,
                     JobRow.in_progress == True,
+                    _NOT_MAP_META,
                 ).first()
                 if job:
                     return _row_to_dict(job)

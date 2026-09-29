@@ -92,6 +92,11 @@ this, a failed upload's untagged files were imported by the next attempt; see
 (the client stopped in between) leaves an attempt the next import will pick up.
 Those files are tagged and were asked for, so the subbox_id invariant holds.
 
+map_meta is a job (#237): the attempt is recorded when its tagging finishes, and
+both imports 409 until then, so the client polls `/sync/map_meta/progress` before
+it imports. A map_meta job is left out of the one-job-per-user helpers
+(`get_number_of_jobs`, `get_in_progress_job`): it can run beside a watch-dir import.
+
 Progress polled via `/beets/import/progress`. An import is **three** phases, not one
 (`ImportPhase` in `services/import_progress.py`): `importing_audio` (step 3's `beet
 import`), `mapping_ids` (the subbox_id↔beet map), `applying_metadata` (step 5's BPM +

@@ -107,6 +107,10 @@ async def lifespan(app: FastAPI, container):
     send_stream, receive_stream = create_memory_object_stream[str]()
 
     db_controller = container.db_controller()
+    # A map_meta job still marked running died with the last process (#237).
+    n_interrupted = db_controller.fail_interrupted_map_meta_jobs()
+    if n_interrupted:
+        logger.warning(f'failed {n_interrupted} map_meta job(s) interrupted by a restart')
     rb_xml_controller = await container.rekordbox_xml_controller()
     user_root = Path(container.config()['containers']['filebrowser']['user_root'])
     watchdir_template = container.config()['containers']['filebrowser']['data_watch']

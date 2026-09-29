@@ -13,10 +13,13 @@ map_meta and run_import_task. Only the import controllers are mocked: what they
 are handed is the thing under test.
 """
 import shutil
+import time
 from pathlib import Path
 from unittest import mock
 
+import anyio
 import pytest
+from fastapi import BackgroundTasks, HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -28,7 +31,7 @@ from pymix.model.db_tables import Base, UserRow
 from pymix.model.original_track_meta import OriginalTrackMeta, OriginalTracks, UploadAttempt
 from pymix.model.playlist_write_report import PlaylistWriteReport
 from pymix.routers import rb_import_export, serato_import_export
-from pymix.routers.sync import map_meta
+from pymix.routers.sync import map_meta, map_meta_progress, run_map_meta_job
 from pymix.services.import_progress import ImportPhase
 from pymix.services.job_outcome import JobOutcome, Verdict, with_warning
 from pymix.utils.tag_subbox_id import get_subbox_id, tag_subbox_id
@@ -100,7 +103,13 @@ async def _map_meta(db, handler, *staging_locations: str):
         )
         for loc in staging_locations
     ])
-    return await map_meta(tracks=tracks, user=USER, db_controller=db, fb_file_handler=handler)
+    tasks = BackgroundTasks()
+    response = await map_meta(
+        tracks=tracks, background_tasks=tasks, user=USER, db_controller=db, fb_file_handler=handler,
+    )
+    # The route only starts the job (#237): run it to the end, as the server would.
+    await tasks()
+    return db.get_job_by_id('dj', response['job_id'])
 
 
 def _files_in(directory: Path) -> set[str]:
@@ -392,6 +401,136 @@ async def test_a_new_map_meta_replaces_the_previous_attempt(db, handler, uploads
     await _map_meta(db, handler, 'New Artist/Set 1/Opener.mp3')
 
     assert list(db.get_upload_attempt('dj').files) == ['New Artist/Set 1/Opener.mp3']
+
+
+@pytest.mark.anyio
+async def test_map_meta_answers_before_tagging_and_the_job_reports_the_outcome(db, handler, uploads):
+    # #237: tagging a large upload in the request outlived Cloudflare's 100s.
+    opener = _mp3(uploads / 'New Artist' / 'Set 1' / 'Opener.mp3')
+    tracks = OriginalTracks(tracks=[OriginalTrackMeta(
+        userLocation='/Users/dj/Music/Opener.mp3', stagingLocation='New Artist/Set 1/Opener.mp3',
+        originalName='Opener', originalArtist='New Artist',
+    )])
+    tasks = BackgroundTasks()
+
+    response = await map_meta(tracks=tracks, background_tasks=tasks, user=USER, db_controller=db, fb_file_handler=handler)
+
+    assert response['n_tracks'] == 1
+    assert get_subbox_id(opener) is None, 'the request must not tag anything itself'
+    running = await map_meta_progress(job_id=response['job_id'], user=USER, db_controller=db)
+    assert running['in_progress'] is True and running['n_tracks'] == 1
+
+    await tasks()
+
+    done = await map_meta_progress(job_id=response['job_id'], user=USER, db_controller=db)
+    assert done['in_progress'] is False and done['result'] is True and done['detail'] is None
+    assert done['n_tracks_processed'] == 1
+    assert db.get_upload_attempt('dj').files == {'New Artist/Set 1/Opener.mp3': get_subbox_id(opener)}
+
+
+@pytest.mark.anyio
+async def test_a_map_meta_job_that_could_not_tag_everything_says_which(db, handler, uploads):
+    _mp3(uploads / 'New Artist' / 'Set 1' / 'Opener.mp3')
+
+    job = await _map_meta(db, handler, 'New Artist/Set 1/Opener.mp3', 'New Artist/Set 1/Never Uploaded.mp3')
+
+    assert job['in_progress'] is False and job['result'] is False
+    assert job['detail']['untagged_count'] == 1
+    assert job['detail']['untagged_tracks'][0]['stagingLocation'] == 'New Artist/Set 1/Never Uploaded.mp3'
+    # As before: what was tagged is still the attempt, for a metadata-only retry.
+    assert list(db.get_upload_attempt('dj').files) == ['New Artist/Set 1/Opener.mp3']
+
+
+@pytest.mark.anyio
+async def test_map_meta_tags_the_file_at_the_staging_location_and_no_other(db, handler, uploads):
+    # The substring match gave `Koze/...` the id of `DJ Koze/...`'s file (#237).
+    dj_koze = _mp3(uploads / 'DJ Koze' / 'Album' / 'T.mp3')
+    koze = _mp3(uploads / 'Koze' / 'Album' / 'T.mp3')
+
+    await _map_meta(db, handler, 'Koze/Album/T.mp3')
+
+    assert get_subbox_id(dj_koze) is None
+    assert db.get_upload_attempt('dj').files == {'Koze/Album/T.mp3': get_subbox_id(koze)}
+
+
+@pytest.mark.anyio
+async def test_map_meta_never_follows_a_staging_location_out_of_the_users_uploads(db, handler, uploads):
+    theirs = _mp3(uploads.parent / 'someone-else' / 'T.mp3')
+
+    job = await _map_meta(db, handler, '../someone-else/T.mp3')
+
+    assert get_subbox_id(theirs) is None
+    assert job['result'] is False
+    assert db.get_upload_attempt('dj').files == {}
+
+
+@pytest.mark.anyio
+async def test_map_meta_tags_off_the_event_loop(db, uploads):
+    # All of pymix, for every user, stalled for the whole of a large tagging run.
+    def slow_tagging(user, tracks, on_progress=None):
+        time.sleep(0.3)
+        return {'staged': {}}
+    slow_handler = mock.Mock()
+    slow_handler.tag_staging_with_subbox_id = slow_tagging
+    job_id = db.create_map_meta_job('dj', 0)
+    ticks = 0
+
+    async def tick():
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await anyio.sleep(0.01)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(tick)
+        await run_map_meta_job(db, slow_handler, 'dj', OriginalTracks(tracks=[]), job_id)
+        tg.cancel_scope.cancel()
+
+    assert ticks > 10
+
+
+@pytest.mark.anyio
+async def test_the_import_refuses_while_map_meta_is_still_tagging(db):
+    db.create_map_meta_job('dj', 5)
+
+    for route in (rb_import_export.rekordbox_import, serato_import_export.serato_import):
+        with pytest.raises(HTTPException) as refused:
+            await route(
+                request=mock.Mock(), background_tasks=BackgroundTasks(), user=USER, beets_client=mock.Mock(),
+                fb_file_handler=mock.Mock(), db_controller=db, config={}, trash_service=mock.Mock(),
+                **({'rekordbox_xml_controller': mock.Mock()} if route is rb_import_export.rekordbox_import
+                   else {'serato_controller': mock.Mock()}),
+            )
+        assert refused.value.status_code == 409
+
+
+@pytest.mark.anyio
+async def test_a_second_map_meta_waits_for_the_first(db, handler):
+    db.create_map_meta_job('dj', 5)
+
+    with pytest.raises(HTTPException) as refused:
+        await map_meta(tracks=OriginalTracks(tracks=[]), background_tasks=BackgroundTasks(),
+                       user=USER, db_controller=db, fb_file_handler=handler)
+
+    assert refused.value.status_code == 409
+
+
+def test_a_map_meta_job_is_not_the_users_one_job(db):
+    # The watch dir can be importing while an upload is tagged: the one-job
+    # helpers (export progress, trash restore) must not trip over it.
+    db.create_map_meta_job('dj', 5)
+
+    assert db.get_number_of_jobs('dj', in_progress=True) == 0
+
+
+def test_a_restart_fails_the_map_meta_job_it_interrupted(db):
+    job_id = db.create_map_meta_job('dj', 5)
+
+    assert db.fail_interrupted_map_meta_jobs() == 1
+
+    job = db.get_job_by_id('dj', job_id)
+    assert job['in_progress'] is False and job['result'] is False and 'restarted' in job['reason']
+    assert db.get_in_progress_map_meta_job('dj') is None
 
 
 def test_clearing_an_attempt_leaves_one_recorded_after_it_was_read(db):
