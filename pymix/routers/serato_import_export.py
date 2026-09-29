@@ -3,7 +3,7 @@ from typing import Dict, Optional
 
 import anyio
 from dependency_injector.wiring import Provide, inject
-from fastapi import APIRouter, Depends, BackgroundTasks
+from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException
 
 from pymix.clients.beets_client import BeetsClient
 from pymix.containers import Container
@@ -40,6 +40,10 @@ async def serato_import(
     total_n_tracks_for_import = 0
     username = user['username']
 
+    # The attempt is only recorded when map_meta's tagging finishes (#237):
+    # reading it before then would import the previous attempt's files, or none.
+    if db_controller.get_in_progress_map_meta_job(username):
+        raise HTTPException(status_code=409, detail='still tagging the upload; import when map_meta has finished')
     # Only what this attempt's /sync/map_meta tagged is imported, and so only
     # that is counted and checked against the quota (#38).
     attempt = db_controller.get_upload_attempt(username)

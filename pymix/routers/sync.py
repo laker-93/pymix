@@ -1,23 +1,26 @@
 import asyncio
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Dict, Annotated, List, Tuple, Optional
 
+import anyio
 from dependency_injector.wiring import Provide, inject
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, HTTPException
 from fastapi.responses import FileResponse
 from anyio import to_process
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from pymix.clients.beets_client import BeetsClient
 from pymix.clients.subsonic_client import SubsonicClient
 from pymix.containers import Container
-from pymix.controllers.db_controller import DbController
+from pymix.controllers.db_controller import DbController, MAP_META_JOB, MAP_META_PHASE
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.handlers.filebrowser_file_handler import FileBrowserFileHandler
 from pymix.model.original_track_meta import OriginalTracks
 from pymix.routers.auth import require_reader, require_uploader
+from pymix.services.import_progress import failure_reason
 from pymix.services.track_matcher import TrackMatcher
 
 router = APIRouter()
@@ -122,50 +125,157 @@ def _resolve_local_track_for_matching(local_track: Track) -> tuple[str, str]:
             return parsed_title, parsed_artist
     return local_track.title, local_track.artist
 
-@router.post("/sync/map_meta", tags=["sync"])
+@router.post("/sync/map_meta", tags=["sync"], status_code=202)
 @inject
 async def map_meta(
         tracks: OriginalTracks,
+        background_tasks: BackgroundTasks,
         user: dict = Depends(require_uploader),
         db_controller: DbController = Depends(Provide[Container.db_controller]),
         fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler])
 ) -> dict:
+    """
+    Start tagging an upload's files with SUBBOX_ID, and answer at once (#237).
 
-    tag_report = fb_file_handler.tag_staging_with_subbox_id(user['username'], tracks)
+    Tagging a large library takes minutes -- ~20ms a file measured on prod -- and
+    one request doing all of it outlived Cloudflare's 100s. So it is a job: poll
+    GET /sync/map_meta/progress until it finishes, then call the import. The
+    import refuses while it runs, because it stages only the files the finished
+    job recorded (#38).
+    """
+    username = user['username']
+    if db_controller.get_in_progress_map_meta_job(username):
+        raise HTTPException(status_code=409, detail='already tagging an upload; wait for it to finish')
+    job_id = db_controller.create_map_meta_job(username, len(tracks.tracks))
+    background_tasks.add_task(run_map_meta_job, db_controller, fb_file_handler, username, tracks, job_id)
+    return {'job_id': job_id, 'n_tracks': len(tracks.tracks)}
+
+
+async def run_map_meta_job(db_controller, fb_file_handler, username: str, tracks: OriginalTracks, job_id: str):
+    # Synchronous file I/O for every file: off the event loop, or every user's
+    # requests wait for it.
+    try:
+        detail = await anyio.to_thread.run_sync(
+            tag_upload_attempt, db_controller, fb_file_handler, username, tracks, job_id,
+        )
+    except Exception as ex:
+        logger.error(f'map_meta job {job_id} for user {username} failed', exc_info=True)
+        db_controller.job_completed(job_id, False, reason=failure_reason(ex))
+        return
+    if detail:
+        db_controller.set_job_detail(job_id, detail)
+        db_controller.job_completed(job_id, False, reason=detail['message'])
+    else:
+        db_controller.job_completed(job_id, True)
+
+
+# How often a running map_meta job writes its progress, at most.
+_MAP_META_PROGRESS_INTERVAL_S = 1.0
+
+
+def tag_upload_attempt(
+        db_controller: DbController,
+        fb_file_handler: FileBrowserFileHandler,
+        username: str,
+        tracks: OriginalTracks,
+        job_id: Optional[str] = None,
+) -> Optional[dict]:
+    """
+    Tag the files and record them as the user's upload attempt (#38).
+
+    Returns None when every track was tagged, else what could not be: the body
+    the synchronous endpoint's 400 used to carry.
+    """
+    last_write = 0.0
+
+    def on_progress(n_done: int, n_total: int):
+        nonlocal last_write
+        now = time.monotonic()
+        if job_id and (n_done == n_total or now - last_write >= _MAP_META_PROGRESS_INTERVAL_S):
+            last_write = now
+            db_controller.update_job_phase(job_id, MAP_META_PHASE, n_done, n_total)
+
+    tag_report = fb_file_handler.tag_staging_with_subbox_id(username, tracks, on_progress=on_progress)
     # These files, and only these, are what the import that follows may stage
-    # (#38). Recorded before any 400 below, so an older attempt's set can never
+    # (#38). Recorded even when some failed, so an older attempt's set can never
     # outlive a newer map_meta.
-    db_controller.replace_upload_attempt(user['username'], tag_report.pop('staged'))
+    db_controller.replace_upload_attempt(username, tag_report.pop('staged'))
     untagged_tracks = list(filter(lambda t: t.subbox_id is None, tracks.tracks))
     if untagged_tracks:
         logger.error(
             'map_meta failed: %s tracks untagged for user %s. report=%s',
             len(untagged_tracks),
-            user['username'],
+            username,
             tag_report,
         )
-        raise HTTPException(
-            status_code=400,
-            detail={
-                'message': 'failed to tag all staging tracks with SUBBOX_ID',
-                'untagged_count': len(untagged_tracks),
-                'untagged_tracks': [
-                    {
-                        'stagingLocation': t.stagingLocation,
-                        'originalName': t.originalName,
-                        'originalArtist': t.originalArtist,
-                    }
-                    for t in untagged_tracks
-                ],
-                'tag_report': tag_report,
-            },
-        )
-    db_controller.save_original_track_meta(user['username'], tracks)
+        return {
+            'message': 'failed to tag all staging tracks with SUBBOX_ID',
+            'untagged_count': len(untagged_tracks),
+            'untagged_tracks': [
+                {
+                    'stagingLocation': t.stagingLocation,
+                    'originalName': t.originalName,
+                    'originalArtist': t.originalArtist,
+                }
+                for t in untagged_tracks
+            ],
+            'tag_report': tag_report,
+        }
+    db_controller.save_original_track_meta(username, tracks)
+    return None
 
+
+class StagedSizesRequest(BaseModel):
+    paths: List[str] = Field(max_length=2000)
+
+
+@router.post("/sync/staged_sizes", tags=["sync"])
+@inject
+async def staged_sizes(
+        request: StagedSizesRequest,
+        user: dict = Depends(require_uploader),
+        fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
+) -> dict:
+    """
+    `{path: size | null}` for staging paths under the user's uploads/ (#237).
+
+    Lets a retried upload skip the files the server already has whole, instead
+    of re-sending the library: filebrowser's listing is one level deep, and the
+    staging paths are three. The client compares each size to its local file's.
+    """
+    sizes = await anyio.to_thread.run_sync(
+        fb_file_handler.staged_file_sizes, user['username'], request.paths,
+    )
+    return {'sizes': sizes}
+
+
+@router.get("/sync/map_meta/progress", tags=["sync"])
+@inject
+async def map_meta_progress(
+        job_id: str,
+        user: dict = Depends(require_uploader),
+        db_controller: DbController = Depends(Provide[Container.db_controller]),
+) -> dict:
+    """
+    Where a map_meta job is. When it has finished, `result` says whether every
+    file was tagged; if not, `detail` says which were not and why.
+    """
+    try:
+        job = db_controller.get_job_by_id(user['username'], job_id)
+    except AssertionError:
+        job = None
+    if not job or job.get('name') != MAP_META_JOB:
+        raise HTTPException(status_code=404, detail=f"no map_meta job {job_id}")
     return {
-        'success': True,
-        'reason': ""
+        'job_id': job_id,
+        'in_progress': job['in_progress'],
+        'result': job['result'],
+        'reason': job.get('reason') or '',
+        'n_tracks_processed': job.get('phase_n_processed') or 0,
+        'n_tracks': job.get('phase_n_total') or 0,
+        'detail': job.get('detail'),
     }
+
 # Cap on how many per-track Navidrome matches run at once. Each get_track_match is
 # largely I/O-bound (1–7+ sequential Subsonic queries), so serialising them made a large
 # library (e.g. a multi-thousand-track Rekordbox XML) take minutes and blow the Cloudflare

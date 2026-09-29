@@ -117,6 +117,10 @@ class JobRow(Base):
     # The trash batch holding the playlist entries a re-import replaced, so the
     # import can be undone (#208, migration 023). Null for every other job.
     trash_batch_id = Column(String, nullable=True)
+    # What a finished map_meta job could not tag, and why: the body the
+    # synchronous endpoint's 400 used to carry (#237, migration 027). Null for
+    # every other job.
+    detail = Column(JSON, nullable=True)
 
 
 class OriginalTrackMetaRow(Base):

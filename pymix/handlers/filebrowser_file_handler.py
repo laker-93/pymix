@@ -7,7 +7,7 @@ import shutil
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Tuple, Optional, Dict, Any, List
+from typing import Callable, Tuple, Optional, Dict, Any, List
 from zipfile import ZipFile
 
 import anyio
@@ -302,10 +302,47 @@ class FileBrowserFileHandler:
         assert subcrate_path
         return subcrate_path, zip_path, audio_path
 
-    def tag_staging_with_subbox_id(self, user: str, tracks: OriginalTracks) -> Dict[str, Any]:
+    def staged_file_sizes(self, user: str, staging_locations: List[str]) -> Dict[str, Optional[int]]:
+        """
+        The size of each file already at ``uploads/{user}/{stagingLocation}``, or
+        None where there is none (#237).
+
+        The client's pre-upload dedup: a retry after a late failure skips a file
+        only if the server holds all of it. An interrupted TUS upload leaves a
+        truncated file at the final path, so being there is not enough.
+        """
+        src_path = Path(self._filebrowser_data_path_uploads.format(user=user))
+        root = src_path.resolve()
+        sizes: Dict[str, Optional[int]] = {}
+        for location in staging_locations:
+            f = src_path / location
+            sizes[location] = (
+                f.stat().st_size if f.resolve().is_relative_to(root) and f.is_file() else None
+            )
+        return sizes
+
+    def tag_staging_with_subbox_id(
+            self,
+            user: str,
+            tracks: OriginalTracks,
+            on_progress: Optional[Callable[[int, int], None]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Tag each uploaded file the client names with a SUBBOX_ID.
+
+        A track's file is exactly ``uploads/{user}/{stagingLocation}``: the client
+        uploads it to that path. It is looked up there rather than found by walking
+        uploads/ and substring-matching every path against every track, which was
+        O(files x tracks) and could hand one track's id to another's file
+        (``Koze/A/T.mp3`` is inside ``DJ Koze/A/T.mp3``) (#237).
+
+        Runs for minutes on a large upload, so it is called off the event loop;
+        ``on_progress(n_done, n_total)`` reports how far it has got.
+        """
         src_path = Path(
             self._filebrowser_data_path_uploads.format(user=user)
         )
+        root = src_path.resolve()
 
         report: Dict[str, Any] = {
             'tagged_count': 0,
@@ -317,23 +354,24 @@ class FileBrowserFileHandler:
             'staged': {},
         }
 
-        # Build a lookup by staging location so we can explain why each track was skipped.
+        # One track per staging location. Two tracks naming the same location
+        # leave the earlier one untagged, as before (#237 kept this).
         tracks_by_staging = {track.stagingLocation: track for track in tracks.tracks}
-        matched_staging_locations: set[str] = set()
+        n_total = len(tracks_by_staging)
+        # Files whose size changed when tagged: taglib rewrote the whole file
+        # because the new frame did not fit its padding.
+        n_rewritten = 0
+        started = time.monotonic()
 
-        for f in src_path.rglob('*'):
-            if not f.is_file():
+        for n_done, (staging_location, track) in enumerate(tracks_by_staging.items(), start=1):
+            if on_progress:
+                on_progress(n_done - 1, n_total)
+            f = src_path / staging_location
+            # The location comes from the client: never follow it out of this
+            # user's uploads/ into another user's files.
+            if not f.resolve().is_relative_to(root) or not f.is_file():
                 continue
-
             file_path = str(f)
-            track = None
-            for staging_location, candidate in tracks_by_staging.items():
-                if staging_location in file_path:
-                    track = candidate
-                    matched_staging_locations.add(staging_location)
-                    break
-            if track is None:
-                continue
 
             audio_type, non_audio_reason = detect_audio_type_with_reason(f)
             if audio_type is None:
@@ -351,7 +389,10 @@ class FileBrowserFileHandler:
                 continue
 
             existing_subbox_id = track.subbox_id
+            size_before = f.stat().st_size
             subbox_id = tag_subbox_id(f)
+            if f.stat().st_size != size_before:
+                n_rewritten += 1
             if subbox_id:
                 track.subbox_id = subbox_id
                 report['staged'][str(f.relative_to(src_path))] = subbox_id
@@ -366,10 +407,14 @@ class FileBrowserFileHandler:
                     'reason': 'tag_subbox_id_returned_none',
                 })
 
+        if on_progress:
+            on_progress(n_total, n_total)
+
+        found = {entry['stagingLocation'] for entry in report['untagged']}
         for track in tracks.tracks:
             if track.subbox_id is not None:
                 continue
-            if track.stagingLocation not in matched_staging_locations:
+            if track.stagingLocation not in found:
                 report['untagged'].append({
                     'stagingLocation': track.stagingLocation,
                     'file': None,
@@ -377,12 +422,17 @@ class FileBrowserFileHandler:
                 })
 
         report['untagged_count'] = len(report['untagged'])
+        elapsed = time.monotonic() - started
         logger.info(
-            'tag_staging_with_subbox_id summary for user %s: tagged=%s already_tagged=%s untagged=%s',
+            'tag_staging_with_subbox_id summary for user %s: tagged=%s already_tagged=%s untagged=%s '
+            'in %.1fs (%.1f files/s, %s rewritten whole)',
             user,
             report['tagged_count'],
             report['already_tagged_count'],
             report['untagged_count'],
+            elapsed,
+            n_total / elapsed if elapsed else 0.0,
+            n_rewritten,
         )
         if report['untagged_count']:
             logger.error('tag_staging_with_subbox_id untagged details: %s', report['untagged'])
