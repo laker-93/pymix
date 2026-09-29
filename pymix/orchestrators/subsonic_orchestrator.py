@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from typing import AsyncIterator, Callable, List, Optional, Set
+from typing import AsyncIterator, Callable, Dict, List, Optional, Set
 
 from pymix.clients.subsonic_client import SubsonicClient
 from pymix.model.playlist_write_report import PlaylistSnapshot, PlaylistWriteReport
@@ -396,6 +396,36 @@ class SubsonicOrchestrator:
                     logger.warning(f'unable to find track in navidrome {track}. This track will not be imported properly. Please ensure name of track in rekordbox is correct.')
 
         await asyncio.gather(*(update_one(track) for track in tracks_to_update))
+
+    async def song_ids_by_subbox_id(self, user: dict, subbox_ids: Set[str]) -> Dict[str, str]:
+        """
+        {subbox_id: Navidrome song id} for the ones Navidrome has a live track for,
+        by the file's subboxid tag rather than its title and artist (#239).
+
+        One subbox_id can carry two rows -- a retried upload of a file beets
+        already had is a second file with the same tag -- so the oldest live row
+        wins: the original import, the one playlists already point at.
+
+        Best effort: a Navidrome that cannot be asked gives {}, and the caller
+        matches by name as it did before.
+        """
+        if self._native is None or not subbox_ids:
+            return {}
+        try:
+            rows = await self._native.songs_by_subbox_id(user, sorted(subbox_ids))
+        except Exception:
+            logger.warning(
+                f"could not look up {len(subbox_ids)} track(s) of {user['username']} by subbox_id; "
+                "matching them by name instead", exc_info=True,
+            )
+            return {}
+        song_ids: Dict[str, str] = {}
+        live = (row for row in rows if not row.get('missing'))
+        for row in sorted(live, key=lambda r: (r.get('createdAt') or '', r.get('path') or '')):
+            for subbox_id in (row.get('tags') or {}).get('subboxid') or []:
+                if subbox_id in subbox_ids:
+                    song_ids.setdefault(subbox_id, row['id'])
+        return song_ids
 
     async def get_all_tracks(self, user: dict) -> AsyncIterator[List[SubBoxTrack]]:
         return self._subsonic_client.get_all_tracks(user, 50)

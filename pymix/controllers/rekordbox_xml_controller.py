@@ -8,7 +8,7 @@ from contextlib import nullcontext
 import anyio
 import beets
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, NamedTuple, Optional
 import mediafile
 import music_tag
 from beets.plugins import BeetsPlugin
@@ -47,6 +47,7 @@ from pymix.utils.beets_batch import (
 )
 from pymix.utils.beets_query import or_query
 from pymix.utils.make_readable import make_readable
+from pymix.utils.rekordbox_location import user_location_from_xml
 from pymix.utils.tag_subbox_id import get_subbox_id
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,15 @@ def _ensure_beets_defaults():
     if beets.config.sources:
         return
     beets.config.read(user=False, defaults=True)
+
+
+class UploadedTrack(NamedTuple):
+    """An XML track an upload put in the library, found by the file rather than
+    by its name (#239). ``song_id`` is None when Navidrome has no row with the
+    tag: the metadata still lands by ``subbox_id``, the playlist entry is matched
+    by name."""
+    subbox_id: str
+    song_id: Optional[str]
 
 
 class FooPlugin(BeetsPlugin):
@@ -877,13 +887,76 @@ class RekordboxXMLController:
         # Both passes work from the same playlists, so they are built once here
         # rather than once per pass (#191).
         subbox_playlists = await self._build_playlists_from_xml(rekordbox_xml, playlist_names)
+        uploaded = await self._identify_uploaded_tracks(user, rekordbox_xml)
+        for playlist in subbox_playlists:
+            self._apply_identities(playlist.tracks or [], uploaded)
         report = await self._create_playlists_from_xml(user, rekordbox_xml, playlist_names, matcher, subbox_playlists, scan_finished=scan_finished)
-        await self._set_metadata_from_xml(user, rekordbox_xml, playlist_names, progress, matcher, subbox_playlists)
+        await self._set_metadata_from_xml(user, rekordbox_xml, playlist_names, progress, matcher, subbox_playlists, uploaded=uploaded)
         matcher.log_stats("rekordbox import")
         return report
 
-    async def _set_metadata_from_xml(self, user, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None, progress=None, matcher: Optional[TrackMatcher] = None, subbox_playlists: Optional[List[SubBoxPlaylist]] = None):
+    async def _identify_uploaded_tracks(self, user: dict, rekordbox_xml: RekordboxXml) -> Dict[str, UploadedTrack]:
+        """
+        {XML TrackID: the library track it is} for every XML track whose file an
+        upload put in the library, found by the file's path on the user's machine
+        (#239).
+
+        /sync/map_meta records that path against the subbox_id it tagged the
+        server's copy with, so the file needs no name match to be found. A name
+        match can't find it when the file's own tags differ from its Rekordbox name
+        -- an untagged WAV is "Track 01" by nobody in Navidrome -- and such a track
+        landed in no playlist and lost its cues, loops, bpm and rating, while the
+        audio imported fine. Tracks the upload didn't send (the library already had
+        them) aren't here, and are matched by name as before.
+
+        Best effort: anything it can't answer is left to the name match.
+        """
+        try:
+            locations: Dict[str, str] = {}
+            for track in await anyio.to_thread.run_sync(rekordbox_xml.get_tracks):
+                # The raw attribute: pyrekordbox's decoded Location is not the path
+                # the client recorded (see user_location_from_xml).
+                element = getattr(track, '_element', None)
+                location = user_location_from_xml(element.get('Location') if element is not None else None)
+                if location:
+                    locations[str(track.TrackID)] = location
+            if not locations:
+                return {}
+            subbox_ids = await anyio.to_thread.run_sync(
+                self._db_controller.get_library_ids_by_user_location,
+                user['username'], sorted(set(locations.values())),
+            )
+            by_track = {track_id: subbox_ids[location] for track_id, location in locations.items()
+                        if subbox_ids.get(location)}
+            song_ids = await self._subsonic_orchestrator.song_ids_by_subbox_id(user, set(by_track.values()))
+        except Exception:
+            logger.warning(f"could not look up {user['username']}'s uploaded tracks by path; "
+                           "matching every XML track by name", exc_info=True)
+            return {}
+        uploaded = {track_id: UploadedTrack(subbox_id, song_ids.get(subbox_id))
+                    for track_id, subbox_id in by_track.items()}
+        logger.info(
+            f"{len(uploaded)} of {len(locations)} XML track(s) are uploaded files, found by path "
+            f"({sum(1 for u in uploaded.values() if u.song_id)} of them in Navidrome); "
+            "the rest are matched by name"
+        )
+        return uploaded
+
+    @staticmethod
+    def _apply_identities(tracks, uploaded: Dict[str, UploadedTrack]) -> None:
+        """Give each uploaded track its Navidrome id up front, so the name match
+        (update_tracks_with_subid) skips it."""
+        for track in tracks:
+            identity = uploaded.get(str(track.track_id))
+            if identity is None:
+                continue
+            track.subbox_id = identity.subbox_id
+            if identity.song_id:
+                track.sub_track_id = identity.song_id
+
+    async def _set_metadata_from_xml(self, user, rekordbox_xml: RekordboxXml, playlist_names: Optional[List[List[str]]] = None, progress=None, matcher: Optional[TrackMatcher] = None, subbox_playlists: Optional[List[SubBoxPlaylist]] = None, uploaded: Optional[Dict[str, UploadedTrack]] = None):
         progress = reporter_or_null(progress)
+        uploaded = uploaded or {}
         if matcher is None:
             matcher = TrackMatcher(self._subsonic_client)
         allowed_track_ids = None
@@ -901,6 +974,7 @@ class RekordboxXMLController:
             all_xml_tracks = [t for t in all_xml_tracks if t.track_id in allowed_track_ids]
             logger.info(f"Filtered to {len(all_xml_tracks)} track(s) with metadata from XML based on playlist filter.")
         rated_tracks = list(filter(lambda t: (t.rating or 0) > 0, all_xml_tracks))
+        self._apply_identities(rated_tracks, uploaded)
         await self._subsonic_orchestrator.update_tracks_with_subid(user, tracks=rated_tracks, matcher=matcher)
         #  and set the rating of the track in navidrome from the rating taken from xml
         await self._subsonic_orchestrator.set_ratings(user, rated_tracks)
@@ -917,7 +991,11 @@ class RekordboxXMLController:
         # round trips and reuses the matches the passes above already made (#104).
         # Progress is advanced as those matches land -- they are the slow part of
         # this phase -- leaving only local DB writes for the loop itself.
-        async def resolve_match(track) -> MatchResult:
+        async def resolve_match(track) -> Optional[MatchResult]:
+            if str(track.TrackID) in uploaded:
+                # Its subbox_id is already known: no Navidrome lookup (#239).
+                progress.advance()
+                return None
             # the path on the server could be quite different to the path on the user side xml
             match = await matcher.match(user, track.Name, track.Artist, track.Album or None)
             progress.advance()
@@ -934,18 +1012,22 @@ class RekordboxXMLController:
             loops = list(filter(lambda m: m.Type == 'loop', marks))
             # todo extract colors of cues
             album = track.Album if track.Album else None
-            if track_match is None:
+            identity = uploaded.get(str(track.TrackID))
+            if identity is not None:
+                subbox_id = identity.subbox_id
+            elif track_match is None:
                 logger.warning(f"Could not find a match in Navidrome for track {track.Name} by {track.Artist} with album {album}, skipping cue and loop import for this track.")
                 progress.skipped(track.Name, "no matching track in your library")
                 continue
-            track_match = track_match[0]
-            assert track_match.pymix_path
-            assert track_match.pymix_path.exists()
-            subbox_id = get_subbox_id(track_match.pymix_path)
-            if subbox_id is None:
-                logger.warning(f"subbox id tag not present on {track_match.pymix_path}, skipping cue and loop import for this track.")
-                progress.skipped(track.Name, "no SUBBOX_ID tag on the matched file")
-                continue
+            else:
+                track_match = track_match[0]
+                assert track_match.pymix_path
+                assert track_match.pymix_path.exists()
+                subbox_id = get_subbox_id(track_match.pymix_path)
+                if subbox_id is None:
+                    logger.warning(f"subbox id tag not present on {track_match.pymix_path}, skipping cue and loop import for this track.")
+                    progress.skipped(track.Name, "no SUBBOX_ID tag on the matched file")
+                    continue
             grid = beatgrid.to_cuedata(beatgrid.from_tempos(track.tempos))
             bpm = track.AverageBpm
             if bpm is None:

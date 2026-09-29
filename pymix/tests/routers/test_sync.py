@@ -332,6 +332,7 @@ async def test_match_tracks_does_not_claim_an_unrelated_track_is_already_owned(
         tracks=Tracks(tracks=[Track(title=xml_title, artist=xml_artist, album=xml_album)]),
         user={"username": "demoadmin", "password": "p"},
         subsonic_client=client,
+        db_controller=mock.Mock(),
     )
 
     assert response.tracks[0].matched is False
@@ -354,6 +355,7 @@ async def test_match_tracks_still_dedups_a_track_the_user_really_has():
         ]),
         user={"username": "demoadmin", "password": "p"},
         subsonic_client=client,
+        db_controller=mock.Mock(),
     )
 
     assert response.tracks[0].matched is True
