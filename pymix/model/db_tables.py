@@ -27,7 +27,8 @@ class UserRow(Base):
     # How the user's playlists are named in Navidrome (#229, design §18): 'leaf', the
     # playlist's own name, or 'path', the full path through its folders ("Bass /
     # House"), so third-party Subsonic clients see the tree. Moved per user by
-    # POST /admin/playlists/names.
+    # POST /admin/playlists/names. New users are created 'path' (create_user); the
+    # 'leaf' default is what migration 026 started existing users on.
     playlist_names = Column(String, nullable=False, default='leaf', server_default='leaf')
     wishlist_sheet_id = Column(String, nullable=True)
     wishlist_sheet_status = Column(String, nullable=True)
