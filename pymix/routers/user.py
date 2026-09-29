@@ -11,7 +11,7 @@ from pymix.containers import Container
 from pymix.orchestrators.services_orchestrator import ServicesOrchestrator
 from pymix.controllers.db_controller import DbController, InvalidCredentialsError, InvalidTokenError
 from pymix.routers.admin import require_admin_token
-from pymix.routers.auth import require_username
+from pymix.routers.auth import require_user, require_username
 from pymix.services import metrics
 
 router = APIRouter()
@@ -206,30 +206,22 @@ async def storage_check(
         if len(parts) == 2 and parts[0].lower() == "bearer":
             auth_session_id = parts[1].strip()
 
-    if not auth_session_id:
-        return {
-            'allowed': False,
-            'currentUsageBytes': 0,
-            'maxStorageBytes': 0,
-            'remainingBytes': 0,
-            'reason': 'must have an Authorization Bearer token or session cookie to identify user',
-            'success': False
-        }
+    # 401, like every other user-scoped route, when the caller can't be identified.
+    # This used to answer 200 with allowed=False and a 0 MB quota, which the client
+    # read as "storage full" and never reauthed on: after an app restart dropped the
+    # session cookie, the first upload stopped on "0 MB / 0 MB" (subbox-app#202).
+    user = require_user(session_id=auth_session_id, db_controller=db_controller)
 
     try:
-        user = db_controller.get_user_by_session_id(auth_session_id)
-        if not user:
-            reason = 'no user found for provided session'
-        else:
-            username = user['username']
-            exceeded, max_storage_bytes, current_usage_bytes = db_controller.user_library_size_exceeded(username, uploadSizeBytes)
-            remaining_bytes = max(0, max_storage_bytes - current_usage_bytes)
-            # Deleted tracks still count until the trash is purged (#200). A DB read.
-            trash_bytes = db_controller.trash_bytes(username)
-            reason = 'storage limit exceeded' if exceeded else 'ok'
-            if exceeded:
-                metrics.observe_quota_refusal('storage_check')
-            success = True
+        username = user['username']
+        exceeded, max_storage_bytes, current_usage_bytes = db_controller.user_library_size_exceeded(username, uploadSizeBytes)
+        remaining_bytes = max(0, max_storage_bytes - current_usage_bytes)
+        # Deleted tracks still count until the trash is purged (#200). A DB read.
+        trash_bytes = db_controller.trash_bytes(username)
+        reason = 'storage limit exceeded' if exceeded else 'ok'
+        if exceeded:
+            metrics.observe_quota_refusal('storage_check')
+        success = True
     except Exception as ex:
         logger.error('error occurred performing storage check', exc_info=True)
         reason = repr(ex)
