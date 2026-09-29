@@ -10,7 +10,7 @@ from dependency_injector.wiring import Provide, inject
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, HTTPException
 from fastapi.responses import FileResponse
 from anyio import to_process
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from pymix.clients.beets_client import BeetsClient
 from pymix.clients.subsonic_client import SubsonicClient
@@ -223,6 +223,30 @@ def tag_upload_attempt(
         }
     db_controller.save_original_track_meta(username, tracks)
     return None
+
+
+class StagedSizesRequest(BaseModel):
+    paths: List[str] = Field(max_length=2000)
+
+
+@router.post("/sync/staged_sizes", tags=["sync"])
+@inject
+async def staged_sizes(
+        request: StagedSizesRequest,
+        user: dict = Depends(require_uploader),
+        fb_file_handler: FileBrowserFileHandler = Depends(Provide[Container.file_browser_file_handler]),
+) -> dict:
+    """
+    `{path: size | null}` for staging paths under the user's uploads/ (#237).
+
+    Lets a retried upload skip the files the server already has whole, instead
+    of re-sending the library: filebrowser's listing is one level deep, and the
+    staging paths are three. The client compares each size to its local file's.
+    """
+    sizes = await anyio.to_thread.run_sync(
+        fb_file_handler.staged_file_sizes, user['username'], request.paths,
+    )
+    return {'sizes': sizes}
 
 
 @router.get("/sync/map_meta/progress", tags=["sync"])

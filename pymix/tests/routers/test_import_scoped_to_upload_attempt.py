@@ -533,6 +533,19 @@ def test_a_restart_fails_the_map_meta_job_it_interrupted(db):
     assert db.get_in_progress_map_meta_job('dj') is None
 
 
+def test_staged_sizes_are_what_the_server_holds_and_never_outside_the_users_uploads(handler, uploads):
+    whole = _mp3(uploads / 'New Artist' / 'Set 1' / 'Opener.mp3')
+    _mp3(uploads.parent / 'someone-else' / 'T.mp3')
+
+    sizes = handler.staged_file_sizes('dj', ['New Artist/Set 1/Opener.mp3', 'New Artist/Set 1/Missing.mp3', '../someone-else/T.mp3'])
+
+    assert sizes == {
+        'New Artist/Set 1/Opener.mp3': whole.stat().st_size,
+        'New Artist/Set 1/Missing.mp3': None,
+        '../someone-else/T.mp3': None,
+    }
+
+
 def test_clearing_an_attempt_leaves_one_recorded_after_it_was_read(db):
     db.replace_upload_attempt('dj', {'a.mp3': 'id-a'})
     read = db.get_upload_attempt('dj')

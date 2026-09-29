@@ -302,6 +302,25 @@ class FileBrowserFileHandler:
         assert subcrate_path
         return subcrate_path, zip_path, audio_path
 
+    def staged_file_sizes(self, user: str, staging_locations: List[str]) -> Dict[str, Optional[int]]:
+        """
+        The size of each file already at ``uploads/{user}/{stagingLocation}``, or
+        None where there is none (#237).
+
+        The client's pre-upload dedup: a retry after a late failure skips a file
+        only if the server holds all of it. An interrupted TUS upload leaves a
+        truncated file at the final path, so being there is not enough.
+        """
+        src_path = Path(self._filebrowser_data_path_uploads.format(user=user))
+        root = src_path.resolve()
+        sizes: Dict[str, Optional[int]] = {}
+        for location in staging_locations:
+            f = src_path / location
+            sizes[location] = (
+                f.stat().st_size if f.resolve().is_relative_to(root) and f.is_file() else None
+            )
+        return sizes
+
     def tag_staging_with_subbox_id(
             self,
             user: str,
