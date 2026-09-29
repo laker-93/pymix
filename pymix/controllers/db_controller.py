@@ -480,20 +480,69 @@ class DbController:
             ).delete()
             session.commit()
 
-    def get_meta_by_user_location(self, username: str, user_location: str) -> Optional[Dict]:
-        user = self.get_user(username)
-        user_id = user["user_id"]
+    def _rows_by_user_location(self, session, user_id: str, user_locations: List[str]) -> Dict[str, list]:
+        """
+        Every original_track_meta row for these locations, best first: rows whose
+        subbox_id is still in the library ahead of ones that aren't, then oldest first.
 
-        with self._session_factory() as session:
-            results = session.query(OriginalTrackMetaRow).filter(
+        One location can have several rows. Each upload of a file mints its own
+        subbox_id, and a row is keyed on that, so uploading the same local file twice
+        (a Serato upload of files a Rekordbox upload already sent, #231) leaves two.
+        The oldest one in the library is the track the user has been using.
+        """
+        rows = []
+        for i in range(0, len(user_locations), self._CUEDATA_CHUNK):
+            chunk = user_locations[i:i + self._CUEDATA_CHUNK]
+            rows.extend(session.query(OriginalTrackMetaRow).filter(
                 OriginalTrackMetaRow.user_id == user_id,
-                OriginalTrackMetaRow.user_location == user_location,
-            ).all()
+                OriginalTrackMetaRow.user_location.in_(chunk),
+            ).all())
+        in_library = set()
+        ids = list({row.subbox_id for row in rows})
+        for i in range(0, len(ids), self._CUEDATA_CHUNK):
+            in_library.update(row.subbox_id for row in session.query(SubboxBeetsMapRow.subbox_id).filter(
+                SubboxBeetsMapRow.user_id == user_id,
+                SubboxBeetsMapRow.subbox_id.in_(ids[i:i + self._CUEDATA_CHUNK]),
+            ).all())
+        by_location: Dict[str, list] = {}
+        for row in sorted(rows, key=lambda row: (row.subbox_id not in in_library, row.id)):
+            by_location.setdefault(row.user_location, []).append((row, row.subbox_id in in_library))
+        return by_location
 
-            if results:
-                assert len(results) == 1, f"got multiple results for {username} {user_location}"
-                return _row_to_dict(results[0])
-            return None
+    def get_meta_by_user_location(self, username: str, user_location: str) -> Optional[Dict]:
+        user_id = self.get_user(username)["user_id"]
+        with self._session_factory() as session:
+            rows = self._rows_by_user_location(session, user_id, [user_location]).get(user_location)
+            if not rows:
+                return None
+            if len(rows) > 1:
+                logger.info(
+                    '%d original_track_meta rows for %s %s; using %s',
+                    len(rows), username, user_location, rows[0][0].subbox_id,
+                )
+            return _row_to_dict(rows[0][0])
+
+    def get_library_ids_by_user_location(self, username: str, user_locations: List[str]) -> Dict[str, Optional[str]]:
+        """
+        For each path on the user's machine, the subbox_id of the library track an
+        earlier upload of that file became, or None.
+
+        A Rekordbox upload tags only the server's copy of a file, never the user's
+        own, so a later upload of the same file can't tell from the file that the
+        library already has it (#231). The path the upload recorded can.
+        Only ids still in the library count: a deleted track is not a reason to skip
+        an upload.
+        """
+        if not user_locations:
+            return {}
+        user_id = self.get_user(username)["user_id"]
+        with self._session_factory() as session:
+            by_location = self._rows_by_user_location(session, user_id, list(set(user_locations)))
+        result: Dict[str, Optional[str]] = {}
+        for location in user_locations:
+            rows = by_location.get(location)
+            result[location] = rows[0][0].subbox_id if rows and rows[0][1] else None
+        return result
 
     def update_metadata(
             self,

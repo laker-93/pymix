@@ -136,7 +136,12 @@ the file, because subbox put it there on the way out) and posts the result as
 1. `track_identities[crate_path]` — survives the user moving the file.
 2. `get_meta_by_user_location(crate_path)` — the row `/sync/map_meta` wrote during
    an upload. Covers the Rekordbox-first user and anything uploaded in this same
-   import.
+   import. A path can have several rows (each upload of a file mints its own id);
+   the oldest still in the library wins.
+
+The client asks `/tracks/by_location` before building the manifest, so a
+Rekordbox-first user's untagged files arrive already resolved to the library's id,
+and their audio isn't uploaded again (#231).
 3. Neither: the track is **skipped**, with a reason, and the import carries on.
 
 A DJ's crates are full of records that were never uploaded to subbox, so an entry
@@ -178,6 +183,7 @@ a zip that parses to zero crates, and a zip where nothing at all matched.
 | Method/Path | Purpose |
 |---|---|
 | POST `/tracks/presence` | Given `subbox_ids` (≤1000), return `{id: bool}` of which are already in the user's library. Lets the client skip re-uploading. |
+| POST `/tracks/by_location` | Given `user_locations` (≤1000, paths on the user's machine), return `{path: subbox_id \| null}`: the library track an earlier upload of that file became, from the row `/sync/map_meta` wrote. For a file whose own `SUBBOX_ID` the library doesn't know — a Rekordbox upload tags only the server's copy, so without this a Serato upload re-sends the audio as a new track (#231). Only ids still in the library count; of several uploads of one path, the oldest wins. |
 | POST `/track/metadata/update` | Versioned update of a track's cue/loop metadata (`cuedata` validated against `cue_schema`). `source_app` ∈ {serato, rekordbox}, `change_type` ∈ {upload, edit, sync, merge}. |
 | GET `/track/metadata/{track_id}` | Fetch latest cue/loop metadata for a track. |
 | DELETE `/track` | Delete tracks (by `subbox_id` list) into the user's **trash** (#200): each file is moved to `/private-music/_trash/{user}/{batch_id}/` after a snapshot, `beet rm -f`, then the DB rows. The response carries `trash_batch_id` (null when nothing moved). It then starts a Navidrome scan of just the deleted files' folders (`startScan?target=1:<folder>`, `utils/navidrome_scan.py`), so the tracks read as missing in under a second: nothing else would tell Navidrome, whose scheduled scans can be off. See `services/trash.py`. |
