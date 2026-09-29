@@ -120,6 +120,20 @@ def test_a_new_user_starts_with_a_tree(sessions, db_controller):
     assert db_controller.playlist_tree_state('newbie') == 'live'
 
 
+def test_a_new_user_gets_path_names(sessions, db_controller):
+    # design §18: every existing user was moved to 'path', so a new one starts there,
+    # and third-party Subsonic clients see its folders from the first playlist.
+    from pymix.model.db_tables import UserRow, UserTokenRow
+    with sessions() as session:
+        session.add(UserTokenRow(user_id='', token='t'))
+        session.commit()
+
+    db_controller.create_user('newbie', 'password123456', 'n@example.com', 't')
+
+    with sessions() as session:
+        assert session.query(UserRow.playlist_names).filter(UserRow.username == 'newbie').scalar() == 'path'
+
+
 # --- reconciliation -----------------------------------------------------------------
 
 @pytest.mark.anyio

@@ -796,6 +796,9 @@ class DbController:
                 subsonic_port=subsonic_port,
                 max_library_size=self._max_library_size,
                 playlist_tree_state='live',
+                # Every existing user was moved to 'path' by POST /admin/playlists/names
+                # (design §18); the column's 'leaf' default is only what 026 started them on.
+                playlist_names='path',
             ))
             session.commit()
 
