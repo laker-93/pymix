@@ -53,6 +53,10 @@ class Track(BaseModel):
     # matching. Absent for local tracks never tagged (e.g. imported from elsewhere and
     # not yet synced through subbox) — those still fall back to fuzzy matching.
     subboxId: Optional[str] = None
+    # The file's path on the user's machine, as the client sends /sync/map_meta's
+    # userLocation. /sync/match_tracks answers `matched` for a file an earlier
+    # upload already put in the library, whatever its tags say (#239).
+    userLocation: Optional[str] = None
 
 class MatchedTrack(BaseModel):
     title: str
@@ -311,7 +315,8 @@ MATCH_TRACKS_MIN_CONFIDENCE = 0.8
 async def match_tracks(
         tracks: Tracks,
         user: dict = Depends(require_uploader),
-        subsonic_client: SubsonicClient = Depends(Provide[Container.subsonic_client])
+        subsonic_client: SubsonicClient = Depends(Provide[Container.subsonic_client]),
+        db_controller: DbController = Depends(Provide[Container.db_controller]),
 ) -> MatchedTracksResponse:
 
     # One matcher per request: same bounded concurrency as before, plus it resolves a
@@ -324,7 +329,18 @@ async def match_tracks(
         max_tier=MATCH_TRACKS_MAX_TIER, min_confidence=MATCH_TRACKS_MIN_CONFIDENCE,
     )
 
+    # A file an earlier upload put in the library is matched by its path first, and
+    # needs no name match. The name match can't find a file whose tags differ from
+    # its Rekordbox name (an untagged WAV), so a retried upload sent it again and
+    # beets kept both copies (#239). A deleted track's path doesn't count.
+    locations = sorted({t.userLocation for t in tracks.tracks if t.userLocation})
+    uploaded = await anyio.to_thread.run_sync(
+        db_controller.get_library_ids_by_user_location, user['username'], locations,
+    ) if locations else {}
+
     async def match_one(track: Track) -> MatchedTrack:
+        if track.userLocation and uploaded.get(track.userLocation):
+            return MatchedTrack(title=track.title, artist=track.artist, matched=True)
         match = await matcher.match(user, track.title, track.artist, track.album)
         if match:
             match = match[0]
