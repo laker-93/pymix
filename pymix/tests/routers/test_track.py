@@ -64,3 +64,40 @@ def test_the_schema_still_refuses_what_it_refused_before():
     assert not _validates({"beatgrid": [{"position_ms": 0, "colour": "red"}]})
     assert not _validates({"beatgrid": "not a grid"})
     assert not _validates({"something_new": []})
+
+
+@pytest.mark.anyio
+async def test_tracks_by_location_passes_the_paths_through():
+    from unittest.mock import MagicMock
+
+    from pymix.routers.track import TracksByLocationRequest, get_tracks_by_location
+
+    db = MagicMock()
+    db.get_library_ids_by_user_location.return_value = {'/a.mp3': 'sid-a', '/b.mp3': None}
+
+    response = await get_tracks_by_location(
+        TracksByLocationRequest(user_locations=['/a.mp3', '/b.mp3']),
+        username='dj',
+        db_controller=db,
+    )
+
+    db.get_library_ids_by_user_location.assert_called_once_with('dj', ['/a.mp3', '/b.mp3'])
+    assert response.subbox_ids == {'/a.mp3': 'sid-a', '/b.mp3': None}
+
+
+@pytest.mark.anyio
+async def test_tracks_by_location_refuses_an_oversized_batch():
+    from unittest.mock import MagicMock
+
+    from pymix.routers.track import TracksByLocationRequest, get_tracks_by_location
+
+    db = MagicMock()
+    with pytest.raises(HTTPException) as exc_info:
+        await get_tracks_by_location(
+            TracksByLocationRequest(user_locations=[f'/{i}.mp3' for i in range(1001)]),
+            username='dj',
+            db_controller=db,
+        )
+
+    assert exc_info.value.status_code == 400
+    db.get_library_ids_by_user_location.assert_not_called()

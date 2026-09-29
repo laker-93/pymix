@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Body, Path, Cookie, HTTPException
 from jsonschema import validate, ValidationError
 from dependency_injector.wiring import inject, Provide
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import logging
 
 from pydantic import BaseModel
@@ -23,6 +23,16 @@ _PRESENCE_MAX_IDS = 1000
 
 class TrackPresenceResponse(BaseModel):
     presence: Dict[str, bool]
+
+
+class TracksByLocationRequest(BaseModel):
+    user_locations: List[str]
+
+    model_config = {"json_schema_extra": {"example": {"user_locations": ["/Users/dj/Music/track.mp3"]}}}
+
+
+class TracksByLocationResponse(BaseModel):
+    subbox_ids: Dict[str, Optional[str]]
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -109,6 +119,31 @@ async def get_tracks_presence(
 
     presence = db_controller.get_subbox_ids_presence(username, body.subbox_ids)
     return TrackPresenceResponse(presence=presence)
+
+
+@router.post("/tracks/by_location", tags=["tracks"], response_model=TracksByLocationResponse)
+@inject
+async def get_tracks_by_location(
+    body: TracksByLocationRequest,
+    username: str = Depends(require_username),
+    db_controller: DbController = Depends(Provide[Container.db_controller]),
+) -> TracksByLocationResponse:
+    """
+    Given paths on the user's machine, return the subbox_id of the library track an
+    earlier upload of each file became (null when there is none).
+
+    For a file whose own SUBBOX_ID tag the library doesn't know: a Rekordbox upload
+    tags only the server's copy, so the user's file carries no id, and without this
+    a Serato upload of it sends the audio again as a new track (#231).
+    """
+    if len(body.user_locations) > _PRESENCE_MAX_IDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many user_locations in a single request (max {_PRESENCE_MAX_IDS}). Split into smaller batches.",
+        )
+
+    subbox_ids = db_controller.get_library_ids_by_user_location(username, body.user_locations)
+    return TracksByLocationResponse(subbox_ids=subbox_ids)
 
 
 @router.post("/track/metadata/update", tags=["metadata"])
