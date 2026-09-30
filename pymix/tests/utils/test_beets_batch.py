@@ -12,6 +12,7 @@ from pymix.utils.beets_batch import (
     chunked,
     parse_applied,
     parse_import_reads,
+    parse_missing,
     strip_duplicates_count,
 )
 
@@ -201,3 +202,102 @@ def test_strip_duplicates_count_normalises_both_beets_output_shapes(record, expe
 ])
 def test_strip_duplicates_count_leaves_everything_else_alone(record):
     assert strip_duplicates_count(record) == record
+
+
+# --- the write script against a real library (#243) --------------------------------
+#
+# Matching by a flexattr used to run `lib.items('subbox_id::^key$')` per pair, which
+# beets can't push down to SQL: every pair loaded and filtered the whole library,
+# O(pairs x library) -- 47 minutes for a 1.9k-track bpm write on prod.
+
+
+def _run_set_field_script(monkeypatch, tmp_path, library_path, field, match_field, pairs):
+    from beets import config
+    from beets.library import Library
+
+    # The script reads the container's beets config; point it at this library
+    # instead, without touching whatever config this machine has.
+    monkeypatch.setattr(config, "read", lambda *a, **k: None)
+    monkeypatch.setattr(config, "sources", list(config.sources))
+    config.set({"library": str(library_path), "directory": str(tmp_path / "music")})
+
+    calls = []
+    real_items = Library.items
+
+    def counting_items(self, *args, **kwargs):
+        calls.append(args)
+        return real_items(self, *args, **kwargs)
+
+    monkeypatch.setattr(Library, "items", counting_items)
+    command = build_set_field_command(field, match_field, pairs, write_tags=False)
+    monkeypatch.setattr("sys.argv", ["-c", *command[3:]])
+    import contextlib
+    import io
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        exec(compile(command[2], "<beets_batch>", "exec"), {"__name__": "__main__"})
+    return out.getvalue(), calls
+
+
+def _library_with(tmp_path, count):
+    from beets.library import Item, Library
+
+    library_path = tmp_path / "library.db"
+    lib = Library(str(library_path), str(tmp_path / "music"))
+    for i in range(count):
+        item = Item(path=str(tmp_path / f"music/{i}.mp3"), title=f"t{i}")
+        item["subbox_id"] = f"SBX-{i}"
+        lib.add(item)
+    # An item with no subbox_id must not match anything.
+    lib.add(Item(path=str(tmp_path / "music/none.mp3"), title="none"))
+    lib._close()
+    return library_path
+
+
+def test_set_field_by_flexattr_reads_the_library_once(monkeypatch, tmp_path):
+    from beets.library import Library
+
+    count = 50
+    library_path = _library_with(tmp_path, count)
+    pairs = [(f"SBX-{i}", 100 + i) for i in range(count)] + [("SBX-absent", 1)]
+
+    output, calls = _run_set_field_script(
+        monkeypatch, tmp_path, library_path, "bpm", "subbox_id", pairs
+    )
+
+    # One library pass for all 51 pairs, not one per pair.
+    assert len(calls) == 1
+    assert parse_applied(output) == count
+    assert parse_missing(output) == ["SBX-absent"]
+    lib = Library(str(library_path), str(tmp_path / "music"))
+    bpms = {item["subbox_id"]: item.bpm for item in lib.items("subbox_id:SBX-")}
+    assert bpms == {f"SBX-{i}": 100 + i for i in range(count)}
+
+
+def test_set_field_by_flexattr_matches_exactly_not_by_prefix(monkeypatch, tmp_path):
+    from beets.library import Library
+
+    library_path = _library_with(tmp_path, 12)
+
+    output, _ = _run_set_field_script(
+        monkeypatch, tmp_path, library_path, "bpm", "subbox_id", [("SBX-1", 99)]
+    )
+
+    assert parse_applied(output) == 1
+    lib = Library(str(library_path), str(tmp_path / "music"))
+    assert [i["subbox_id"] for i in lib.items("bpm:99")] == ["SBX-1"]
+
+
+def test_set_field_by_id_uses_the_primary_key(monkeypatch, tmp_path):
+    from beets.library import Library
+
+    library_path = _library_with(tmp_path, 3)
+
+    output, calls = _run_set_field_script(
+        monkeypatch, tmp_path, library_path, "subbox_id", MATCH_BY_ID, [(2, "NEW"), (999, "X")]
+    )
+
+    assert calls == []
+    assert parse_applied(output) == 1
+    assert parse_missing(output) == ["999"]
+    assert Library(str(library_path), str(tmp_path / "music")).get_item(2)["subbox_id"] == "NEW"
