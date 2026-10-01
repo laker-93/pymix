@@ -62,16 +62,28 @@ write_tags = write_mode == 'write'
 config.read()
 lib = Library(config['library'].as_filename(), config['directory'].as_filename())
 
+# A flexattr (subbox_id) can't be queried in SQL, so `lib.items('f::^key$')` loads
+# and filters the whole library in Python on every call -- once per pair, O(pairs x
+# library): 47 minutes of one CPU for a 1.9k-track bpm write on prod (#243). Index
+# the library once instead: one pass, then a dict lookup per pair.
+by_key = None
+if match_field != 'id':
+    by_key = {}
+    for item in lib.items():
+        value = item.get(match_field)
+        if value not in (None, ''):
+            by_key.setdefault(str(value), []).append(item)
+
 applied = 0
 missing = []
 with lib.transaction():
     for arg in sys.argv[4:]:
         key, _, value = arg.partition('=')
-        if match_field == 'id':
+        if by_key is None:
             item = lib.get_item(int(key))
             items = [item] if item is not None else []
         else:
-            items = list(lib.items(u'%s::^%s$' % (match_field, key)))
+            items = by_key.get(key, [])
         if not items:
             missing.append(key)
             continue
