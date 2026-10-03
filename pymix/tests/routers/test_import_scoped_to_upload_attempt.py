@@ -559,22 +559,60 @@ def test_clearing_an_attempt_leaves_one_recorded_after_it_was_read(db):
 # ------------------------------------------------------------------ staging
 
 
-def test_staging_copies_only_the_files_it_is_given(tmp_path, uploads):
-    mine = _mp3(uploads / 'New Artist' / 'Set 1' / 'Opener.mp3')
-    tag_subbox_id(mine)
-    _leftovers(uploads)
+def _rb_handler(tmp_path) -> RBBackupFileHandler:
     db_controller = mock.Mock()
     db_controller.get_subbox_beet_map.return_value = None
-    rb_handler = RBBackupFileHandler(
+    return RBBackupFileHandler(
         rekordbox_xml_orchestrator=mock.Mock(),
         db_controller=db_controller,
         beets_data_path=str(tmp_path / 'beets' / '{user}'),
         beets_data_path_public=str(tmp_path / 'beets' / 'public'),
     )
 
-    rb_handler.stage_for_import('dj', uploads, [mine])
+
+def test_staging_moves_only_the_files_it_is_given(tmp_path, uploads):
+    mine = _mp3(uploads / 'New Artist' / 'Set 1' / 'Opener.mp3')
+    tag_subbox_id(mine)
+    _leftovers(uploads)
+
+    _rb_handler(tmp_path).stage_for_import('dj', uploads, [mine])
 
     assert _files_in(tmp_path / 'beets' / 'dj') == {'New Artist/Set 1/Opener.mp3'}
+    # Moved, not copied: a copy held the whole upload on disk twice until the
+    # import finished, and a large library filled the volume mid-staging.
+    assert not mine.exists()
+    assert _files_in(uploads) == {f'Old Artist/Abandoned/Track {i}.mp3' for i in range(3)}
+
+
+def test_staging_a_whole_directory_moves_every_file(tmp_path, uploads):
+    files = [_mp3(uploads / 'A' / 'X' / f'{i}.mp3') for i in range(3)]
+    for f in files:
+        tag_subbox_id(f)
+
+    _rb_handler(tmp_path).stage_for_import('dj', uploads)
+
+    assert _files_in(tmp_path / 'beets' / 'dj') == {f'A/X/{i}.mp3' for i in range(3)}
+    assert _files_in(uploads) == set()
+
+
+def test_discard_staging_empties_the_users_staging_only(tmp_path):
+    _mp3(tmp_path / 'beets' / 'dj' / 'A' / 'X' / 'a.mp3')
+    _mp3(tmp_path / 'beets' / 'dj' / 'b.mp3')
+    _mp3(tmp_path / 'beets' / 'other' / 'c.mp3')
+
+    _rb_handler(tmp_path).discard_staging('dj')
+
+    assert list((tmp_path / 'beets' / 'dj').iterdir()) == []
+    assert _files_in(tmp_path / 'beets' / 'other') == {'c.mp3'}
+
+
+def test_discard_staging_never_raises(tmp_path):
+    handler = _rb_handler(tmp_path)
+    handler.discard_staging('nobody')  # no staging directory at all
+
+    _mp3(tmp_path / 'beets' / 'dj' / 'a.mp3')
+    with mock.patch('pymix.handlers.rb_backup_file_handler.Path.unlink', side_effect=PermissionError):
+        handler.discard_staging('dj')
 
 
 # ------------------------------------------------------------------ Serato

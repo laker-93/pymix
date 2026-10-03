@@ -186,11 +186,18 @@ class SeratoController:
         # beets container can't interleave either (#73). Staging is under it too:
         # see RekordboxXMLController._consume_from_filebrowser (#183).
         with self._beets_exec.write_lock(f"beets{username}"):
-            if zip_path:
-                self._serato_backup_file_handler.stage_for_import(username, zip_path)
-            if audio_path:
-                # todo: move from rb handler as logic is generic to serato and rb
-                self._rb_backup_file_handler.stage_for_import(username, audio_path, audio_files)
+            try:
+                if zip_path:
+                    self._serato_backup_file_handler.stage_for_import(username, zip_path)
+                if audio_path:
+                    # todo: move from rb handler as logic is generic to serato and rb
+                    self._rb_backup_file_handler.stage_for_import(username, audio_path, audio_files)
+            except Exception:
+                # A failed import's staging residue is never imported, only
+                # counted against the quota: see RBBackupFileHandler.discard_staging.
+                # Under the lock, so no other job's files are in there.
+                self._rb_backup_file_handler.discard_staging(username)
+                raise
             try:
                 # The quota counter moves by what beets takes out of staging (#183).
                 with self._db_controller.record_staged_import(username):
@@ -199,6 +206,7 @@ class SeratoController:
                         logger.info(f'{log_type}: {log.decode()}')
             except Exception:
                 logger.exception('beets import failed')
+                self._rb_backup_file_handler.discard_staging(username)
                 raise
             else:
                 logger.info(f'finished beets import for {username}')

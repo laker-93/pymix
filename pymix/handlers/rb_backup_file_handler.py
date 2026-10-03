@@ -116,7 +116,8 @@ class RBBackupFileHandler:
         """
         beets_data_path = self._beets_data_path.format(user=username)
         beets_data_path = Path(beets_data_path)
-        for item in audio_files.rglob('*') if only is None else only:
+        # Listed up front: the loop moves files out of the tree it would be walking.
+        for item in list(audio_files.rglob('*')) if only is None else only:
             if item.is_file():
                 if detect_audio_type(item) is not None:
                     subbox_id = get_subbox_id(item)
@@ -136,8 +137,43 @@ class RBBackupFileHandler:
 
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     logger.info(f'staging {item} to {destination}')
-                    # leave the file in the filebrowser location so it is not reuploaded on retry in case of failure
-                    shutil.copy(str(item), str(destination))
+                    # Moved, not copied. A copy held the whole upload on disk twice
+                    # until the import finished, and a 137 GB library filled the
+                    # volume halfway through staging. The copy used to keep the
+                    # file for a retry, but uploads/ is cleared whatever the
+                    # outcome since #38, so it kept nothing. Staging and uploads
+                    # are different volumes, so this is a copy and an unlink per
+                    # file: the peak is the upload plus one file.
+                    shutil.move(str(item), str(destination))
+
+    def discard_staging(self, username: str):
+        """
+        Empty the user's staging directory after a failed import.
+
+        What a failed import leaves in staging is never imported: its uploads are
+        cleared too (#38), so a retry uploads and stages them again. Left in place,
+        it counts against the user's quota and fills the volume -- 97 GB of it
+        blocked every retry of the import that ran out of space.
+
+        Never raises: it runs while the import's own error propagates, and must
+        not replace it.
+        """
+        beets_data_path = Path(self._beets_data_path.format(user=username))
+        try:
+            if not beets_data_path.is_dir():
+                return
+            entries = list(beets_data_path.iterdir())
+            if not entries:
+                return
+            n_files = sum(1 for f in beets_data_path.rglob('*') if f.is_file())
+            logger.info(f'discarding {n_files} file(s) left in {beets_data_path} by a failed import')
+            for filepath in entries:
+                if filepath.is_dir():
+                    shutil.rmtree(filepath)
+                else:
+                    filepath.unlink()
+        except Exception:
+            logger.exception(f'failed to discard staging for {username}')
 
     @staticmethod
     def _restore_tags(audio_file: Path, track: SubBoxTrack):

@@ -744,10 +744,17 @@ class RekordboxXMLController:
         # the matching comment in _consume_from_filebrowser (#73). Staging is under
         # it too, for the reason given there (#183).
         with self._beets_exec.write_lock(f"beets{username}"):
-            if zip_path:
-                self._rb_backup_file_handler.restore_track_meta_and_stage_for_import(username, zip_path, rekordbox_xml)
-            if audio_path:
-                self._rb_backup_file_handler.stage_for_import(username, audio_path, audio_files)
+            try:
+                if zip_path:
+                    self._rb_backup_file_handler.restore_track_meta_and_stage_for_import(username, zip_path, rekordbox_xml)
+                if audio_path:
+                    self._rb_backup_file_handler.stage_for_import(username, audio_path, audio_files)
+            except Exception:
+                # A failed import's staging residue is never imported, only
+                # counted against the quota: see RBBackupFileHandler.discard_staging.
+                # Under the lock, so no other job's files are in there.
+                self._rb_backup_file_handler.discard_staging(username)
+                raise
             try:
                 # detach to avoid returning potentially large stdout from the docker logs.
                 # Instead logs are streamed incrementally. The quota counter moves by
@@ -758,6 +765,7 @@ class RekordboxXMLController:
                         logger.info(f'{log_type}: {log.decode()}')
             except Exception:
                 logger.exception('beets import failed')
+                self._rb_backup_file_handler.discard_staging(username)
                 raise
             else:
                 logger.info(f"finished beets command {beets_command} for {username}")
