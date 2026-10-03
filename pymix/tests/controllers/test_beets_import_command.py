@@ -10,6 +10,8 @@ test_beets_exec.py.
 """
 from unittest import mock
 
+import pytest
+
 from pymix.clients.beets_exec import BeetsExec
 from pymix.controllers.rekordbox_xml_controller import RekordboxXMLController
 from pymix.controllers.serato_controller import SeratoController
@@ -168,3 +170,83 @@ def test_serato_import_to_beets_stages_under_the_write_lock():
         controller._import_to_beets("demoadmin", zip_path=mock.Mock(), audio_path=mock.Mock())
 
     assert held == [True, True]
+
+
+# --- a failed import discards its staging --------------------------------------
+#
+# A failed import's uploads are cleared (#38), so what it left in staging is never
+# imported -- only counted against the quota. 97 GB of it blocked every retry of
+# an import that ran out of disk mid-staging.
+
+def _serato_controller(beets_exec):
+    return SeratoController(
+        subsonic_orchestrator=mock.Mock(),
+        serato_crate_orchestrator=mock.Mock(),
+        serato_backup_file_handler=mock.Mock(),
+        file_browser_file_handler=mock.Mock(),
+        rb_backup_file_handler=mock.Mock(),
+        rb_xml_controller=mock.Mock(),
+        db_controller=mock.MagicMock(),
+        wishlist_reconcile_service=mock.Mock(),
+        serving_music_path_base="foo",
+        beets_exec=beets_exec,
+    )
+
+
+def _run_rekordbox(controller):
+    controller._import_to_beets(
+        "demoadmin", zip_path=None, audio_path=mock.Mock(), rekordbox_xml=mock.Mock()
+    )
+
+
+def _run_serato(controller):
+    controller._import_to_beets("demoadmin", zip_path=None, audio_path=mock.Mock())
+
+
+CONTROLLERS = [
+    pytest.param(_make_rekordbox_xml_controller, _run_rekordbox, id="rekordbox"),
+    pytest.param(_serato_controller, _run_serato, id="serato"),
+]
+
+
+@pytest.mark.parametrize("make, run", CONTROLLERS)
+def test_a_staging_failure_discards_staging_and_reraises(make, run):
+    beets_exec = BeetsExec()
+    controller = make(beets_exec)
+    rb_handler = controller._rb_backup_file_handler
+    held = []
+    rb_handler.stage_for_import.side_effect = OSError(28, "No space left on device")
+    rb_handler.discard_staging.side_effect = lambda *_: held.append(
+        beets_exec._lock_for("beetsdemoadmin").locked()
+    )
+
+    with mock.patch("pymix.clients.beets_exec.docker") as mock_docker:
+        with pytest.raises(OSError):
+            run(controller)
+
+    rb_handler.discard_staging.assert_called_once_with("demoadmin")
+    assert held == [True]
+    mock_docker.execute.assert_not_called()
+
+
+@pytest.mark.parametrize("make, run", CONTROLLERS)
+def test_a_beets_failure_discards_staging_and_reraises(make, run):
+    controller = make(BeetsExec())
+
+    with mock.patch("pymix.clients.beets_exec.docker") as mock_docker:
+        mock_docker.execute.side_effect = RuntimeError("beets died")
+        with pytest.raises(RuntimeError, match="beets died"):
+            run(controller)
+
+    controller._rb_backup_file_handler.discard_staging.assert_called_once_with("demoadmin")
+
+
+@pytest.mark.parametrize("make, run", CONTROLLERS)
+def test_a_successful_import_does_not_discard_staging(make, run):
+    controller = make(BeetsExec())
+
+    with mock.patch("pymix.clients.beets_exec.docker") as mock_docker:
+        mock_docker.execute.return_value = []
+        run(controller)
+
+    controller._rb_backup_file_handler.discard_staging.assert_not_called()
